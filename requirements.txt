@@ -1,7 +1,0 @@
-fastapi
-httpx
-uvicorn
-firebase-admin
-pydantic
-pytest
-python-dotenv
