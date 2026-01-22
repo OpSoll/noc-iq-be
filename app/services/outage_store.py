@@ -1,0 +1,34 @@
+from typing import Dict, List
+from app.models import Outage
+
+
+class OutageStore:
+    """
+    Simple in-memory store for outages.
+    Data is lost on server restart.
+    """
+
+    def __init__(self):
+        self._data: Dict[str, Outage] = {}
+
+    def list(self) -> List[Outage]:
+        return list(self._data.values())
+
+    def get(self, outage_id: str) -> Outage | None:
+        return self._data.get(outage_id)
+
+    def create(self, outage: Outage) -> Outage:
+        self._data[outage.id] = outage
+        return outage
+
+    def update(self, outage_id: str, outage: Outage) -> Outage:
+        self._data[outage_id] = outage
+        return outage
+
+    def delete(self, outage_id: str) -> None:
+        if outage_id in self._data:
+            del self._data[outage_id]
+
+
+# Singleton store instance
+outage_store = OutageStore()
