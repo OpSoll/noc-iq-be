@@ -1,5 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel
+from typing import Optional
 
 
 class PaymentTransaction(BaseModel):
@@ -13,4 +14,4 @@ class PaymentTransaction(BaseModel):
     status: str  
     outage_id: str
     created_at: datetime
-    confirmed_at: datetime | None = None
+    confirmed_at: Optional[datetime] = None
