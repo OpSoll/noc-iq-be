@@ -5,3 +5,5 @@ nociq.json
 .venv/
 .pytest_cache/
 .DS_Store
+
+venv

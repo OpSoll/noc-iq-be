@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from app.models import Outage
 
 
@@ -14,7 +14,7 @@ class OutageStore:
     def list(self) -> List[Outage]:
         return list(self._data.values())
 
-    def get(self, outage_id: str) -> Outage | None:
+    def get(self, outage_id: str) -> Optional[Outage]:
         return self._data.get(outage_id)
 
     def create(self, outage: Outage) -> Outage:
