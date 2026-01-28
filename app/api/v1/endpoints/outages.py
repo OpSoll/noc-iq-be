@@ -1,6 +1,7 @@
 from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from app.models.enums import Severity, OutageStatus
 
 from app.models import Outage, OutageCreate, OutageUpdate
 from app.services.outage_store import outage_store
@@ -9,7 +10,11 @@ router = APIRouter()
 
 
 @router.get("/", response_model=List[Outage])
-def list_outages():
+
+def list_outages(
+    severity: Severity | None = None,
+    status: OutageStatus | None = None,
+):
     return outage_store.list()
 
 
