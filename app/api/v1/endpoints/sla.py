@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from app.models.sla import SLAPreviewRequest
 from app.services.sla import SLACalculator
 from app.models import SLAResult
 
@@ -15,3 +16,12 @@ def calculate_sla(outage_id: str, severity: str, mttr_minutes: int):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+@router.post("/preview")
+def preview_sla(payload: SLAPreviewRequest):
+    result = calculate_sla(
+        outage_id="PREVIEW",
+        severity=payload.severity.value,
+        mttr_minutes=payload.mttr_minutes,
+    )
+    return result
