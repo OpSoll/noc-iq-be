@@ -1,5 +1,5 @@
 from typing import Dict, List, Optional
-from app.models import Outage
+from app.models import Outage, outage
 
 
 class OutageStore:
@@ -28,7 +28,16 @@ class OutageStore:
     def delete(self, outage_id: str) -> None:
         if outage_id in self._data:
             del self._data[outage_id]
+    
+    def resolve(self, outage_id: str, mttr_minutes: int):
+        outage = self.get(outage_id)
+        if not outage:
+            return None
 
+        outage.status = OutageStatus.resolved
+        outage.mttr_minutes = mttr_minutes
+
+        return outage
 
 # Singleton store instance
 outage_store = OutageStore()
