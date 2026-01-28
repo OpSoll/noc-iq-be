@@ -30,3 +30,6 @@ class Outage(BaseModel):
     created_by: Optional[str] = None
     location: Optional[Location] = None
     sla_status: Optional[SLAStatus] = None
+
+class ResolveOutageRequest(BaseModel):
+    mttr_minutes: int

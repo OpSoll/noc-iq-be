@@ -1,6 +1,9 @@
 from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from app.models.outage import ResolveOutageRequest
+from app.models.enums import OutageStatus
+from app.services.sla import calculate_sla
 
 from app.models import Outage, OutageCreate, OutageUpdate
 from app.services.outage_store import outage_store
@@ -54,3 +57,20 @@ def delete_outage(outage_id: str):
 
     outage_store.delete(outage_id)
     return {"message": "Outage deleted successfully"}
+
+@router.post("/{outage_id}/resolve")
+def resolve_outage(outage_id: str, payload: ResolveOutageRequest):
+    outage = outage_store.resolve(outage_id, payload.mttr_minutes)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    sla = calculate_sla(
+        outage_id=outage.id,
+        severity=outage.severity.value,
+        mttr_minutes=payload.mttr_minutes,
+    )
+
+    return {
+        "outage": outage,
+        "sla": sla,
+    }
