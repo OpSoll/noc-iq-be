@@ -1,7 +1,9 @@
 from pydantic import BaseModel
+from app.models.enums import Severity
 
 
-class SLAResult(BaseModel):
+class SLAPreviewRequest(BaseModel):
+    severity: Severity
     outage_id: str
     status: str  # "met" or "violated"
     mttr_minutes: int
