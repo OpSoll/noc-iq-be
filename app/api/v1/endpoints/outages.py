@@ -78,3 +78,20 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest):
         "outage": outage,
         "sla": sla,
     }
+
+@router.post("/{outage_id}/recompute-sla")
+def recompute_sla(outage_id: str):
+    outage = outage_store.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    if outage.status != OutageStatus.resolved:
+        raise HTTPException(status_code=400, detail="Outage not resolved yet")
+
+    sla = calculate_sla(
+        outage_id=outage.id,
+        severity=outage.severity.value,
+        mttr_minutes=outage.mttr_minutes,
+    )
+
+    return sla
