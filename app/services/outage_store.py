@@ -1,5 +1,7 @@
 from typing import Dict, List, Optional
 from app.models import Outage, outage
+from app.services.sla import calculate_sla
+from app.models.enums import OutageStatus
 
 
 class OutageStore:
@@ -65,3 +67,24 @@ class OutageStore:
 
 # Singleton store instance
 outage_store = OutageStore()
+
+def list_violations(self): 
+    violations = []
+
+    for outage in self._outages.values():
+        if outage.status != OutageStatus.resolved:
+            continue
+
+        sla = calculate_sla(
+            outage_id=outage.id,
+            severity=outage.severity.value,
+            mttr_minutes=outage.mttr_minutes,
+        )
+
+        if sla["status"] == "violated":
+            violations.append({
+                "outage": outage,
+                "sla": sla,
+            })
+
+    return violations

@@ -98,6 +98,11 @@ def recompute_sla(outage_id: str):
 
     return sla
 
+
+@router.get("/violations")
+def list_violations():
+    return outage_store.list_violations()
+
 @router.get("")
 def list_outages(
     severity: Severity | None = None,
