@@ -13,8 +13,32 @@ class OutageStore:
     def __init__(self):
         self._data: Dict[str, Outage] = {}
 
-    def list(self) -> List[Outage]:
-        return list(self._data.values())
+    def list(
+    self,
+    severity: Severity | None = None,
+    status: OutageStatus | None = None,
+    page: int = 1,
+    page_size: int = 20,
+):
+    items = list(self._outages.values())
+
+    # Apply filters (if any already exist)
+    if severity:
+        items = [o for o in items if o.severity == severity]
+    if status:
+        items = [o for o in items if o.status == status]
+
+    total = len(items)
+
+    start = (page - 1) * page_size
+    end = start + page_size
+
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
     def get(self, outage_id: str) -> Optional[Outage]:
         return self._data.get(outage_id)
