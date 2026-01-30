@@ -1,7 +1,7 @@
-from typing import Dict, List, Optional
-from app.models import Outage, outage
-from app.services.sla import calculate_sla
-from app.models.enums import OutageStatus
+from typing import Dict, Optional
+from app.models import Outage
+from app.services.sla import SLACalculator
+from app.models.enums import OutageStatus, Severity
 
 
 class OutageStore:
@@ -14,31 +14,31 @@ class OutageStore:
         self._data: Dict[str, Outage] = {}
 
     def list(
-    self,
-    severity: Severity | None = None,
-    status: OutageStatus | None = None,
-    page: int = 1,
-    page_size: int = 20,
-):
-    items = list(self._outages.values())
+        self,
+        severity: Severity | None = None,
+        status: OutageStatus | None = None,
+        page: int = 1,
+        page_size: int = 20,
+    ):
+        items = list(self._data.values())
 
-    # Apply filters (if any already exist)
-    if severity:
-        items = [o for o in items if o.severity == severity]
-    if status:
-        items = [o for o in items if o.status == status]
+        if severity:
+            items = [o for o in items if o.severity == severity]
 
-    total = len(items)
+        if status:
+            items = [o for o in items if o.status == status]
 
-    start = (page - 1) * page_size
-    end = start + page_size
+        total = len(items)
 
-    return {
-        "items": items[start:end],
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-    }
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        return {
+            "items": items[start:end],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     def get(self, outage_id: str) -> Optional[Outage]:
         return self._data.get(outage_id)
@@ -52,9 +52,8 @@ class OutageStore:
         return outage
 
     def delete(self, outage_id: str) -> None:
-        if outage_id in self._data:
-            del self._data[outage_id]
-    
+        self._data.pop(outage_id, None)
+
     def resolve(self, outage_id: str, mttr_minutes: int):
         outage = self.get(outage_id)
         if not outage:
@@ -62,29 +61,29 @@ class OutageStore:
 
         outage.status = OutageStatus.resolved
         outage.mttr_minutes = mttr_minutes
-
         return outage
 
-# Singleton store instance
+    def list_violations(self):
+        violations = []
+
+        for outage in self._data.values():
+            if outage.status != OutageStatus.resolved:
+                continue
+
+            sla = SLACalculator.calculate(
+                outage_id=outage.id,
+                severity=outage.severity.value,
+                mttr_minutes=outage.mttr_minutes,
+            )
+
+            if sla["status"] == "violated":
+                violations.append({
+                    "outage": outage,
+                    "sla": sla,
+                })
+
+        return violations
+
+
+# Singleton instance
 outage_store = OutageStore()
-
-def list_violations(self): 
-    violations = []
-
-    for outage in self._outages.values():
-        if outage.status != OutageStatus.resolved:
-            continue
-
-        sla = calculate_sla(
-            outage_id=outage.id,
-            severity=outage.severity.value,
-            mttr_minutes=outage.mttr_minutes,
-        )
-
-        if sla["status"] == "violated":
-            violations.append({
-                "outage": outage,
-                "sla": sla,
-            })
-
-    return violations

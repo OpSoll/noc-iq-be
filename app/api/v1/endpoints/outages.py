@@ -1,25 +1,25 @@
 from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
-from app.models.outage import ResolveOutageRequest
-from app.services.sla import calculate_sla
-from app.models.enums import Severity, OutageStatus
 
+from app.models.outage import ResolveOutageRequest
+from app.models.enums import Severity, OutageStatus
 from app.models import Outage, OutageCreate, OutageUpdate
+
 from app.services.outage_store import outage_store
+from app.services.sla import SLACalculator
 
 router = APIRouter()
 
 
 @router.get("/", response_model=List[Outage])
-
 def list_outages(
     severity: Severity | None = None,
     status: OutageStatus | None = None,
     page: int = 1,
     page_size: int = 20,
 ):
-    return outage_store.list()
+    return outage_store.list(severity, status, page, page_size)
 
 
 @router.get("/{outage_id}", response_model=Outage)
@@ -64,13 +64,14 @@ def delete_outage(outage_id: str):
     outage_store.delete(outage_id)
     return {"message": "Outage deleted successfully"}
 
+
 @router.post("/{outage_id}/resolve")
 def resolve_outage(outage_id: str, payload: ResolveOutageRequest):
     outage = outage_store.resolve(outage_id, payload.mttr_minutes)
     if not outage:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    sla = calculate_sla(
+    sla = SLACalculator.calculate(
         outage_id=outage.id,
         severity=outage.severity.value,
         mttr_minutes=payload.mttr_minutes,
@@ -81,6 +82,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest):
         "sla": sla,
     }
 
+
 @router.post("/{outage_id}/recompute-sla")
 def recompute_sla(outage_id: str):
     outage = outage_store.get(outage_id)
@@ -90,7 +92,7 @@ def recompute_sla(outage_id: str):
     if outage.status != OutageStatus.resolved:
         raise HTTPException(status_code=400, detail="Outage not resolved yet")
 
-    sla = calculate_sla(
+    sla = SLACalculator.calculate(
         outage_id=outage.id,
         severity=outage.severity.value,
         mttr_minutes=outage.mttr_minutes,
@@ -102,12 +104,3 @@ def recompute_sla(outage_id: str):
 @router.get("/violations")
 def list_violations():
     return outage_store.list_violations()
-
-@router.get("")
-def list_outages(
-    severity: Severity | None = None,
-    status: OutageStatus | None = None,
-    page: int = 1,
-    page_size: int = 20,
-):
-    return outage_store.list(severity, status, page, page_size)

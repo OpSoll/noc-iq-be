@@ -1,13 +1,19 @@
 from pydantic import BaseModel
+from typing import Literal
+
+from pydantic import BaseModel
 from app.models.enums import Severity
 
 
 class SLAPreviewRequest(BaseModel):
     severity: Severity
+    mttr_minutes: int
+
+class SLAResult(BaseModel):
     outage_id: str
-    status: str  # "met" or "violated"
+    status: Literal["met", "violated"]
     mttr_minutes: int
     threshold_minutes: int
-    amount: float  # negative = penalty, positive = reward
-    payment_type: str  # "reward" or "penalty"
-    rating: str  # "exceptional", "excellent", "good", "poor"
+    amount: int
+    payment_type: Literal["reward", "penalty"]
+    rating: Literal["exceptional", "excellent", "good", "poor"]
