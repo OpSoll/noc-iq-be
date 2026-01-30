@@ -2,7 +2,6 @@ from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-
 class Location(BaseModel):
     latitude: float
     longitude: float
@@ -30,6 +29,14 @@ class Outage(BaseModel):
     created_by: Optional[str] = None
     location: Optional[Location] = None
     sla_status: Optional[SLAStatus] = None
+
+
+class PaginatedOutages(BaseModel):
+    items: List[Outage]
+    total: int
+    page: int
+    page_size: int
+
 
 class ResolveOutageRequest(BaseModel):
     mttr_minutes: int

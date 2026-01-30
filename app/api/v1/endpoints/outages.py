@@ -2,7 +2,10 @@ from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
 
-from app.models.outage import ResolveOutageRequest
+from app.models.outage import (
+    ResolveOutageRequest,
+    PaginatedOutages,
+)
 from app.models.enums import Severity, OutageStatus
 from app.models import Outage, OutageCreate, OutageUpdate
 
@@ -12,7 +15,7 @@ from app.services.sla import SLACalculator
 router = APIRouter()
 
 
-@router.get("/", response_model=List[Outage])
+@router.get("/", response_model=PaginatedOutages)
 def list_outages(
     severity: Severity | None = None,
     status: OutageStatus | None = None,
@@ -20,6 +23,8 @@ def list_outages(
     page_size: int = 20,
 ):
     return outage_store.list(severity, status, page, page_size)
+
+
 
 
 @router.get("/{outage_id}", response_model=Outage)
