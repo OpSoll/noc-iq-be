@@ -84,6 +84,9 @@ class OutageStore:
 
         return violations
 
+        def list_all(self):
+    return list(self._outages.values())
+
 
 # Singleton instance
 outage_store = OutageStore()

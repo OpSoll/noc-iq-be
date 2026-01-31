@@ -1,6 +1,8 @@
 from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from fastapi import Response
+from app.utils.exporter import export_outages
 
 from app.models.outage import (
     ResolveOutageRequest,
@@ -104,6 +106,21 @@ def recompute_sla(outage_id: str):
     )
 
     return sla
+
+    @router.get("/export")
+def export_outages_endpoint(format: str = "json"):
+    data = outage_store.list_all()
+
+    exported = export_outages(data, format)
+
+    if format == "csv":
+        return Response(
+            content=exported,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=outages.csv"},
+        )
+
+    return exported
 
 
 @router.get("/violations")
