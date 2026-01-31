@@ -84,6 +84,12 @@ class OutageStore:
 
         return violations
 
+        def bulk_create(self, outages: list[OutageCreate]):
+    created = []
+    for payload in outages:
+        created.append(self.create(payload))
+    return created
+
 
 # Singleton instance
 outage_store = OutageStore()

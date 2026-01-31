@@ -1,6 +1,8 @@
 from typing import List
 from fastapi import APIRouter, HTTPException
 from datetime import datetime
+from app.models.outage import BulkOutageCreate
+
 
 from app.models.outage import (
     ResolveOutageRequest,
@@ -109,3 +111,11 @@ def recompute_sla(outage_id: str):
 @router.get("/violations")
 def list_violations():
     return outage_store.list_violations()
+
+    @router.post("/bulk")
+def bulk_create_outages(payload: BulkOutageCreate):
+    created = outage_store.bulk_create(payload.outages)
+    return {
+        "count": len(created),
+        "items": created,
+    }
