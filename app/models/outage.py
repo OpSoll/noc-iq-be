@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
+
 class Location(BaseModel):
     latitude: float
     longitude: float
@@ -40,3 +41,6 @@ class PaginatedOutages(BaseModel):
 
 class ResolveOutageRequest(BaseModel):
     mttr_minutes: int
+
+class BulkOutageCreate(BaseModel):
+    outages: List[OutageCreate]

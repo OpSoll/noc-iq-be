@@ -3,6 +3,9 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime
 from fastapi import Response
 from app.utils.exporter import export_outages
+from app.services.audit_log import audit_log
+from app.models.outage import BulkOutageCreate
+
 
 from app.models.outage import (
     ResolveOutageRequest,
@@ -43,6 +46,7 @@ def create_outage(payload: OutageCreate):
         **payload.model_dump(),
         resolved_at=None,
         sla_status=None,
+        audit_log.log("outage_created", {"id": outage.id})
     )
     return outage_store.create(outage)
 
@@ -78,6 +82,8 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest):
     if not outage:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    audit_log.log("outage_resolved", {"id": outage.id, "mttr": payload.mttr_minutes})
+
     sla = SLACalculator.calculate(
         outage_id=outage.id,
         severity=outage.severity.value,
@@ -98,6 +104,8 @@ def recompute_sla(outage_id: str):
 
     if outage.status != OutageStatus.resolved:
         raise HTTPException(status_code=400, detail="Outage not resolved yet")
+        audit_log.log("sla_recomputed", {"id": outage.id})
+
 
     sla = SLACalculator.calculate(
         outage_id=outage.id,
@@ -126,3 +134,11 @@ def export_outages_endpoint(format: str = "json"):
 @router.get("/violations")
 def list_violations():
     return outage_store.list_violations()
+
+    @router.post("/bulk")
+def bulk_create_outages(payload: BulkOutageCreate):
+    created = outage_store.bulk_create(payload.outages)
+    return {
+        "count": len(created),
+        "items": created,
+    }
