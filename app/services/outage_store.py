@@ -84,6 +84,8 @@ class OutageStore:
 
         return violations
 
+        def list_all(self):
+    return list(self._outages.values())
         def bulk_create(self, outages: list[OutageCreate]):
     created = []
     for payload in outages:
