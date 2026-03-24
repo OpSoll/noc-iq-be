@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
@@ -24,15 +24,20 @@ class SLARepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create(self, sla_data: dict) -> SLAResult:
+    def create(self, sla_data: SLAResult | Mapping[str, object]) -> SLAResult:
+        if isinstance(sla_data, SLAResult):
+            payload = sla_data.model_dump()
+        else:
+            payload = dict(sla_data)
+
         orm = SLAResultORM(
-            outage_id=sla_data["outage_id"],
-            status=sla_data["status"],
-            mttr_minutes=sla_data["mttr_minutes"],
-            threshold_minutes=sla_data["threshold_minutes"],
-            amount=sla_data["amount"],
-            payment_type=sla_data["payment_type"],
-            rating=sla_data["rating"],
+            outage_id=payload["outage_id"],
+            status=payload["status"],
+            mttr_minutes=payload["mttr_minutes"],
+            threshold_minutes=payload["threshold_minutes"],
+            amount=payload["amount"],
+            payment_type=payload["payment_type"],
+            rating=payload["rating"],
         )
         self.db.add(orm)
         self.db.commit()

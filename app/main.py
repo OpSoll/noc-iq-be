@@ -1,17 +1,19 @@
-from fastapi import FastAPI
-from app.api.v1.router import api_router
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
+
+from app.api.v1.router import api_router
+from app.core.config import settings
 
 app = FastAPI(
-    title="NOCIQ API",
-    version="1.0.0",
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
     description="NOCIQ Backend API"
 )
 
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://localhost:3000"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

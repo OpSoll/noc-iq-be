@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -17,3 +18,5 @@ class SLAResultORM(Base):
     payment_type = Column(String(20), nullable=False)     # "reward" | "penalty"
     rating = Column(String(20), nullable=False)           # "exceptional" | "excellent" | "good" | "poor"
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    disputes = relationship("SLADispute", back_populates="sla_result")

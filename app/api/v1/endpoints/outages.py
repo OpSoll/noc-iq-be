@@ -1,12 +1,10 @@
-from typing import List
-
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.enums import OutageStatus, Severity
-from app.models.outage import BulkOutageCreate, PaginatedOutages, ResolveOutageRequest
-from app.models import Outage, OutageCreate, OutageUpdate
+from app.models.outage import PaginatedOutages, ResolveOutageRequest
+from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.repositories.outage_repository import OutageRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
@@ -20,7 +18,10 @@ router = APIRouter()
 def export_outages_endpoint(format: str = "json", db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     data = repo.list_all()
-    exported = export_outages(data, format)
+    try:
+        exported = export_outages(data, format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if format == "csv":
         return Response(
@@ -106,14 +107,14 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
 
     sla = SLACalculator.calculate(
         outage_id=outage.id,
-        severity=outage.severity.value,
+        severity=outage.severity,
         mttr_minutes=payload.mttr_minutes,
     )
 
     sla_repo = SLARepository(db)
-    sla_repo.create(sla)
+    stored_sla = sla_repo.create(sla)
 
-    return {"outage": outage, "sla": sla}
+    return {"outage": outage, "sla": stored_sla}
 
 
 @router.post("/{outage_id}/recompute-sla")
@@ -129,12 +130,12 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     orm = repo.get_orm(outage_id)
     sla = SLACalculator.calculate(
         outage_id=outage.id,
-        severity=outage.severity.value,
+        severity=outage.severity,
         mttr_minutes=orm.mttr_minutes,
     )
 
     sla_repo = SLARepository(db)
-    sla_repo.create(sla)
+    stored_sla = sla_repo.create(sla)
 
     audit_log.log("sla_recomputed", {"id": outage.id})
-    return sla
+    return stored_sla

@@ -179,7 +179,7 @@ class OutageRepository:
                 severity=orm.severity,
                 mttr_minutes=orm.mttr_minutes,
             )
-            if sla["status"] == "violated":
+            if sla.status == "violated":
                 violations.append({"outage": _orm_to_pydantic(orm), "sla": sla})
 
         return violations

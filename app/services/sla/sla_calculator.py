@@ -29,19 +29,19 @@ class SLACalculator:
             )
 
         # Case 2: SLA met → reward
-        performance_ratio = mttr_minutes / threshold
+        performance_ratio = 0 if threshold == 0 else (mttr_minutes * 100) // threshold
 
-        if performance_ratio < 0.5:
-            multiplier = 2.0
+        if performance_ratio < 50:
+            multiplier = 200
             rating = "exceptional"
-        elif performance_ratio < 0.75:
-            multiplier = 1.5
+        elif performance_ratio < 75:
+            multiplier = 150
             rating = "excellent"
         else:
-            multiplier = 1.0
+            multiplier = 100
             rating = "good"
 
-        reward = config["reward_base"] * multiplier
+        reward = (config["reward_base"] * multiplier) // 100
 
         return SLAResult(
             outage_id=outage_id,
