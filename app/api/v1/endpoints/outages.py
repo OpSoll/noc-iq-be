@@ -113,7 +113,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
     sla = translate_contract_result(raw_contract_result)
 
     sla_repo = SLARepository(db)
-    stored_sla = sla_repo.create(sla)
+    stored_sla = sla_repo.create_if_changed(sla)
 
     return {"outage": outage, "sla": stored_sla}
 
@@ -137,7 +137,7 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     sla = translate_contract_result(raw_contract_result)
 
     sla_repo = SLARepository(db)
-    stored_sla = sla_repo.create(sla)
+    stored_sla = sla_repo.create_if_changed(sla)
 
     audit_log.log("sla_recomputed", {"id": outage.id})
     return stored_sla

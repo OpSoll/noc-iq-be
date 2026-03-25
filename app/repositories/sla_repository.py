@@ -44,6 +44,18 @@ class SLARepository:
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
 
+    def create_if_changed(self, sla_data: SLAResult | Mapping[str, object]) -> SLAResult:
+        if isinstance(sla_data, SLAResult):
+            payload = sla_data.model_dump()
+        else:
+            payload = dict(sla_data)
+
+        latest = self.get_by_outage(payload["outage_id"])
+        if latest and latest.model_dump() == payload:
+            return latest
+
+        return self.create(payload)
+
     def get_by_outage(self, outage_id: str) -> Optional[SLAResult]:
         orm = (
             self.db.query(SLAResultORM)
