@@ -1,7 +1,6 @@
 from datetime import datetime
-from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -11,6 +10,21 @@ from app.schemas.sla_dispute import DisputeFlagRequest, DisputeResolveRequest, D
 router = APIRouter()
 
 
+@router.get(
+    "/disputes",
+    response_model=list[DisputeResponse],
+    summary="List SLA disputes",
+)
+def list_disputes(
+    status_filter: DisputeStatus | None = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+):
+    query = db.query(SLADispute).order_by(SLADispute.flagged_at.desc())
+    if status_filter is not None:
+        query = query.filter(SLADispute.status == status_filter)
+    return query.all()
+
+
 @router.post(
     "/{sla_result_id}/dispute",
     response_model=DisputeResponse,
@@ -18,7 +32,7 @@ router = APIRouter()
     summary="Flag an SLA result for dispute",
 )
 def flag_dispute(
-    sla_result_id: UUID,
+    sla_result_id: int,
     payload: DisputeFlagRequest,
     db: Session = Depends(get_db),
 ):
@@ -53,7 +67,7 @@ def flag_dispute(
     summary="Resolve or reject an SLA dispute",
 )
 def resolve_dispute(
-    sla_result_id: UUID,
+    sla_result_id: int,
     payload: DisputeResolveRequest,
     db: Session = Depends(get_db),
 ):
@@ -93,7 +107,7 @@ def resolve_dispute(
     summary="Get the dispute for an SLA result",
 )
 def get_dispute(
-    sla_result_id: UUID,
+    sla_result_id: int,
     db: Session = Depends(get_db),
 ):
     dispute = (

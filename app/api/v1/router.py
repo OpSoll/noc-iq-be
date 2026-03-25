@@ -6,6 +6,7 @@ from app.api.v1.endpoints import (
     auth,
     outages,
     sla,
+    sla_dispute,
     payments,
     wallets,
 )
@@ -16,5 +17,6 @@ api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(audit.router)
 api_router.include_router(outages.router, prefix="/outages", tags=["outages"])
 api_router.include_router(sla.router, prefix="/sla", tags=["sla"])
+api_router.include_router(sla_dispute.router, prefix="/sla", tags=["sla-disputes"])
 api_router.include_router(payments.router, prefix="/payments", tags=["payments"])
 api_router.include_router(wallets.router, prefix="/wallets", tags=["wallets"])
