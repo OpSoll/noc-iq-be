@@ -19,6 +19,8 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_acks_late=True,
+    task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
+    task_store_eager_result=True,
     worker_prefetch_multiplier=1,
     result_expires=86400,  # 24 hours
 
