@@ -35,3 +35,19 @@ class SLAPerformanceAggregation(BaseModel):
     violation_rate: float = Field(ge=0.0, le=1.0)
     avg_mttr: float = Field(ge=0.0)
     payout_sum: float
+
+
+class SLADashboardKPI(BaseModel):
+    total_outages: int = Field(ge=0)
+    total_violations: int = Field(ge=0)
+    total_rewards: float = Field(ge=0.0)
+    total_penalties: float = Field(ge=0.0)
+    net_payout: float
+
+
+class SLATrendPoint(BaseModel):
+    date: str
+    total_outages: int = Field(ge=0)
+    violations: int = Field(ge=0)
+    rewards: float = Field(ge=0.0)
+    penalties: float = Field(ge=0.0)

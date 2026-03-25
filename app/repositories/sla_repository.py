@@ -5,7 +5,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.models.orm.sla import SLAResultORM
-from app.models.sla import SLAResult, SLAPerformanceAggregation
+from app.models.sla import SLAResult, SLADashboardKPI, SLAPerformanceAggregation, SLATrendPoint
 
 
 def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
@@ -131,3 +131,66 @@ class SLARepository:
             avg_mttr=round(float(row.avg_mttr or 0.0), 2),
             payout_sum=round(float(row.payout_sum or 0.0), 2),
         )
+
+    def aggregate_dashboard_kpis(self) -> SLADashboardKPI:
+        row = self.db.execute(
+            select(
+                func.count(SLAResultORM.id).label("total_outages"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.status == "violated", 1), else_=0)),
+                    0,
+                ).label("total_violations"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.payment_type == "reward", SLAResultORM.amount), else_=0.0)),
+                    0.0,
+                ).label("total_rewards"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.payment_type == "penalty", func.abs(SLAResultORM.amount)), else_=0.0)),
+                    0.0,
+                ).label("total_penalties"),
+            )
+        ).one()
+
+        total_rewards = round(float(row.total_rewards or 0.0), 2)
+        total_penalties = round(float(row.total_penalties or 0.0), 2)
+        return SLADashboardKPI(
+            total_outages=int(row.total_outages or 0),
+            total_violations=int(row.total_violations or 0),
+            total_rewards=total_rewards,
+            total_penalties=total_penalties,
+            net_payout=round(total_rewards - total_penalties, 2),
+        )
+
+    def aggregate_trends(self, limit_days: int = 7) -> List[SLATrendPoint]:
+        rows = self.db.execute(
+            select(
+                func.date(SLAResultORM.created_at).label("day"),
+                func.count(SLAResultORM.id).label("total_outages"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.status == "violated", 1), else_=0)),
+                    0,
+                ).label("violations"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.payment_type == "reward", SLAResultORM.amount), else_=0.0)),
+                    0.0,
+                ).label("rewards"),
+                func.coalesce(
+                    func.sum(case((SLAResultORM.payment_type == "penalty", func.abs(SLAResultORM.amount)), else_=0.0)),
+                    0.0,
+                ).label("penalties"),
+            )
+            .group_by(func.date(SLAResultORM.created_at))
+            .order_by(func.date(SLAResultORM.created_at).desc())
+            .limit(limit_days)
+        ).all()
+
+        return [
+            SLATrendPoint(
+                date=str(row.day),
+                total_outages=int(row.total_outages or 0),
+                violations=int(row.violations or 0),
+                rewards=round(float(row.rewards or 0.0), 2),
+                penalties=round(float(row.penalties or 0.0), 2),
+            )
+            for row in rows
+        ][::-1]
