@@ -6,6 +6,7 @@ from app.models.wallet import (
     WalletCreateRequest,
     WalletCreateResponse,
     WalletLinkRequest,
+    WalletStatusResponse,
 )
 from app.services.wallet_registry import WalletRegistry
 
@@ -33,6 +34,14 @@ def get_wallet(user_id: str):
     if not wallet:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return wallet
+
+
+@router.get("/{user_id}/status", response_model=WalletStatusResponse)
+def get_wallet_status(user_id: str):
+    wallet_status = WalletRegistry.get_status(user_id)
+    if not wallet_status:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    return wallet_status
 
 
 @router.get("/{address}/balance", response_model=WalletBalanceResponse)

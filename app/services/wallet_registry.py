@@ -10,6 +10,7 @@ from app.models.wallet import (
     WalletCreateRequest,
     WalletCreateResponse,
     WalletLinkRequest,
+    WalletStatusResponse,
 )
 
 
@@ -41,6 +42,7 @@ class WalletRegistry:
             last_updated=cls._now(),
             funded=False,
             active=True,
+            trustline_ready=False,
         )
         cls._wallets_by_user[payload.user_id] = wallet
         cls._wallets_by_address[wallet.public_key] = wallet
@@ -62,6 +64,7 @@ class WalletRegistry:
             last_updated=now,
             funded=payload.funded,
             active=True,
+            trustline_ready=payload.trustline_ready,
         )
         cls._wallets_by_user[payload.user_id] = wallet
         cls._wallets_by_address[payload.public_key] = wallet
@@ -78,10 +81,34 @@ class WalletRegistry:
             return None
 
         xlm_balance = "1.0000000" if wallet.funded else "0.0000000"
+        balances = {
+            "XLM": AssetBalance(balance=xlm_balance, asset_type="native"),
+        }
+        if wallet.trustline_ready:
+            balances["USDC"] = AssetBalance(
+                balance="0.0000000",
+                asset_type="credit_alphanum4",
+                asset_code="USDC",
+                asset_issuer="TEST_ISSUER",
+            )
         return WalletBalanceResponse(
             address=address,
-            balances={
-                "XLM": AssetBalance(balance=xlm_balance, asset_type="native"),
-            },
+            balances=balances,
             last_updated=cls._now(),
+        )
+
+    @classmethod
+    def get_status(cls, user_id: str) -> WalletStatusResponse | None:
+        wallet = cls.get_wallet(user_id)
+        if not wallet:
+            return None
+
+        return WalletStatusResponse(
+            user_id=wallet.user_id,
+            public_key=wallet.public_key,
+            funded=wallet.funded,
+            trustline_ready=wallet.trustline_ready,
+            usable=wallet.funded and wallet.trustline_ready and wallet.active,
+            active=wallet.active,
+            last_updated=wallet.last_updated,
         )
