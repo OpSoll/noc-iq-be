@@ -10,6 +10,7 @@ from app.models.sla import SLAResult, SLAPerformanceAggregation
 
 def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
     return SLAResult(
+        id=orm.id,
         outage_id=orm.outage_id,
         status=orm.status,
         mttr_minutes=orm.mttr_minutes,

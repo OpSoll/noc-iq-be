@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 from app.models.enums import Severity
@@ -10,6 +10,7 @@ class SLAPreviewRequest(BaseModel):
 
 
 class SLAResult(BaseModel):
+    id: Optional[int] = None
     outage_id: str
     status: Literal["met", "violated"]
     mttr_minutes: int

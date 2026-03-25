@@ -1,9 +1,12 @@
+from datetime import datetime
 from typing import List, Optional
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
 from app.models.orm.payment import PaymentTransactionORM
 from app.models.payment import PaymentTransaction
+from app.models.sla import SLAResult
 
 
 def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
@@ -17,6 +20,7 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         to_address=orm.to_address,
         status=orm.status,
         outage_id=orm.outage_id,
+        sla_result_id=orm.sla_result_id,
         created_at=orm.created_at,
         confirmed_at=orm.confirmed_at,
     )
@@ -37,6 +41,7 @@ class PaymentRepository:
             to_address=data.to_address,
             status=data.status,
             outage_id=data.outage_id,
+            sla_result_id=data.sla_result_id,
             created_at=data.created_at,
             confirmed_at=data.confirmed_at,
         )
@@ -49,6 +54,16 @@ class PaymentRepository:
         orm = (
             self.db.query(PaymentTransactionORM)
             .filter(PaymentTransactionORM.id == transaction_id)
+            .first()
+        )
+        if not orm:
+            return None
+        return _orm_to_pydantic(orm)
+
+    def get_by_sla_result(self, sla_result_id: int) -> Optional[PaymentTransaction]:
+        orm = (
+            self.db.query(PaymentTransactionORM)
+            .filter(PaymentTransactionORM.sla_result_id == sla_result_id)
             .first()
         )
         if not orm:
@@ -98,3 +113,28 @@ class PaymentRepository:
         self.db.commit()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
+
+    def create_for_sla_result(self, outage_id: str, sla_result: SLAResult) -> PaymentTransaction:
+        if sla_result.id is None:
+            raise ValueError("SLA result id is required to generate a payment record")
+
+        existing = self.get_by_sla_result(sla_result.id)
+        if existing:
+            return existing
+
+        normalized_amount = abs(float(sla_result.amount))
+        transaction = PaymentTransaction(
+            id=f"pay_{uuid4().hex[:12]}",
+            transaction_hash=f"sla-{sla_result.id}-{sla_result.payment_type}",
+            type=sla_result.payment_type,
+            amount=normalized_amount,
+            asset_code="USDC",
+            from_address="SYSTEM_POOL",
+            to_address="OUTAGE_SETTLEMENT",
+            status="pending",
+            outage_id=outage_id,
+            sla_result_id=sla_result.id,
+            created_at=datetime.utcnow(),
+            confirmed_at=None,
+        )
+        return self.create(transaction)
