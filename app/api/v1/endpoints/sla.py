@@ -4,9 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.sla import SLAPerformanceAggregation, SLAPreviewRequest
+from app.models.sla import (
+    SLAConfigUpdateRequest,
+    SLAPerformanceAggregation,
+    SLAPreviewRequest,
+    SLASeverityConfig,
+)
 from app.repositories.sla_repository import SLARepository
 from app.services.sla import SLACalculator
+from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.models import SLAResult
 
 router = APIRouter()
@@ -31,6 +37,27 @@ def preview_sla(payload: SLAPreviewRequest):
         mttr_minutes=payload.mttr_minutes,
     )
     return result
+
+
+@router.get("/config", response_model=dict[str, SLASeverityConfig])
+def get_sla_config():
+    return get_all_config()
+
+
+@router.get("/config/{severity}", response_model=SLASeverityConfig)
+def get_sla_config_by_severity(severity: str):
+    try:
+        return get_config_for_severity(severity)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/config/{severity}", response_model=SLASeverityConfig)
+def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
+    try:
+        return update_config_for_severity(severity, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/performance/aggregation", response_model=SLAPerformanceAggregation)

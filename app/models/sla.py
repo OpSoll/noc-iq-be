@@ -8,6 +8,7 @@ class SLAPreviewRequest(BaseModel):
     severity: Severity
     mttr_minutes: int
 
+
 class SLAResult(BaseModel):
     outage_id: str
     status: Literal["met", "violated"]
@@ -16,6 +17,16 @@ class SLAResult(BaseModel):
     amount: int
     payment_type: Literal["reward", "penalty"]
     rating: Literal["exceptional", "excellent", "good", "poor"]
+
+
+class SLASeverityConfig(BaseModel):
+    threshold_minutes: int = Field(..., ge=0)
+    penalty_per_minute: int = Field(..., ge=0)
+    reward_base: int = Field(..., ge=0)
+
+
+class SLAConfigUpdateRequest(SLASeverityConfig):
+    pass
 
 
 class SLAPerformanceAggregation(BaseModel):
