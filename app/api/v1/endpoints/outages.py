@@ -5,31 +5,13 @@ from app.db.session import get_db
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
-from app.models.sla import SLAResult
 from app.repositories.outage_repository import OutageRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
-from app.services.contracts import SLAContractAdapter
+from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.utils.exporter import export_outages
 
 router = APIRouter()
-
-
-def _translate_contract_result(raw_result: dict) -> SLAResult:
-    return SLAResult(
-        outage_id=raw_result["outage_id"],
-        status="violated" if raw_result["status"] == "viol" else "met",
-        mttr_minutes=raw_result["mttr_minutes"],
-        threshold_minutes=raw_result["threshold_minutes"],
-        amount=raw_result["amount"],
-        payment_type="penalty" if raw_result["payment_type"] == "pen" else "reward",
-        rating={
-            "top": "exceptional",
-            "high": "excellent",
-            "good": "good",
-            "poor": "poor",
-        }[raw_result["rating"]],
-    )
 
 
 @router.get("/export")
@@ -128,7 +110,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
         severity=outage.severity,
         mttr_minutes=payload.mttr_minutes,
     )
-    sla = _translate_contract_result(raw_contract_result)
+    sla = translate_contract_result(raw_contract_result)
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create(sla)
@@ -152,7 +134,7 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
         severity=outage.severity,
         mttr_minutes=orm.mttr_minutes,
     )
-    sla = _translate_contract_result(raw_contract_result)
+    sla = translate_contract_result(raw_contract_result)
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create(sla)
