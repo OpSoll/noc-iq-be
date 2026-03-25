@@ -55,6 +55,29 @@ class PaymentRepository:
             return None
         return _orm_to_pydantic(orm)
 
+    def list(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        status: Optional[str] = None,
+        outage_id: Optional[str] = None,
+    ) -> tuple[List[PaymentTransaction], int]:
+        query = self.db.query(PaymentTransactionORM)
+
+        if status:
+            query = query.filter(PaymentTransactionORM.status == status)
+        if outage_id:
+            query = query.filter(PaymentTransactionORM.outage_id == outage_id)
+
+        total = query.count()
+        rows = (
+            query.order_by(PaymentTransactionORM.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+            .all()
+        )
+        return [_orm_to_pydantic(r) for r in rows], total
+
     def list_by_outage(self, outage_id: str) -> List[PaymentTransaction]:
         rows = (
             self.db.query(PaymentTransactionORM)
