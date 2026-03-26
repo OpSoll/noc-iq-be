@@ -1,7 +1,5 @@
 from datetime import datetime
 from typing import Optional
-from uuid import UUID
-
 from pydantic import BaseModel, Field
 
 from app.models.sla_dispute import DisputeStatus
@@ -19,8 +17,8 @@ class DisputeResolveRequest(BaseModel):
 
 
 class DisputeResponse(BaseModel):
-    id: UUID
-    sla_result_id: UUID
+    id: str
+    sla_result_id: int
     flagged_by: str
     dispute_reason: str
     flagged_at: datetime
