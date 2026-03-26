@@ -6,6 +6,7 @@ from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.repositories.outage_repository import OutageRepository
+from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
@@ -114,8 +115,10 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create_if_changed(sla)
+    payment_repo = PaymentRepository(db)
+    payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
 
-    return {"outage": outage, "sla": stored_sla}
+    return {"outage": outage, "sla": stored_sla, "payment": payment}
 
 
 @router.post("/{outage_id}/recompute-sla")
@@ -138,6 +141,8 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create_if_changed(sla)
+    payment_repo = PaymentRepository(db)
+    payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
 
     audit_log.log("sla_recomputed", {"id": outage.id})
-    return stored_sla
+    return {"sla": stored_sla, "payment": payment}

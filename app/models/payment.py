@@ -14,6 +14,7 @@ class PaymentTransaction(BaseModel):
     to_address: str
     status: str
     outage_id: str
+    sla_result_id: Optional[int] = None
     created_at: datetime
     confirmed_at: Optional[datetime] = None
 
