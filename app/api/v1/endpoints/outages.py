@@ -10,6 +10,8 @@ from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
+from app.services.webhook_service import trigger_sla_violation_webhooks
+from app.models.webhook import WebhookEvent
 from app.utils.exporter import export_outages
 
 router = APIRouter()
@@ -117,6 +119,14 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
     stored_sla = sla_repo.create_if_changed(sla)
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
+    webhook_event = (
+        WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
+    )
+    trigger_sla_violation_webhooks(
+        db,
+        sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
+        event=webhook_event,
+    )
 
     return {"outage": outage, "sla": stored_sla, "payment": payment}
 
@@ -143,6 +153,14 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     stored_sla = sla_repo.create_if_changed(sla)
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
+    webhook_event = (
+        WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
+    )
+    trigger_sla_violation_webhooks(
+        db,
+        sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
+        event=webhook_event,
+    )
 
     audit_log.log("sla_recomputed", {"id": outage.id})
     return {"sla": stored_sla, "payment": payment}
