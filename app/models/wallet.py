@@ -11,6 +11,7 @@ class Wallet(BaseModel):
     last_updated: datetime
     funded: bool = False
     active: bool = True
+    trustline_ready: bool = False
 
 
 class WalletCreateRequest(BaseModel):
@@ -21,6 +22,7 @@ class WalletLinkRequest(BaseModel):
     user_id: str = Field(..., min_length=1)
     public_key: str = Field(..., min_length=2)
     funded: bool = False
+    trustline_ready: bool = False
 
 
 class WalletCreateResponse(Wallet):
@@ -37,4 +39,14 @@ class AssetBalance(BaseModel):
 class WalletBalanceResponse(BaseModel):
     address: str
     balances: Dict[str, AssetBalance]
+    last_updated: datetime
+
+
+class WalletStatusResponse(BaseModel):
+    user_id: str
+    public_key: str
+    funded: bool
+    trustline_ready: bool
+    usable: bool
+    active: bool
     last_updated: datetime
