@@ -4,6 +4,7 @@ from app.api.v1.endpoints import audit
 
 from app.api.v1.endpoints import (
     auth,
+    jobs,
     outages,
     sla,
     sla_dispute,
@@ -16,6 +17,7 @@ api_router = APIRouter()
 
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(audit.router)
+api_router.include_router(jobs.router)
 api_router.include_router(outages.router, prefix="/outages", tags=["outages"])
 api_router.include_router(sla.router, prefix="/sla", tags=["sla"])
 api_router.include_router(sla_dispute.router, prefix="/sla", tags=["sla-disputes"])
