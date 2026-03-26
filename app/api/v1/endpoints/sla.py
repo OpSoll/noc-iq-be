@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.sla import (
     SLAConfigUpdateRequest,
+    SLADashboardKPI,
     SLAPerformanceAggregation,
     SLAPreviewRequest,
     SLASeverityConfig,
+    SLATrendPoint,
 )
 from app.repositories.sla_repository import SLARepository
 from app.services.sla import SLACalculator
@@ -58,6 +60,21 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
         return update_config_for_severity(severity, payload)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/analytics/dashboard", response_model=SLADashboardKPI)
+def get_sla_dashboard_kpis(db: Session = Depends(get_db)):
+    repo = SLARepository(db)
+    return repo.aggregate_dashboard_kpis()
+
+
+@router.get("/analytics/trends", response_model=list[SLATrendPoint])
+def get_sla_trends(
+    days: int = Query(default=7, ge=1, le=90),
+    db: Session = Depends(get_db),
+):
+    repo = SLARepository(db)
+    return repo.aggregate_trends(limit_days=days)
 
 
 @router.get("/performance/aggregation", response_model=SLAPerformanceAggregation)
