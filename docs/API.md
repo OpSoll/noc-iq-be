@@ -18,6 +18,23 @@ Base URL: `http://localhost:8000` (development) | `https://api.nociq.com` (produ
 
 ---
 
+## Runtime Status
+
+This document mixes current runtime endpoints with some roadmap-style descriptions. For contributor onboarding, use the following status guide first:
+
+- active and routed: `auth`, `audit`, `jobs`, `outages`, `payments`, `sla`, `sla disputes`, `wallets`, `webhooks`
+- strongest current domains: `outages`, `sla`, `audit`, analytics under `/api/v1/sla/*`
+- active but lighter-weight domains: `auth`, `payments`, `wallets`
+- active but operationally dependent: `jobs`, `webhooks`, `sla disputes`
+- not part of the routed runtime: legacy helpers such as `app/services/outage_store.py`
+
+Important:
+
+- if code and this document disagree, treat the router and endpoint modules as source of truth
+- some sections below still describe aspirational production behavior; they should not be read as proof that every subfeature is live today
+
+---
+
 ## Authentication
 
 All authenticated endpoints require a bearer token in the Authorization header:
@@ -29,6 +46,11 @@ Authorization: Bearer <token>
 ### POST `/api/v1/auth/login`
 
 Authenticate user and receive access token.
+
+Current status:
+
+- active and routed
+- currently backed by the lightweight `AuthStore` service rather than a full external auth provider
 
 **Request Body:**
 ```json
@@ -82,6 +104,11 @@ Register new user account.
 ---
 
 ## Outages
+
+Current status:
+
+- active and strongest current domain
+- primary bridge for SLA execution and payout generation
 
 ### GET `/api/v1/outages`
 
@@ -252,6 +279,12 @@ Update an existing outage.
 ---
 
 ## SLA Management
+
+Current status:
+
+- active and strongest current domain
+- analytics endpoints under `/api/v1/sla/analytics/*` and `/api/v1/sla/performance/aggregation` are live
+- runtime can execute through local adapter mode or the contract bridge depending on config
 
 ### GET `/api/v1/sla/status/{outage_id}`
 

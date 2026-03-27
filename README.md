@@ -26,7 +26,7 @@ Important rule:
 - exposing aggregation and audit endpoints
 - acting as the future bridge to Soroban contracts
 
-As of the current stabilized baseline, the backend is strongest in the outage and SLA domains. Some other domains exist in the codebase but are still placeholder or partially wired.
+As of the current stabilized baseline, the backend is strongest in the outage and SLA domains. Other domains are now routed, but not all of them are equally production-ready.
 
 ## Current Stack
 
@@ -49,16 +49,26 @@ Current active routes are wired through [app/api/v1/router.py](/Users/m-ibinola/
 
 - `/health`
 - `/api/v1/audit`
+- `/api/v1/jobs`
 - `/api/v1/outages`
 - `/api/v1/sla`
+- `/api/v1/sla/disputes`
 - `/api/v1/auth`
 - `/api/v1/payments`
+- `/api/v1/webhooks`
 - `/api/v1/wallets`
 
-Important nuance:
+Module maturity on the routed runtime:
 
-- `outages` and `sla` are the most implemented domains
-- `payments`, `wallets`, and `auth` currently expose minimal placeholder endpoints
+- strongest and most integration-focused: `outages`, `sla`, `audit`
+- active and functional with lighter implementations: `auth`, `payments`, `wallets`
+- active but operationally dependent on database or worker infrastructure: `jobs`, `webhooks`, `sla disputes`
+
+Dormant or contributor-only paths:
+
+- `app/services/outage_store.py` is a legacy helper and not part of the routed runtime
+- local task and webhook support still depend on optional infrastructure like Redis and Celery for full behavior
+- the backend contains both a local SLA execution path and a contract adapter path; `CONTRACT_EXECUTION_MODE` determines which bridge is active at runtime
 
 ## Outage And SLA Flow
 
@@ -79,7 +89,7 @@ Key files:
 - `app/services/sla/sla_calculator.py`
 - `app/services/sla/config.py`
 
-Right now, SLA execution is still local backend logic. The repo is prepared to be the contract bridge, but a full contract-backed adapter is not yet the primary runtime path.
+The backend now includes both a local SLA calculator and a contract adapter surface. By default it uses the local adapter mode, but the runtime is structured so contract-backed execution can be enabled through configuration.
 
 ## Project Structure
 
@@ -175,11 +185,10 @@ This backend is stabilized, but not feature-complete.
 
 Examples:
 
-- `payments` is still a placeholder surface
-- `wallets` is still a placeholder surface
-- `auth` is still a placeholder surface
-- some operational modules such as jobs, webhooks, and disputes exist in the repo but are not part of the main routed runtime path
-- the live SLA path is currently backend-local logic rather than a full Soroban invocation path
+- `auth` and `wallets` are active but currently backed by lightweight in-memory stores rather than durable identity infrastructure
+- `jobs` and `webhooks` are routed, but they rely on optional worker infrastructure to be fully operational outside eager or local modes
+- the contract path exists, but the default runtime still favors the local adapter mode
+- documentation and contributor expectations should follow the routed API surface, not every helper or legacy module under `app/services`
 
 ## Related Repositories
 
