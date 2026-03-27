@@ -133,6 +133,14 @@ CELERY_BROKER_URL=redis://localhost:6379/0
 CELERY_RESULT_BACKEND=redis://localhost:6379/0
 ```
 
+Startup validation fails fast if critical settings are malformed. In particular:
+
+- `API_V1_PREFIX` must start with `/`
+- `DATABASE_URL` must include a URL scheme
+- `ALLOWED_ORIGINS` must be valid `http` or `https` origins
+- `STELLAR_NETWORK` and `CONTRACT_EXECUTION_MODE` must be supported values
+- when `CELERY_TASK_ALWAYS_EAGER=false`, both Celery URLs must be present
+
 ### Run Migrations
 
 ```bash
