@@ -7,13 +7,9 @@ This repository powers the backend API for NOC IQ, a network operations intellig
 It is responsible for:
 - managing outages and RCA
 - calculating SLA performance
-- triggering blockchain-based payments (Stellar)
-- serving analytics and reports
-- handling authentication and wallet management
-
-The backend is built with FastAPI and integrates with Stellar smart contracts for automated payments.
-
-Reference: :contentReference[oaicite:0]{index=0}
+- exposing analytics and audit data
+- brokering contract-aware payout logic
+- handling authentication, payments, wallet state, jobs, disputes, and webhooks through the API surface
 
 ---
 
@@ -21,11 +17,11 @@ Reference: :contentReference[oaicite:0]{index=0}
 
 - Framework: FastAPI
 - Language: Python (3.9+)
-- Database: Firestore
-- Auth: Firebase + JWT
-- Blockchain: Stellar SDK + Soroban smart contracts
+- Database: PostgreSQL via SQLAlchemy
+- Auth: lightweight in-repo auth store
+- Blockchain: Soroban-aware backend bridge with configurable execution mode
 - Validation: Pydantic
-- Async: async/await
+- Async: FastAPI + Celery-oriented modules
 
 ---
 
@@ -67,10 +63,10 @@ Important:
 
 ---
 
-### 3. Payments (Stellar Integration)
+### 3. Payments
 
 Responsible for:
-- executing SLA payments
+- exposing payment records tied to SLA outcomes
 - tracking transaction status
 - storing transaction history
 
@@ -86,8 +82,8 @@ Outage → SLA Calculation → Smart Contract → Payment → Record stored
 ### 4. Wallet Management
 
 Responsible for:
-- creating Stellar wallets
-- retrieving balances
+- creating lightweight wallet records
+- retrieving balances and status
 - linking wallets to users
 
 Key endpoints:
@@ -108,8 +104,9 @@ Responsible for:
 - payment analytics
 
 Key endpoints:
-- GET /analytics/mttr
-- GET /analytics/payments
+- GET `/api/v1/sla/analytics/dashboard`
+- GET `/api/v1/sla/analytics/trends`
+- GET `/api/v1/sla/performance/aggregation`
 
 ---
 
@@ -131,9 +128,33 @@ Key endpoints:
 ### Layered Structure
 
 - API Layer → routes (FastAPI endpoints)
-- Service Layer → business logic
-- Repository Layer → Firestore interaction
-- External Layer → Stellar + Smart Contracts
+- Service Layer → business logic and adapters
+- Repository Layer → SQLAlchemy interaction
+- External Layer → contract bridge, Celery, and webhook integrations
+
+### Active vs Dormant Modules
+
+Treat the following as active routed runtime modules:
+
+- `auth`
+- `audit`
+- `jobs`
+- `outages`
+- `payments`
+- `sla`
+- `sla_dispute`
+- `wallets`
+- `webhooks`
+
+Treat the following as lighter-weight or environment-dependent:
+
+- `auth` and `wallets` are functional but currently backed by in-repo stores
+- `jobs` and `webhooks` depend on worker infrastructure for full operational behavior
+- contract execution depends on `CONTRACT_EXECUTION_MODE`
+
+Treat the following as non-routed or legacy helper paths:
+
+- `app/services/outage_store.py`
 
 ---
 
@@ -145,21 +166,19 @@ Key endpoints:
 2. Outage resolved
 3. MTTR calculated
 4. SLA evaluated
-5. Smart contract invoked
-6. Payment executed on Stellar
+5. Contract adapter or local adapter invoked
+6. Payment record generated
 7. Transaction stored in DB
-
-Reference: :contentReference[oaicite:1]{index=1}
 
 ---
 
 ## Constraints & Rules
 
-- All monetary actions must go through SLA system
+- All monetary actions must go through the SLA system
 - Payments must be idempotent
-- Wallet operations must be secure (no private key exposure)
+- Wallet operations must avoid private key exposure
 - SLA must be deterministic and reproducible
-- API responses must follow consistent structure
+- API responses must follow a consistent structure
 
 ---
 
@@ -168,48 +187,20 @@ Reference: :contentReference[oaicite:1]{index=1}
 Codex should focus on generating issues for:
 
 ### Backend Improvements
-- validation consistency across endpoints
+- endpoint validation consistency
 - error handling standardization
-- pagination consistency
-- DTO/schema refinement
-
-### SLA System
-- edge cases in MTTR calculation
-- SLA simulation endpoint
-- replay/recalculate SLA
-- audit logging
-
-### Payments
-- retry logic for failed transactions
-- idempotent payment execution
-- payment reconciliation
-- transaction monitoring
-
-### Wallets
-- wallet funding flow
-- trustline verification
-- wallet status validation
-
-### Analytics
-- caching for heavy queries
-- aggregation optimization
-- dashboard endpoints
-
-### DevOps / Infra
-- rate limiting improvements
-- logging and observability
-- environment config validation
-- CI/CD pipelines
+- docs alignment with routed runtime
+- contributor clarity around active vs dormant modules
 
 ---
 
 ## Coding Standards
 
-- use async functions for IO operations
 - separate routes from business logic
 - validate all inputs with Pydantic
-- never embed business logic in controllers
-- services must be reusable and testable
+- keep business logic out of controllers
+- prefer reusable services and repositories
+- treat the routed runtime as source of truth when docs drift
 
 ---
 
