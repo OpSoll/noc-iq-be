@@ -3,6 +3,7 @@ import io
 import json
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -10,6 +11,7 @@ from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.repositories.outage_repository import OutageRepository
+from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
@@ -69,8 +71,14 @@ def get_outage(outage_id: str, db: Session = Depends(get_db)):
 @router.post("/", response_model=Outage)
 def create_outage(payload: OutageCreate, db: Session = Depends(get_db)):
     repo = OutageRepository(db)
-    outage = repo.create(payload)
+    try:
+        outage = repo.create(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_log.log("outage_created", {"id": outage.id})
+    OutageEventRepository(db).record(outage.id, "created", {"site_name": outage.site_name})
     return outage
 
 
@@ -125,6 +133,19 @@ def update_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Outage not found")
 
     updated = repo.update(outage_id, payload)
+    OutageEventRepository(db).record(outage_id, "updated", payload.model_dump(exclude_unset=True, exclude_none=True))
+    return updated
+
+
+@router.patch("/{outage_id}", response_model=Outage)
+def patch_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    existing = repo.get(outage_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    updated = repo.update(outage_id, payload)
+    OutageEventRepository(db).record(outage_id, "patched", payload.model_dump(exclude_unset=True, exclude_none=True))
     return updated
 
 
@@ -147,6 +168,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
         raise HTTPException(status_code=404, detail="Outage not found")
 
     audit_log.log("outage_resolved", {"id": outage.id, "mttr": payload.mttr_minutes})
+    OutageEventRepository(db).record(outage_id, "resolved", {"mttr_minutes": payload.mttr_minutes})
 
     raw_contract_result = SLAContractAdapter.calculate_sla(
         outage_id=outage.id,
@@ -157,6 +179,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create_if_changed(sla)
+    OutageEventRepository(db).record(outage_id, "sla_computed", {"status": stored_sla.status})
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
     webhook_event = (
@@ -203,4 +226,13 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     )
 
     audit_log.log("sla_recomputed", {"id": outage.id})
+    OutageEventRepository(db).record(outage_id, "sla_recomputed", {"status": stored_sla.status})
     return {"sla": stored_sla, "payment": payment}
+
+
+@router.get("/{outage_id}/timeline")
+def get_outage_timeline(outage_id: str, db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    if not repo.get(outage_id):
+        raise HTTPException(status_code=404, detail="Outage not found")
+    return OutageEventRepository(db).list_for_outage(outage_id)

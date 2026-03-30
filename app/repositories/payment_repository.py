@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -23,6 +23,8 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         sla_result_id=orm.sla_result_id,
         created_at=orm.created_at,
         confirmed_at=orm.confirmed_at,
+        retry_count=orm.retry_count,
+        last_retried_at=orm.last_retried_at,
     )
 
 
@@ -76,13 +78,22 @@ class PaymentRepository:
         page_size: int = 20,
         status: Optional[str] = None,
         outage_id: Optional[str] = None,
-    ) -> tuple[List[PaymentTransaction], int]:
+        type: Optional[str] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+    ) -> Tuple[List[PaymentTransaction], int]:
         query = self.db.query(PaymentTransactionORM)
 
         if status:
             query = query.filter(PaymentTransactionORM.status == status)
         if outage_id:
             query = query.filter(PaymentTransactionORM.outage_id == outage_id)
+        if type:
+            query = query.filter(PaymentTransactionORM.type == type)
+        if date_from:
+            query = query.filter(PaymentTransactionORM.created_at >= date_from)
+        if date_to:
+            query = query.filter(PaymentTransactionORM.created_at <= date_to)
 
         total = query.count()
         rows = (
@@ -138,3 +149,39 @@ class PaymentRepository:
             confirmed_at=None,
         )
         return self.create(transaction)
+
+    MAX_RETRIES = 3
+
+    def reconcile(self, transaction_id: str, new_status: str) -> Optional[PaymentTransaction]:
+        """Refresh payment status and mark as auditable reconciliation."""
+        orm = (
+            self.db.query(PaymentTransactionORM)
+            .filter(PaymentTransactionORM.id == transaction_id)
+            .first()
+        )
+        if not orm:
+            return None
+        orm.status = new_status
+        if new_status == "confirmed":
+            orm.confirmed_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def retry(self, transaction_id: str) -> Optional[PaymentTransaction]:
+        """Increment retry counter (bounded by MAX_RETRIES) and reset to pending."""
+        orm = (
+            self.db.query(PaymentTransactionORM)
+            .filter(PaymentTransactionORM.id == transaction_id)
+            .first()
+        )
+        if not orm:
+            return None
+        if orm.retry_count >= self.MAX_RETRIES:
+            return None  # caller should raise 409
+        orm.retry_count += 1
+        orm.last_retried_at = datetime.utcnow()
+        orm.status = "pending"
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
