@@ -20,10 +20,10 @@ def _sign_payload(secret: str, payload: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
-def _build_headers(webhook: Webhook, payload: str) -> Dict[str, str]:
+def _build_headers(webhook: Webhook, payload: str, event: WebhookEvent = WebhookEvent.SLA_VIOLATION) -> Dict[str, str]:
     headers = {
         "Content-Type": "application/json",
-        "X-Webhook-Event": WebhookEvent.SLA_VIOLATION,
+        "X-Webhook-Event": event.value,
         "X-Webhook-Timestamp": datetime.utcnow().isoformat(),
     }
     if webhook.secret:
@@ -64,7 +64,7 @@ def create_delivery(
 
 def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_str = delivery.payload
-    headers = _build_headers(webhook, payload_str)
+    headers = _build_headers(webhook, payload_str, delivery.event)
 
     try:
         with httpx.Client(timeout=10.0) as client:
