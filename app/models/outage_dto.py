@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.enums import Severity, OutageStatus
 
@@ -9,18 +9,25 @@ from .outage import Location
 
 
 class OutageCreate(BaseModel):
-    id: str
-    site_name: str
+    id: str = Field(..., min_length=1)
+    site_name: str = Field(..., min_length=1)
     site_id: Optional[str] = None
     severity: Severity
     status: OutageStatus
     detected_at: datetime
-    description: str
-    affected_services: List[str]
-    affected_subscribers: Optional[int] = None
+    description: str = Field(..., min_length=1)
+    affected_services: List[str] = Field(..., min_length=1)
+    affected_subscribers: Optional[int] = Field(default=None, ge=0)
     assigned_to: Optional[str] = None
     created_by: Optional[str] = None
     location: Optional[Location] = None
+
+    @field_validator("affected_services")
+    @classmethod
+    def services_not_empty(cls, v: List[str]) -> List[str]:
+        if not v:
+            raise ValueError("affected_services must contain at least one entry")
+        return v
 
 
 class OutageUpdate(BaseModel):

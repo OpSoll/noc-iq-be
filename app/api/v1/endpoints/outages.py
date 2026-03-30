@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -65,7 +66,12 @@ def get_outage(outage_id: str, db: Session = Depends(get_db)):
 @router.post("/", response_model=Outage)
 def create_outage(payload: OutageCreate, db: Session = Depends(get_db)):
     repo = OutageRepository(db)
-    outage = repo.create(payload)
+    try:
+        outage = repo.create(payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     audit_log.log("outage_created", {"id": outage.id})
     return outage
 

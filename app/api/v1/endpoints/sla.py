@@ -16,8 +16,12 @@ from app.repositories.sla_repository import SLARepository
 from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.models import SLAResult
+from app.utils.cache import TTLCache
 
 router = APIRouter()
+
+# Cache dashboard KPIs and trends for 30 seconds to reduce repeated DB load.
+_dashboard_cache: TTLCache = TTLCache(ttl_seconds=30)
 
 
 @router.get("/calculate", response_model=SLAResult)
@@ -64,8 +68,13 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
 
 @router.get("/analytics/dashboard", response_model=SLADashboardKPI)
 def get_sla_dashboard_kpis(db: Session = Depends(get_db)):
+    cached = _dashboard_cache.get("dashboard_kpis")
+    if cached is not None:
+        return cached
     repo = SLARepository(db)
-    return repo.aggregate_dashboard_kpis()
+    result = repo.aggregate_dashboard_kpis()
+    _dashboard_cache.set("dashboard_kpis", result)
+    return result
 
 
 @router.get("/analytics/trends", response_model=list[SLATrendPoint])
@@ -73,8 +82,14 @@ def get_sla_trends(
     days: int = Query(default=7, ge=1, le=90),
     db: Session = Depends(get_db),
 ):
+    cache_key = f"trends_{days}"
+    cached = _dashboard_cache.get(cache_key)
+    if cached is not None:
+        return cached
     repo = SLARepository(db)
-    return repo.aggregate_trends(limit_days=days)
+    result = repo.aggregate_trends(limit_days=days)
+    _dashboard_cache.set(cache_key, result)
+    return result
 
 
 @router.get("/performance/aggregation", response_model=SLAPerformanceAggregation)

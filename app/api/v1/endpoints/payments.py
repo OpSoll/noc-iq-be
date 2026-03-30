@@ -1,3 +1,6 @@
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -12,16 +15,24 @@ router = APIRouter()
 def list_payments(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
-    status: str | None = None,
-    outage_id: str | None = None,
+    status: Optional[str] = None,
+    type: Optional[str] = None,
+    outage_id: Optional[str] = None,
+    date_from: Optional[datetime] = Query(default=None),
+    date_to: Optional[datetime] = Query(default=None),
     db: Session = Depends(get_db),
 ):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
     repo = PaymentRepository(db)
     items, total = repo.list(
         page=page,
         page_size=page_size,
         status=status,
         outage_id=outage_id,
+        type=type,
+        date_from=date_from,
+        date_to=date_to,
     )
     return PaginatedPayments(items=items, total=total, page=page, page_size=page_size)
 
