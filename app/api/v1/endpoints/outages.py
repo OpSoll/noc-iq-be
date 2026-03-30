@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, Response
+import csv
+import io
+import json
+
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -75,6 +79,42 @@ def bulk_create_outages(payload: BulkOutageCreate, db: Session = Depends(get_db)
     repo = OutageRepository(db)
     created = repo.bulk_create(payload.outages)
     return {"count": len(created), "items": created}
+
+
+@router.post("/import", response_model=dict, summary="Bulk import outages from CSV or JSON file")
+async def import_outages(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    content = await file.read()
+    filename = file.filename or ""
+
+    imported, skipped, errors = [], [], []
+
+    if filename.endswith(".json"):
+        try:
+            rows = json.loads(content)
+            if not isinstance(rows, list):
+                raise HTTPException(status_code=400, detail="JSON file must contain a list of outage objects")
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    elif filename.endswith(".csv"):
+        try:
+            reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
+            rows = list(reader)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid CSV: {exc}") from exc
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file format. Use .json or .csv")
+
+    repo = OutageRepository(db)
+    for i, row in enumerate(rows):
+        try:
+            payload = OutageCreate(**row)
+            repo.create(payload)
+            imported.append(payload.id)
+        except Exception as exc:
+            skipped.append(i)
+            errors.append({"row": i, "error": str(exc)})
+
+    return {"imported": len(imported), "skipped": len(skipped), "errors": errors}
 
 
 @router.put("/{outage_id}", response_model=Outage)

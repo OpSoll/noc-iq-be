@@ -9,8 +9,10 @@ from app.models.wallet import (
     WalletBalanceResponse,
     WalletCreateRequest,
     WalletCreateResponse,
+    WalletFundingStateResponse,
     WalletLinkRequest,
     WalletStatusResponse,
+    WalletTrustlineResponse,
 )
 
 
@@ -111,4 +113,32 @@ class WalletRegistry:
             usable=wallet.funded and wallet.trustline_ready and wallet.active,
             active=wallet.active,
             last_updated=wallet.last_updated,
+        )
+
+    @classmethod
+    def get_trustline(cls, user_id: str) -> WalletTrustlineResponse | None:
+        wallet = cls.get_wallet(user_id)
+        if not wallet:
+            return None
+
+        error = None if wallet.trustline_ready else "Trustline not established. Fund wallet and set up USDC trustline."
+        return WalletTrustlineResponse(
+            user_id=wallet.user_id,
+            public_key=wallet.public_key,
+            trustline_ready=wallet.trustline_ready,
+            trustline_error=error,
+        )
+
+    @classmethod
+    def get_funding_state(cls, user_id: str) -> WalletFundingStateResponse | None:
+        wallet = cls.get_wallet(user_id)
+        if not wallet:
+            return None
+
+        error = None if wallet.funded else "Wallet is not funded. Send at least 1 XLM to activate."
+        return WalletFundingStateResponse(
+            user_id=wallet.user_id,
+            public_key=wallet.public_key,
+            funded=wallet.funded,
+            funding_error=error,
         )

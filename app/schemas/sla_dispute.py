@@ -29,3 +29,15 @@ class DisputeResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class DisputeAuditLogResponse(BaseModel):
+    id: str
+    dispute_id: str
+    action: str
+    actor: str
+    notes: Optional[str] = None
+    recorded_at: datetime
+
+    class Config:
+        from_attributes = True
