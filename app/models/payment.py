@@ -17,6 +17,8 @@ class PaymentTransaction(BaseModel):
     sla_result_id: Optional[int] = None
     created_at: datetime
     confirmed_at: Optional[datetime] = None
+    retry_count: int = 0
+    last_retried_at: Optional[datetime] = None
 
 
 class PaginatedPayments(BaseModel):

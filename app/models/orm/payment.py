@@ -20,3 +20,5 @@ class PaymentTransactionORM(Base):
     sla_result_id = Column(Integer, ForeignKey("sla_results.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     confirmed_at = Column(DateTime, nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    last_retried_at = Column(DateTime, nullable=True)
