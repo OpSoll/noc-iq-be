@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -78,13 +78,22 @@ class PaymentRepository:
         page_size: int = 20,
         status: Optional[str] = None,
         outage_id: Optional[str] = None,
-    ) -> tuple[List[PaymentTransaction], int]:
+        type: Optional[str] = None,
+        date_from: Optional[datetime] = None,
+        date_to: Optional[datetime] = None,
+    ) -> Tuple[List[PaymentTransaction], int]:
         query = self.db.query(PaymentTransactionORM)
 
         if status:
             query = query.filter(PaymentTransactionORM.status == status)
         if outage_id:
             query = query.filter(PaymentTransactionORM.outage_id == outage_id)
+        if type:
+            query = query.filter(PaymentTransactionORM.type == type)
+        if date_from:
+            query = query.filter(PaymentTransactionORM.created_at >= date_from)
+        if date_to:
+            query = query.filter(PaymentTransactionORM.created_at <= date_to)
 
         total = query.count()
         rows = (

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Header, HTTPException, status
+from pydantic import BaseModel
 
 from app.models.auth import (
     AuthLogoutResponse,
@@ -22,6 +23,10 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return authorization[len(prefix) :]
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 @router.post("/register", response_model=AuthUser, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest):
     try:
@@ -34,6 +39,14 @@ def register(payload: RegisterRequest):
 def login(payload: LoginRequest):
     try:
         return AuthStore.login(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/refresh", response_model=AuthSessionResponse)
+def refresh(payload: RefreshRequest):
+    try:
+        return AuthStore.refresh(payload.refresh_token)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
