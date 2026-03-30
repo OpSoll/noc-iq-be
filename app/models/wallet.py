@@ -50,3 +50,17 @@ class WalletStatusResponse(BaseModel):
     usable: bool
     active: bool
     last_updated: datetime
+
+
+class WalletTrustlineResponse(BaseModel):
+    user_id: str
+    public_key: str
+    trustline_ready: bool
+    trustline_error: Optional[str] = None
+
+
+class WalletFundingStateResponse(BaseModel):
+    user_id: str
+    public_key: str
+    funded: bool
+    funding_error: Optional[str] = None

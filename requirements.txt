@@ -6,3 +6,4 @@ alembic
 pydantic-settings
 celery
 httpx
+python-multipart

@@ -33,3 +33,17 @@ class SLADispute(Base):
     resolved_at = Column(DateTime, nullable=True)
 
     sla_result = relationship("SLAResultORM", back_populates="disputes")
+    audit_logs = relationship("DisputeAuditLog", back_populates="dispute", order_by="DisputeAuditLog.recorded_at")
+
+
+class DisputeAuditLog(Base):
+    __tablename__ = "dispute_audit_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    dispute_id = Column(UUID(as_uuid=True), ForeignKey("sla_disputes.id"), nullable=False, index=True)
+    action = Column(String(50), nullable=False)  # e.g. "flagged", "resolved", "rejected"
+    actor = Column(String(255), nullable=False)
+    notes = Column(Text, nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    dispute = relationship("SLADispute", back_populates="audit_logs")

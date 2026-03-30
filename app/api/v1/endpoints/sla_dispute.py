@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.sla_dispute import SLADispute, DisputeStatus
-from app.schemas.sla_dispute import DisputeFlagRequest, DisputeResolveRequest, DisputeResponse
+from app.models.sla_dispute import DisputeAuditLog, SLADispute, DisputeStatus
+from app.schemas.sla_dispute import DisputeAuditLogResponse, DisputeFlagRequest, DisputeResolveRequest, DisputeResponse
 
 router = APIRouter()
 
@@ -56,6 +56,14 @@ def flag_dispute(
         dispute_reason=payload.dispute_reason,
     )
     db.add(dispute)
+    db.flush()
+
+    db.add(DisputeAuditLog(
+        dispute_id=dispute.id,
+        action="flagged",
+        actor=payload.flagged_by,
+        notes=payload.dispute_reason,
+    ))
     db.commit()
     db.refresh(dispute)
     return dispute
@@ -96,6 +104,12 @@ def resolve_dispute(
     dispute.resolution_notes = payload.resolution_notes
     dispute.resolved_at = datetime.utcnow()
 
+    db.add(DisputeAuditLog(
+        dispute_id=dispute.id,
+        action=payload.status.value,
+        actor=payload.resolved_by,
+        notes=payload.resolution_notes,
+    ))
     db.commit()
     db.refresh(dispute)
     return dispute
@@ -122,3 +136,26 @@ def get_dispute(
             detail="No dispute found for this SLA result.",
         )
     return dispute
+
+
+@router.get(
+    "/{sla_result_id}/dispute/history",
+    response_model=list[DisputeAuditLogResponse],
+    summary="Get audit trail for a dispute",
+)
+def get_dispute_history(
+    sla_result_id: int,
+    db: Session = Depends(get_db),
+):
+    dispute = (
+        db.query(SLADispute)
+        .filter(SLADispute.sla_result_id == sla_result_id)
+        .order_by(SLADispute.flagged_at.desc())
+        .first()
+    )
+    if not dispute:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No dispute found for this SLA result.",
+        )
+    return dispute.audit_logs

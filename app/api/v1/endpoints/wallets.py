@@ -5,8 +5,10 @@ from app.models.wallet import (
     WalletBalanceResponse,
     WalletCreateRequest,
     WalletCreateResponse,
+    WalletFundingStateResponse,
     WalletLinkRequest,
     WalletStatusResponse,
+    WalletTrustlineResponse,
 )
 from app.services.wallet_registry import WalletRegistry
 
@@ -42,6 +44,22 @@ def get_wallet_status(user_id: str):
     if not wallet_status:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return wallet_status
+
+
+@router.get("/{user_id}/trustline", response_model=WalletTrustlineResponse, summary="Check trustline readiness for a wallet")
+def get_wallet_trustline(user_id: str):
+    result = WalletRegistry.get_trustline(user_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    return result
+
+
+@router.get("/{user_id}/funding-state", response_model=WalletFundingStateResponse, summary="Get current funding state of a wallet")
+def get_wallet_funding_state(user_id: str):
+    result = WalletRegistry.get_funding_state(user_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Wallet not found")
+    return result
 
 
 @router.get("/{address}/balance", response_model=WalletBalanceResponse)
