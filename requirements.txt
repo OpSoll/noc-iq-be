@@ -7,3 +7,4 @@ pydantic-settings
 celery
 httpx
 python-multipart
+passlib[bcrypt]

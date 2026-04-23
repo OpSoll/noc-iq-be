@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.enums import OutageStatus, Severity
@@ -44,6 +45,9 @@ class OutageRepository:
         self,
         severity: Optional[Severity] = None,
         status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> dict:
@@ -53,6 +57,22 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+
+        if search:
+            search_filter = or_(
+                OutageORM.id.ilike(f"%{search}%"),
+                OutageORM.site_id.ilike(f"%{search}%"),
+                OutageORM.site_name.ilike(f"%{search}%"),
+            )
+            query = query.filter(search_filter)
+
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        # Ensure stable pagination
+        query = query.order_by(OutageORM.detected_at.desc(), OutageORM.id.asc())
 
         total = query.count()
         items = query.offset((page - 1) * page_size).limit(page_size).all()

@@ -51,12 +51,23 @@ def list_violations(db: Session = Depends(get_db)):
 def list_outages(
     severity: Severity | None = None,
     status: OutageStatus | None = None,
+    search: str | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
     page: int = 1,
     page_size: int = 20,
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
-    return repo.list(severity, status, page, page_size)
+    return repo.list(
+        severity=severity,
+        status=status,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.get("/{outage_id}", response_model=Outage)
