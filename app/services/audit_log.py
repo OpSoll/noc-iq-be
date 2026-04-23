@@ -1,41 +1,47 @@
-import json
-import os
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from datetime import datetime
+from typing import Any, Optional
+from sqlalchemy.orm import Session
+from app.models.orm.audit_log import AuditLogORM
+from app.db.session import SessionLocal
 
+class AuditLogService:
+    def __init__(self, db_session_factory=None):
+        self.db_session_factory = db_session_factory or SessionLocal
 
-class AuditLogStore:
-    def __init__(self, file_path: str | None = None):
-        default_path = Path(__file__).resolve().parents[2] / ".runtime" / "audit-log.jsonl"
-        configured_path = Path(file_path) if file_path else Path(
-            os.getenv("NOCIQ_AUDIT_LOG_PATH", default_path)
+    def log_event(
+        self,
+        db: Session,
+        event_type: str,
+        email: Optional[str] = None,
+        details: Optional[dict[str, Any]] = None
+    ) -> None:
+        """
+        Records a structured audit event.
+        Ensures sensitive data like passwords or tokens are NOT leaked into details.
+        """
+        # Sanitization: prevent leaking common sensitive keys
+        safe_details = details.copy() if details else {}
+        sensitive_keys = {"password", "token", "access_token", "refresh_token", "secret"}
+        for key in sensitive_keys:
+            if key in safe_details:
+                safe_details[key] = "[REDACTED]"
+
+        audit_entry = AuditLogORM(
+            event_type=event_type,
+            email=email,
+            details=safe_details,
+            created_at=datetime.utcnow()
         )
-        self._file_path = configured_path
-        self._file_path.parent.mkdir(parents=True, exist_ok=True)
-        self._file_path.touch(exist_ok=True)
+        db.add(audit_entry)
+        db.commit()
 
-    def log(self, action: str, payload: dict[str, Any]):
-        entry = {
-            "timestamp": datetime.now(UTC).isoformat(),
-            "action": action,
-            "payload": payload,
-        }
-        with self._file_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
+    def log(self, event_type: str, details: Optional[dict[str, Any]] = None) -> None:
+        """
+        Simplified log method for compatibility with existing code.
+        Uses its own session if not provided.
+        """
+        with self.db_session_factory() as db:
+            self.log_event(db, event_type, details=details)
 
-    def list(self):
-        entries = []
-        with self._file_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        return list(reversed(entries))
-
-
-audit_log = AuditLogStore()
+# Create a singleton instance for common use
+audit_log = AuditLogService()

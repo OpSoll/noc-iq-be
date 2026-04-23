@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Header, HTTPException, status, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from app.models.auth import (
     AuthLogoutResponse,
@@ -9,6 +10,7 @@ from app.models.auth import (
     RegisterRequest,
 )
 from app.services.auth_store import AuthStore
+from app.db.session import get_db
 
 router = APIRouter()
 
@@ -28,42 +30,46 @@ class RefreshRequest(BaseModel):
 
 
 @router.post("/register", response_model=AuthUser, status_code=status.HTTP_201_CREATED)
-def register(payload: RegisterRequest):
+def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     try:
-        return AuthStore.register(payload)
+        return AuthStore.register(payload, db=db)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/login", response_model=AuthSessionResponse)
-def login(payload: LoginRequest):
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
     try:
-        return AuthStore.login(payload)
+        return AuthStore.login(payload, db=db)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
 @router.post("/refresh", response_model=AuthSessionResponse)
-def refresh(payload: RefreshRequest):
+def refresh(payload: RefreshRequest, db: Session = Depends(get_db)):
     try:
-        return AuthStore.refresh(payload.refresh_token)
+        return AuthStore.refresh(payload.refresh_token, db=db)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
 @router.get("/me", response_model=AuthUser)
-def me(authorization: str | None = Header(default=None)):
+def me(
+    authorization: str | None = Header(default=None), db: Session = Depends(get_db)
+):
     token = _extract_bearer_token(authorization)
-    user = AuthStore.get_user_for_token(token)
+    user = AuthStore.get_user_for_token(token, db=db)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     return user
 
 
 @router.post("/logout", response_model=AuthLogoutResponse)
-def logout(authorization: str | None = Header(default=None)):
+def logout(
+    authorization: str | None = Header(default=None), db: Session = Depends(get_db)
+):
     token = _extract_bearer_token(authorization)
-    AuthStore.logout(token)
+    AuthStore.logout(token, db=db)
     return AuthLogoutResponse(message="Logged out successfully")
 
 
