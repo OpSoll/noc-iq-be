@@ -56,9 +56,20 @@ class WalletRegistry:
     @classmethod
     def link_wallet(cls, payload: WalletLinkRequest) -> Wallet:
         now = cls._now()
-        existing = cls._wallets_by_user.get(payload.user_id)
-        created_at = existing.created_at if existing else now
 
+        existing_by_user = cls._wallets_by_user.get(payload.user_id)
+        if existing_by_user and existing_by_user.public_key != payload.public_key:
+            raise ValueError(
+                f"User '{payload.user_id}' is already linked to a different wallet address."
+            )
+
+        existing_by_address = cls._wallets_by_address.get(payload.public_key)
+        if existing_by_address and existing_by_address.user_id != payload.user_id:
+            raise ValueError(
+                f"Address '{payload.public_key}' is already linked to a different user."
+            )
+
+        created_at = existing_by_user.created_at if existing_by_user else now
         wallet = Wallet(
             user_id=payload.user_id,
             public_key=payload.public_key,
