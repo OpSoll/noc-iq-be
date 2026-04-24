@@ -25,20 +25,42 @@ class OutageEventRepository:
         self.db.refresh(orm)
         return orm
 
-    def list_for_outage(self, outage_id: str) -> List[Dict[str, Any]]:
-        rows = (
+    def list_for_outage(
+        self,
+        outage_id: str,
+        event_type: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        query = (
             self.db.query(OutageEventORM)
             .filter(OutageEventORM.outage_id == outage_id)
-            .order_by(OutageEventORM.occurred_at.asc())
-            .all()
         )
-        return [
-            {
-                "id": r.id,
-                "outage_id": r.outage_id,
-                "event_type": r.event_type,
-                "detail": json.loads(r.detail) if r.detail else None,
-                "occurred_at": r.occurred_at.isoformat(),
-            }
-            for r in rows
-        ]
+        if event_type:
+            query = query.filter(OutageEventORM.event_type == event_type)
+        if start_date:
+            query = query.filter(OutageEventORM.occurred_at >= start_date)
+        if end_date:
+            query = query.filter(OutageEventORM.occurred_at <= end_date)
+
+        query = query.order_by(OutageEventORM.occurred_at.asc())
+        total = query.count()
+        rows = query.offset((page - 1) * page_size).limit(page_size).all()
+
+        return {
+            "items": [
+                {
+                    "id": r.id,
+                    "outage_id": r.outage_id,
+                    "event_type": r.event_type,
+                    "detail": json.loads(r.detail) if r.detail else None,
+                    "occurred_at": r.occurred_at.isoformat(),
+                }
+                for r in rows
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }

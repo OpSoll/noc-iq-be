@@ -119,13 +119,28 @@ def bulk_create_outages(payload: BulkOutageCreate, db: Session = Depends(get_db)
 async def import_outages(
     file: UploadFile = File(...),
     dry_run: bool = Query(default=False, description="Validate rows without writing to the database"),
+    atomic: bool = Query(default=True, description="Roll back all writes if any row fails"),
     db: Session = Depends(get_db),
 ):
-    content = await file.read()
+    MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+    CHUNK_SIZE = 64 * 1024  # 64 KB
+
     filename = file.filename or ""
 
-    row_outcomes = []
+    # --- #146: chunked read with size cap ---
+    chunks: list[bytes] = []
+    total_read = 0
+    while True:
+        chunk = await file.read(CHUNK_SIZE)
+        if not chunk:
+            break
+        total_read += len(chunk)
+        if total_read > MAX_BYTES:
+            raise HTTPException(status_code=413, detail="File exceeds 10 MB limit")
+        chunks.append(chunk)
+    content = b"".join(chunks)
 
+    # --- parse ---
     if filename.endswith(".json"):
         try:
             rows = json.loads(content)
@@ -143,38 +158,102 @@ async def import_outages(
         raise HTTPException(status_code=400, detail="Unsupported file format. Use .json or .csv")
 
     repo = OutageRepository(db)
+    row_outcomes: list[dict] = []
     persisted_count = 0
 
-    for i, row in enumerate(rows):
-        try:
-            payload = OutageCreate(**row)
-            if dry_run:
+    # --- #148: transactional semantics ---
+    # In atomic mode we collect all errors first; if any exist we abort without writing.
+    # In non-atomic mode we write row-by-row and report partial success.
+
+    if dry_run:
+        for i, row in enumerate(rows):
+            try:
+                payload = OutageCreate(**row)
                 duplicate = repo.check_duplicate(payload)
-                row_outcomes.append(
-                    {
-                        "row": i,
-                        "id": payload.id,
-                        "valid": True,
-                        "duplicate": bool(duplicate),
-                        "existing_id": duplicate.id if duplicate else None,
-                    }
-                )
-            else:
-                before = repo.get(payload.id)
+                row_outcomes.append({
+                    "row": i,
+                    "id": payload.id,
+                    "status": "ok",
+                    "duplicate": bool(duplicate),
+                    "existing_id": duplicate.id if duplicate else None,
+                })
+            except Exception as exc:
+                # --- #147: machine-readable error structure ---
+                row_outcomes.append(_row_error(i, row, exc))
+    elif atomic:
+        # Validate all rows first
+        parsed: list[OutageCreate] = []
+        for i, row in enumerate(rows):
+            try:
+                parsed.append(OutageCreate(**row))
+                row_outcomes.append({"row": i, "id": row.get("id"), "status": "ok"})
+            except Exception as exc:
+                row_outcomes.append(_row_error(i, row, exc))
+
+        errors = [r for r in row_outcomes if r["status"] == "error"]
+        if errors:
+            # Abort — no writes performed
+            return _import_response("import", len(rows), 0, row_outcomes)
+
+        # All valid — write inside a single transaction
+        try:
+            for i, payload in enumerate(parsed):
                 created = repo.create(payload)
-                row_outcomes.append({"row": i, "id": payload.id, "valid": True, "persisted": True, "outage_id": created.id})
-                if before is None and created.id == payload.id:
-                    persisted_count += 1
+                row_outcomes[i]["outage_id"] = created.id
+                row_outcomes[i]["persisted"] = True
+                persisted_count += 1
+            db.commit()
         except Exception as exc:
-            row_outcomes.append({"row": i, "valid": False, "error": str(exc)})
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Transaction failed: {exc}") from exc
+    else:
+        # Non-atomic: write row-by-row, report partial success
+        for i, row in enumerate(rows):
+            try:
+                payload = OutageCreate(**row)
+                created = repo.create(payload)
+                row_outcomes.append({"row": i, "id": payload.id, "status": "ok", "outage_id": created.id, "persisted": True})
+                persisted_count += 1
+            except Exception as exc:
+                db.rollback()
+                row_outcomes.append(_row_error(i, row, exc))
+
+    return _import_response("dry_run" if dry_run else "import", len(rows), persisted_count, row_outcomes)
+
+
+# --- #147: helpers for machine-readable error output ---
+
+def _row_error(index: int, raw_row: dict, exc: Exception) -> dict:
+    """Return a stable machine-readable error entry for a single row."""
+    errors: list[dict] = []
+    if hasattr(exc, "errors"):
+        # Pydantic ValidationError
+        for e in exc.errors():  # type: ignore[union-attr]
+            errors.append({
+                "field": ".".join(str(loc) for loc in e["loc"]) if e.get("loc") else None,
+                "type": e.get("type"),
+                "message": e.get("msg"),
+            })
+    else:
+        errors.append({"field": None, "type": type(exc).__name__, "message": str(exc)})
 
     return {
-        "mode": "dry_run" if dry_run else "import",
-        "total_rows": len(rows),
-        "persisted": 0 if dry_run else persisted_count,
-        "validated": sum(1 for row in row_outcomes if row.get("valid")),
-        "errors": [row for row in row_outcomes if not row.get("valid")],
-        "rows": row_outcomes,
+        "row": index,
+        "id": raw_row.get("id"),
+        "status": "error",
+        "errors": errors,
+    }
+
+
+def _import_response(mode: str, total: int, persisted: int, outcomes: list[dict]) -> dict:
+    return {
+        "mode": mode,
+        "total_rows": total,
+        "persisted": persisted,
+        "validated": sum(1 for r in outcomes if r["status"] == "ok"),
+        "error_count": sum(1 for r in outcomes if r["status"] == "error"),
+        "errors": [r for r in outcomes if r["status"] == "error"],
+        "rows": outcomes,
     }
 
 
@@ -289,8 +368,23 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{outage_id}/timeline")
-def get_outage_timeline(outage_id: str, db: Session = Depends(get_db)):
+def get_outage_timeline(
+    outage_id: str,
+    event_type: str | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
     repo = OutageRepository(db)
     if not repo.get(outage_id):
         raise HTTPException(status_code=404, detail="Outage not found")
-    return OutageEventRepository(db).list_for_outage(outage_id)
+    return OutageEventRepository(db).list_for_outage(
+        outage_id,
+        event_type=event_type,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
