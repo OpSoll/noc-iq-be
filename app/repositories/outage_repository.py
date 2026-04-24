@@ -99,6 +99,33 @@ class OutageRepository:
         rows = self.db.query(OutageORM).all()
         return [_orm_to_pydantic(r) for r in rows]
 
+    def list_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Outage]:
+        query = self.db.query(OutageORM)
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == status.value)
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+        return [_orm_to_pydantic(r) for r in query.all()]
+
     def get(self, outage_id: str) -> Optional[Outage]:
         row = self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
         if not row:
@@ -107,6 +134,15 @@ class OutageRepository:
 
     def get_orm(self, outage_id: str) -> Optional[OutageORM]:
         return self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
+
+    def get_orm_locked(self, outage_id: str) -> Optional[OutageORM]:
+        """Acquire a row-level lock (SELECT FOR UPDATE) before mutating."""
+        return (
+            self.db.query(OutageORM)
+            .filter(OutageORM.id == outage_id)
+            .with_for_update()
+            .first()
+        )
 
     @staticmethod
     def validate_status_transition(current_status: str, next_status: str) -> None:
@@ -214,9 +250,13 @@ class OutageRepository:
             self.db.commit()
 
     def resolve(self, outage_id: str, mttr_minutes: int) -> Optional[Outage]:
-        orm = self.get_orm(outage_id)
+        orm = self.get_orm_locked(outage_id)
         if not orm:
             return None
+
+        # Idempotent: already resolved with same mttr → return as-is
+        if orm.status == OutageStatus.resolved.value and orm.mttr_minutes == mttr_minutes:
+            return _orm_to_pydantic(orm)
 
         self.validate_status_transition(orm.status, OutageStatus.resolved.value)
         orm.status = OutageStatus.resolved.value

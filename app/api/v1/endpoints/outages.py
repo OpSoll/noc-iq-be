@@ -26,9 +26,23 @@ router = APIRouter()
 
 
 @router.get("/export")
-def export_outages_endpoint(format: str = "json", db: Session = Depends(get_db)):
+def export_outages_endpoint(
+    format: str = "json",
+    severity: Severity | None = None,
+    status: OutageStatus | None = None,
+    search: str | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    db: Session = Depends(get_db),
+):
     repo = OutageRepository(db)
-    data = repo.list_all()
+    data = repo.list_filtered(
+        severity=severity,
+        status=status,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
     try:
         exported = export_outages(data, format)
     except ValueError as exc:
@@ -343,7 +357,7 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     if outage.status != OutageStatus.resolved:
         raise HTTPException(status_code=400, detail="Outage not resolved yet")
 
-    orm = repo.get_orm(outage_id)
+    orm = repo.get_orm_locked(outage_id)
     raw_contract_result = SLAContractAdapter.calculate_sla(
         outage_id=outage.id,
         severity=outage.severity,

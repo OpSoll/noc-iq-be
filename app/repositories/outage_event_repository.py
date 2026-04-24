@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from app.models.orm.outage_event import OutageEventORM
+from app.models.outage_event import validate_event_detail
 
 
 class OutageEventRepository:
@@ -13,6 +14,7 @@ class OutageEventRepository:
         self.db = db
 
     def record(self, outage_id: str, event_type: str, detail: Optional[Dict[str, Any]] = None) -> OutageEventORM:
+        detail = validate_event_detail(event_type, detail)
         orm = OutageEventORM(
             id=f"evt_{uuid4().hex[:12]}",
             outage_id=outage_id,
