@@ -16,6 +16,7 @@ class Wallet(BaseModel):
     funded: bool = False
     active: bool = True
     trustline_ready: bool = False
+    cached_at: Optional[datetime] = None  # when data was last cached; None means never refreshed
 
 
 class WalletCreateRequest(BaseModel):

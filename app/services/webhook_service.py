@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 RETRY_DELAYS = [30, 120, 600]  # seconds: 30s, 2m, 10m (exponential backoff)
 
 
+WEBHOOK_SCHEMA_VERSION = "1"
+
+
 def _sign_payload(secret: str, payload: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
@@ -143,6 +146,7 @@ def trigger_sla_violation_webhooks(
     deliveries = []
 
     payload = {
+        "schema_version": WEBHOOK_SCHEMA_VERSION,
         "event": event.value,
         "timestamp": datetime.utcnow().isoformat(),
         "data": sla_data,
