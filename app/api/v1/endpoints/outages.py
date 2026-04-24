@@ -21,6 +21,7 @@ from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
 from app.utils.exporter import export_outages
+from app.api.v1.endpoints.sla import _invalidate_analytics_cache
 
 router = APIRouter()
 
@@ -334,6 +335,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create_if_changed(sla)
+    _invalidate_analytics_cache()
     OutageEventRepository(db).record(outage_id, "sla_computed", {"status": stored_sla.status})
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
@@ -367,6 +369,7 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
 
     sla_repo = SLARepository(db)
     stored_sla = sla_repo.create_if_changed(sla)
+    _invalidate_analytics_cache()
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
     webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
