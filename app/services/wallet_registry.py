@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from uuid import uuid4
 
+from app.core.config import settings
 from app.models.wallet import (
     AssetBalance,
     Wallet,
@@ -25,6 +26,23 @@ class WalletRegistry:
         return datetime.now(UTC)
 
     @classmethod
+    def _is_stale(cls, wallet: Wallet) -> bool:
+        """Return True if cached_at is absent or older than WALLET_CACHE_TTL_SECONDS."""
+        if wallet.cached_at is None:
+            return True
+        age = (cls._now() - wallet.cached_at).total_seconds()
+        return age > settings.WALLET_CACHE_TTL_SECONDS
+
+    @classmethod
+    def _refresh_wallet(cls, wallet: Wallet) -> Wallet:
+        """Simulate a live re-fetch and stamp cached_at. In production this would
+        call the Stellar Horizon API; here we just update the timestamp."""
+        refreshed = wallet.model_copy(update={"cached_at": cls._now(), "last_updated": cls._now()})
+        cls._wallets_by_user[wallet.user_id] = refreshed
+        cls._wallets_by_address[wallet.public_key] = refreshed
+        return refreshed
+
+    @classmethod
     def _build_public_key(cls) -> str:
         return f"G{uuid4().hex.upper()}"
 
@@ -37,14 +55,16 @@ class WalletRegistry:
                 message="Wallet already exists for this user.",
             )
 
+        now = cls._now()
         wallet = Wallet(
             user_id=payload.user_id,
             public_key=cls._build_public_key(),
-            created_at=cls._now(),
-            last_updated=cls._now(),
+            created_at=now,
+            last_updated=now,
             funded=False,
             active=True,
             trustline_ready=False,
+            cached_at=now,
         )
         cls._wallets_by_user[payload.user_id] = wallet
         cls._wallets_by_address[wallet.public_key] = wallet
@@ -67,20 +87,28 @@ class WalletRegistry:
             funded=payload.funded,
             active=True,
             trustline_ready=payload.trustline_ready,
+            cached_at=now,
         )
         cls._wallets_by_user[payload.user_id] = wallet
         cls._wallets_by_address[payload.public_key] = wallet
         return wallet
 
     @classmethod
-    def get_wallet(cls, user_id: str) -> Wallet | None:
-        return cls._wallets_by_user.get(user_id)
+    def get_wallet(cls, user_id: str, refresh: bool = False) -> Wallet | None:
+        wallet = cls._wallets_by_user.get(user_id)
+        if not wallet:
+            return None
+        if refresh or cls._is_stale(wallet):
+            wallet = cls._refresh_wallet(wallet)
+        return wallet
 
     @classmethod
-    def get_balance(cls, address: str) -> WalletBalanceResponse | None:
+    def get_balance(cls, address: str, refresh: bool = False) -> WalletBalanceResponse | None:
         wallet = cls._wallets_by_address.get(address)
         if not wallet:
             return None
+        if refresh or cls._is_stale(wallet):
+            wallet = cls._refresh_wallet(wallet)
 
         xlm_balance = "1.0000000" if wallet.funded else "0.0000000"
         balances = {
@@ -96,12 +124,12 @@ class WalletRegistry:
         return WalletBalanceResponse(
             address=address,
             balances=balances,
-            last_updated=cls._now(),
+            last_updated=wallet.last_updated,
         )
 
     @classmethod
-    def get_status(cls, user_id: str) -> WalletStatusResponse | None:
-        wallet = cls.get_wallet(user_id)
+    def get_status(cls, user_id: str, refresh: bool = False) -> WalletStatusResponse | None:
+        wallet = cls.get_wallet(user_id, refresh=refresh)
         if not wallet:
             return None
 
@@ -116,8 +144,8 @@ class WalletRegistry:
         )
 
     @classmethod
-    def get_trustline(cls, user_id: str) -> WalletTrustlineResponse | None:
-        wallet = cls.get_wallet(user_id)
+    def get_trustline(cls, user_id: str, refresh: bool = False) -> WalletTrustlineResponse | None:
+        wallet = cls.get_wallet(user_id, refresh=refresh)
         if not wallet:
             return None
 
@@ -130,8 +158,8 @@ class WalletRegistry:
         )
 
     @classmethod
-    def get_funding_state(cls, user_id: str) -> WalletFundingStateResponse | None:
-        wallet = cls.get_wallet(user_id)
+    def get_funding_state(cls, user_id: str, refresh: bool = False) -> WalletFundingStateResponse | None:
+        wallet = cls.get_wallet(user_id, refresh=refresh)
         if not wallet:
             return None
 

@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
     PAYMENT_WEBHOOK_SECRET: str = ""
+    WALLET_CACHE_TTL_SECONDS: int = 60  # how long wallet data is considered fresh
 
     class Config:
         env_file = ".env"

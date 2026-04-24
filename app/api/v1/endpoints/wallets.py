@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.models.wallet import (
     Wallet,
@@ -31,40 +31,55 @@ def wallets_ping():
 
 
 @router.get("/{user_id}", response_model=Wallet)
-def get_wallet(user_id: str):
-    wallet = WalletRegistry.get_wallet(user_id)
+def get_wallet(
+    user_id: str,
+    refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+):
+    wallet = WalletRegistry.get_wallet(user_id, refresh=refresh)
     if not wallet:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return wallet
 
 
 @router.get("/{user_id}/status", response_model=WalletStatusResponse)
-def get_wallet_status(user_id: str):
-    wallet_status = WalletRegistry.get_status(user_id)
+def get_wallet_status(
+    user_id: str,
+    refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+):
+    wallet_status = WalletRegistry.get_status(user_id, refresh=refresh)
     if not wallet_status:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return wallet_status
 
 
 @router.get("/{user_id}/trustline", response_model=WalletTrustlineResponse, summary="Check trustline readiness for a wallet")
-def get_wallet_trustline(user_id: str):
-    result = WalletRegistry.get_trustline(user_id)
+def get_wallet_trustline(
+    user_id: str,
+    refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+):
+    result = WalletRegistry.get_trustline(user_id, refresh=refresh)
     if not result:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return result
 
 
 @router.get("/{user_id}/funding-state", response_model=WalletFundingStateResponse, summary="Get current funding state of a wallet")
-def get_wallet_funding_state(user_id: str):
-    result = WalletRegistry.get_funding_state(user_id)
+def get_wallet_funding_state(
+    user_id: str,
+    refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+):
+    result = WalletRegistry.get_funding_state(user_id, refresh=refresh)
     if not result:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return result
 
 
 @router.get("/{address}/balance", response_model=WalletBalanceResponse)
-def get_wallet_balance(address: str):
-    balance = WalletRegistry.get_balance(address)
+def get_wallet_balance(
+    address: str,
+    refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+):
+    balance = WalletRegistry.get_balance(address, refresh=refresh)
     if not balance:
         raise HTTPException(status_code=404, detail="Wallet not found")
     return balance

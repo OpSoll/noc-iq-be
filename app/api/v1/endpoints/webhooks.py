@@ -1,4 +1,5 @@
 import json
+import secrets
 from typing import List, Optional
 from uuid import UUID
 
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
+from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
@@ -48,6 +50,7 @@ class WebhookResponse(BaseModel):
     is_active: bool
     events: List[str]
     max_retries: int
+    schema_version: str = WEBHOOK_SCHEMA_VERSION  # BE-082: explicit schema version
 
     model_config = {"from_attributes": True}
 
@@ -64,6 +67,12 @@ class WebhookDeliveryResponse(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+class WebhookSecretRotateResponse(BaseModel):
+    webhook_id: UUID
+    new_secret: str
+    message: str
 
 
 # --------------------------------------------------------------------------- #
@@ -129,12 +138,18 @@ def create_webhook(payload: WebhookCreate, db: Session = Depends(get_db)):
 @router.get("", response_model=List[WebhookResponse])
 def list_webhooks(
     is_active: Optional[bool] = Query(None),
+    name: Optional[str] = Query(None, description="Filter by name (case-insensitive substring match)"),  # BE-083
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),  # BE-083
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),  # BE-083
     db: Session = Depends(get_db),
 ):
     query = db.query(Webhook)
     if is_active is not None:
         query = query.filter(Webhook.is_active == is_active)
-    return [_serialize_webhook(w) for w in query.all()]
+    if name:
+        query = query.filter(Webhook.name.ilike(f"%{name}%"))
+    offset = (page - 1) * page_size
+    return [_serialize_webhook(w) for w in query.offset(offset).limit(page_size).all()]
 
 
 @router.get("/{webhook_id}", response_model=WebhookResponse)
@@ -177,6 +192,7 @@ def list_webhook_deliveries(
     webhook_id: UUID,
     status_filter: Optional[WebhookDeliveryStatus] = Query(None, alias="status"),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, description="Number of records to skip"),  # BE-083
     db: Session = Depends(get_db),
 ):
     _get_webhook_or_404(db, webhook_id)
@@ -187,7 +203,22 @@ def list_webhook_deliveries(
     )
     if status_filter is not None:
         query = query.filter(WebhookDelivery.status == status_filter)
-    return [_serialize_delivery(d) for d in query.limit(limit).all()]
+    return [_serialize_delivery(d) for d in query.offset(offset).limit(limit).all()]
+
+
+@router.post("/{webhook_id}/rotate-secret", response_model=WebhookSecretRotateResponse)  # BE-084
+def rotate_webhook_secret(webhook_id: UUID, db: Session = Depends(get_db)):
+    """Rotate the webhook signing secret. The old secret is immediately invalidated;
+    all subsequent deliveries will be signed with the new secret."""
+    webhook = _get_webhook_or_404(db, webhook_id)
+    new_secret = secrets.token_hex(32)
+    webhook.secret = new_secret
+    db.commit()
+    return WebhookSecretRotateResponse(
+        webhook_id=webhook.id,
+        new_secret=new_secret,
+        message="Secret rotated. Update your consumer to use the new secret immediately.",
+    )
 
 
 @router.post("/{webhook_id}/deliveries/{delivery_id}/retry", response_model=WebhookDeliveryResponse)
