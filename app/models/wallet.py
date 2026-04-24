@@ -1,7 +1,11 @@
 from datetime import datetime
 from typing import Dict, Optional
+import re
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+_STELLAR_PUBLIC_KEY_RE = re.compile(r'^G[A-Z2-7]{55}$')
 
 
 class Wallet(BaseModel):
@@ -24,6 +28,15 @@ class WalletLinkRequest(BaseModel):
     public_key: str = Field(..., min_length=2)
     funded: bool = False
     trustline_ready: bool = False
+
+    @field_validator("public_key")
+    @classmethod
+    def validate_stellar_public_key(cls, v: str) -> str:
+        if not _STELLAR_PUBLIC_KEY_RE.match(v):
+            raise ValueError(
+                "public_key must be a valid Stellar public key (starts with G, 56 characters, base32 alphabet)"
+            )
+        return v
 
 
 class WalletCreateResponse(Wallet):

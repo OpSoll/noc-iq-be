@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
     PAYMENT_WEBHOOK_SECRET: str = ""
     WALLET_CACHE_TTL_SECONDS: int = 60  # how long wallet data is considered fresh
+    PAYMENT_ASSET_CODE: str = "USDC"
+    PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
+    PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
 
     class Config:
         env_file = ".env"
@@ -89,6 +92,13 @@ def validate_critical_settings(config: Settings) -> None:
             errors.append(
                 "CELERY_RESULT_BACKEND must not be empty when CELERY_TASK_ALWAYS_EAGER is false."
             )
+
+    if not config.PAYMENT_ASSET_CODE.strip():
+        errors.append("PAYMENT_ASSET_CODE must not be empty.")
+    if not config.PAYMENT_FROM_ADDRESS.strip():
+        errors.append("PAYMENT_FROM_ADDRESS must not be empty.")
+    if not config.PAYMENT_TO_ADDRESS.strip():
+        errors.append("PAYMENT_TO_ADDRESS must not be empty.")
 
     if errors:
         raise ValueError("Invalid startup configuration:\n- " + "\n- ".join(errors))
