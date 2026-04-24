@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     SLA_CONTRACT_ADDRESS: str = "local-sla-calculator"
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
+    PAYMENT_WEBHOOK_SECRET: str = ""
 
     class Config:
         env_file = ".env"

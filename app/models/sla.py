@@ -51,3 +51,15 @@ class SLATrendPoint(BaseModel):
     violations: int = Field(ge=0)
     rewards: float = Field(ge=0.0)
     penalties: float = Field(ge=0.0)
+
+
+class SLAAnalyticsSnapshot(BaseModel):
+    id: Optional[int] = None
+    snapshot_key: str
+    total_outages: int = Field(ge=0)
+    total_violations: int = Field(ge=0)
+    total_rewards: float = Field(ge=0.0)
+    total_penalties: float = Field(ge=0.0)
+    net_payout: float
+    avg_mttr: float = Field(ge=0.0)
+    created_at: Optional[str] = None

@@ -4,8 +4,9 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.models.orm.audit_log import AuditLogORM
 from app.models.orm.payment import PaymentTransactionORM
-from app.models.payment import PaymentTransaction
+from app.models.payment import PaymentTransaction, validate_transition
 from app.models.sla import SLAResult
 
 
@@ -161,6 +162,7 @@ class PaymentRepository:
         )
         if not orm:
             return None
+        validate_transition(orm.status, new_status)
         orm.status = new_status
         if new_status == "confirmed":
             orm.confirmed_at = datetime.utcnow()
@@ -179,9 +181,33 @@ class PaymentRepository:
             return None
         if orm.retry_count >= self.MAX_RETRIES:
             return None  # caller should raise 409
+        validate_transition(orm.status, "pending")
         orm.retry_count += 1
         orm.last_retried_at = datetime.utcnow()
         orm.status = "pending"
         self.db.commit()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
+
+    HISTORY_EVENT_TYPES = {"payment_reconciled", "payment_retried"}
+
+    def get_payment_history(self, transaction_id: str) -> List[dict]:
+        """Return audit log entries for reconcile/retry actions on a payment."""
+        rows = (
+            self.db.query(AuditLogORM)
+            .filter(
+                AuditLogORM.event_type.in_(self.HISTORY_EVENT_TYPES),
+            )
+            .order_by(AuditLogORM.created_at.asc())
+            .all()
+        )
+        return [
+            {
+                "event_type": r.event_type,
+                "actor": r.email,
+                "details": r.details,
+                "timestamp": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+            if r.details and r.details.get("id") == transaction_id
+        ]
