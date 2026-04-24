@@ -1,23 +1,25 @@
 import csv
 import io
 import json
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
-from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
-from app.repositories.outage_repository import OutageRepository
+from app.models.outage_dto import OutageSortDirection, OutageSortField
+from app.models.webhook import WebhookEvent
 from app.repositories.outage_event_repository import OutageEventRepository
+from app.repositories.outage_repository import OutageRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
-from app.models.webhook import WebhookEvent
 from app.utils.exporter import export_outages
 
 router = APIRouter()
@@ -56,6 +58,14 @@ def list_outages(
     end_date: datetime | None = None,
     page: int = 1,
     page_size: int = 20,
+    sort_by: OutageSortField = Query(
+        default=OutageSortField.detected_at,
+        description="Supported sort fields: detected_at, site_name, severity, status, id",
+    ),
+    sort_direction: OutageSortDirection = Query(
+        default=OutageSortDirection.desc,
+        description="Sort direction: asc or desc. Default is desc.",
+    ),
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
@@ -67,6 +77,8 @@ def list_outages(
         end_date=end_date,
         page=page,
         page_size=page_size,
+        sort_by=sort_by,
+        sort_direction=sort_direction,
     )
 
 
@@ -96,16 +108,23 @@ def create_outage(payload: OutageCreate, db: Session = Depends(get_db)):
 @router.post("/bulk", response_model=dict)
 def bulk_create_outages(payload: BulkOutageCreate, db: Session = Depends(get_db)):
     repo = OutageRepository(db)
-    created = repo.bulk_create(payload.outages)
+    try:
+        created = repo.bulk_create(payload.outages)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"count": len(created), "items": created}
 
 
 @router.post("/import", response_model=dict, summary="Bulk import outages from CSV or JSON file")
-async def import_outages(file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def import_outages(
+    file: UploadFile = File(...),
+    dry_run: bool = Query(default=False, description="Validate rows without writing to the database"),
+    db: Session = Depends(get_db),
+):
     content = await file.read()
     filename = file.filename or ""
 
-    imported, skipped, errors = [], [], []
+    row_outcomes = []
 
     if filename.endswith(".json"):
         try:
@@ -124,16 +143,39 @@ async def import_outages(file: UploadFile = File(...), db: Session = Depends(get
         raise HTTPException(status_code=400, detail="Unsupported file format. Use .json or .csv")
 
     repo = OutageRepository(db)
+    persisted_count = 0
+
     for i, row in enumerate(rows):
         try:
             payload = OutageCreate(**row)
-            repo.create(payload)
-            imported.append(payload.id)
+            if dry_run:
+                duplicate = repo.check_duplicate(payload)
+                row_outcomes.append(
+                    {
+                        "row": i,
+                        "id": payload.id,
+                        "valid": True,
+                        "duplicate": bool(duplicate),
+                        "existing_id": duplicate.id if duplicate else None,
+                    }
+                )
+            else:
+                before = repo.get(payload.id)
+                created = repo.create(payload)
+                row_outcomes.append({"row": i, "id": payload.id, "valid": True, "persisted": True, "outage_id": created.id})
+                if before is None and created.id == payload.id:
+                    persisted_count += 1
         except Exception as exc:
-            skipped.append(i)
-            errors.append({"row": i, "error": str(exc)})
+            row_outcomes.append({"row": i, "valid": False, "error": str(exc)})
 
-    return {"imported": len(imported), "skipped": len(skipped), "errors": errors}
+    return {
+        "mode": "dry_run" if dry_run else "import",
+        "total_rows": len(rows),
+        "persisted": 0 if dry_run else persisted_count,
+        "validated": sum(1 for row in row_outcomes if row.get("valid")),
+        "errors": [row for row in row_outcomes if not row.get("valid")],
+        "rows": row_outcomes,
+    }
 
 
 @router.put("/{outage_id}", response_model=Outage)
@@ -143,7 +185,10 @@ def update_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(g
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    updated = repo.update(outage_id, payload)
+    try:
+        updated = repo.update(outage_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     OutageEventRepository(db).record(outage_id, "updated", payload.model_dump(exclude_unset=True, exclude_none=True))
     return updated
 
@@ -155,7 +200,10 @@ def patch_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(ge
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    updated = repo.update(outage_id, payload)
+    try:
+        updated = repo.update(outage_id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     OutageEventRepository(db).record(outage_id, "patched", payload.model_dump(exclude_unset=True, exclude_none=True))
     return updated
 
@@ -174,7 +222,10 @@ def delete_outage(outage_id: str, db: Session = Depends(get_db)):
 @router.post("/{outage_id}/resolve")
 def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = Depends(get_db)):
     repo = OutageRepository(db)
-    outage = repo.resolve(outage_id, payload.mttr_minutes)
+    try:
+        outage = repo.resolve(outage_id, payload.mttr_minutes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not outage:
         raise HTTPException(status_code=404, detail="Outage not found")
 
@@ -193,9 +244,7 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = 
     OutageEventRepository(db).record(outage_id, "sla_computed", {"status": stored_sla.status})
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
-    webhook_event = (
-        WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
-    )
+    webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
     trigger_sla_violation_webhooks(
         db,
         sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
@@ -227,9 +276,7 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
     stored_sla = sla_repo.create_if_changed(sla)
     payment_repo = PaymentRepository(db)
     payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
-    webhook_event = (
-        WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
-    )
+    webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
     trigger_sla_violation_webhooks(
         db,
         sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
