@@ -45,3 +45,9 @@ class TTLCache:
     def invalidate(self, key: str) -> None:
         with self._lock:
             self._store.pop(key, None)
+
+    def invalidate_prefix(self, prefix: str) -> None:
+        with self._lock:
+            keys = [k for k in self._store if k.startswith(prefix)]
+            for k in keys:
+                del self._store[k]

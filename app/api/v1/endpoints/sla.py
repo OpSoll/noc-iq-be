@@ -12,7 +12,7 @@ from app.models.sla import (
     SLASeverityConfig,
     SLATrendPoint,
 )
-from app.repositories.sla_repository import SLARepository
+from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.models import SLAResult
@@ -22,6 +22,13 @@ router = APIRouter()
 
 # Cache dashboard KPIs and trends for 30 seconds to reduce repeated DB load.
 _dashboard_cache: TTLCache = TTLCache(ttl_seconds=30)
+
+
+def _invalidate_analytics_cache() -> None:
+    """Invalidate all analytics cache keys after a mutating write (#157)."""
+    _dashboard_cache.invalidate("dashboard_kpis")
+    # Invalidate all trend keys by clearing the entire store
+    _dashboard_cache.invalidate_prefix("trends_")
 
 
 @router.get("/calculate", response_model=SLAResult)
@@ -34,6 +41,7 @@ def calculate_sla(outage_id: str, severity: str, mttr_minutes: int):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
 
 @router.post("/preview")
 def preview_sla(payload: SLAPreviewRequest):
@@ -67,27 +75,44 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
 
 
 @router.get("/analytics/dashboard", response_model=SLADashboardKPI)
-def get_sla_dashboard_kpis(db: Session = Depends(get_db)):
-    cached = _dashboard_cache.get("dashboard_kpis")
+def get_sla_dashboard_kpis(
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    cache_key = f"dashboard_kpis_{severity}_{site_id}"
+    cached = _dashboard_cache.get(cache_key)
     if cached is not None:
         return cached
     repo = SLARepository(db)
-    result = repo.aggregate_dashboard_kpis()
-    _dashboard_cache.set("dashboard_kpis", result)
+    result = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    _dashboard_cache.set(cache_key, result)
     return result
 
 
 @router.get("/analytics/trends", response_model=list[SLATrendPoint])
 def get_sla_trends(
     days: int = Query(default=7, ge=1, le=90),
+    bucket: str = Query(default="day", description="Bucket interval: day, week, month"),
+    tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    cache_key = f"trends_{days}"
+    if bucket not in VALID_BUCKETS:
+        raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
+
+    cache_key = f"trends_{days}_{bucket}_{tz}_{severity}_{site_id}"
     cached = _dashboard_cache.get(cache_key)
     if cached is not None:
         return cached
+
     repo = SLARepository(db)
-    result = repo.aggregate_trends(limit_days=days)
+    try:
+        result = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     _dashboard_cache.set(cache_key, result)
     return result
 
@@ -96,6 +121,8 @@ def get_sla_trends(
 def aggregate_sla_performance(
     start_date: datetime | None = Query(default=None),
     end_date: datetime | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     if start_date and start_date.tzinfo is not None:
@@ -107,4 +134,4 @@ def aggregate_sla_performance(
         raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
 
     repo = SLARepository(db)
-    return repo.aggregate_performance(start_date=start_date, end_date=end_date)
+    return repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=site_id)
