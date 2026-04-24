@@ -22,7 +22,10 @@ def create_wallet(payload: WalletCreateRequest):
 
 @router.post("/link", response_model=Wallet)
 def link_wallet(payload: WalletLinkRequest):
-    return WalletRegistry.link_wallet(payload)
+    try:
+        return WalletRegistry.link_wallet(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
 
 @router.get("/ping")

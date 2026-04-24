@@ -8,6 +8,7 @@ from app.models.orm.audit_log import AuditLogORM
 from app.models.orm.payment import PaymentTransactionORM
 from app.models.payment import PaymentTransaction, validate_transition
 from app.models.sla import SLAResult
+from app.core.config import settings
 
 
 def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
@@ -63,12 +64,14 @@ class PaymentRepository:
             return None
         return _orm_to_pydantic(orm)
 
-    def get_by_sla_result(self, sla_result_id: int) -> Optional[PaymentTransaction]:
-        orm = (
+    def get_by_sla_result(self, sla_result_id: int, for_update: bool = False) -> Optional[PaymentTransaction]:
+        query = (
             self.db.query(PaymentTransactionORM)
             .filter(PaymentTransactionORM.sla_result_id == sla_result_id)
-            .first()
         )
+        if for_update:
+            query = query.with_for_update()
+        orm = query.first()
         if not orm:
             return None
         return _orm_to_pydantic(orm)
@@ -130,7 +133,7 @@ class PaymentRepository:
         if sla_result.id is None:
             raise ValueError("SLA result id is required to generate a payment record")
 
-        existing = self.get_by_sla_result(sla_result.id)
+        existing = self.get_by_sla_result(sla_result.id, for_update=True)
         if existing:
             return existing
 
@@ -140,9 +143,9 @@ class PaymentRepository:
             transaction_hash=f"sla-{sla_result.id}-{sla_result.payment_type}",
             type=sla_result.payment_type,
             amount=normalized_amount,
-            asset_code="USDC",
-            from_address="SYSTEM_POOL",
-            to_address="OUTAGE_SETTLEMENT",
+            asset_code=settings.PAYMENT_ASSET_CODE,
+            from_address=settings.PAYMENT_FROM_ADDRESS,
+            to_address=settings.PAYMENT_TO_ADDRESS,
             status="pending",
             outage_id=outage_id,
             sla_result_id=sla_result.id,
