@@ -1,11 +1,25 @@
 from datetime import datetime
+from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.models.enums import Severity, OutageStatus
+from app.models.enums import OutageStatus, Severity
 
 from .outage import Location
+
+
+class OutageSortField(str, Enum):
+    detected_at = "detected_at"
+    site_name = "site_name"
+    severity = "severity"
+    status = "status"
+    id = "id"
+
+
+class OutageSortDirection(str, Enum):
+    asc = "asc"
+    desc = "desc"
 
 
 class OutageCreate(BaseModel):
