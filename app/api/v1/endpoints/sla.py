@@ -11,6 +11,7 @@ from app.models.sla import (
     SLAPreviewRequest,
     SLASeverityConfig,
     SLATrendPoint,
+    SLAAnalyticsSnapshot,
 )
 from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
@@ -135,3 +136,28 @@ def aggregate_sla_performance(
 
     repo = SLARepository(db)
     return repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=site_id)
+
+
+@router.post("/analytics/snapshot", response_model=SLAAnalyticsSnapshot, status_code=201)
+def create_analytics_snapshot(
+    snapshot_key: str = Query(default="global"),
+    db: Session = Depends(get_db),
+):
+    """Materialize current SLA aggregates into a persistent snapshot."""
+    repo = SLARepository(db)
+    snapshot = repo.create_snapshot(snapshot_key=snapshot_key)
+    _invalidate_analytics_cache()
+    return snapshot
+
+
+@router.get("/analytics/snapshot", response_model=SLAAnalyticsSnapshot)
+def get_latest_analytics_snapshot(
+    snapshot_key: str = Query(default="global"),
+    db: Session = Depends(get_db),
+):
+    """Return the most recent pre-aggregated analytics snapshot."""
+    repo = SLARepository(db)
+    snapshot = repo.get_latest_snapshot(snapshot_key=snapshot_key)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="No snapshot found for the given key")
+    return snapshot

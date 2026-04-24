@@ -7,7 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.models.orm.outage import OutageORM
 from app.models.orm.sla import SLAResultORM
-from app.models.sla import SLAResult, SLADashboardKPI, SLAPerformanceAggregation, SLATrendPoint
+from app.models.orm.sla_snapshot import SLAAnalyticsSnapshotORM
+from app.models.sla import SLAResult, SLADashboardKPI, SLAPerformanceAggregation, SLATrendPoint, SLAAnalyticsSnapshot
 
 BucketInterval = Literal["day", "week", "month"]
 VALID_BUCKETS: tuple[str, ...] = ("day", "week", "month")
@@ -265,3 +266,54 @@ class SLARepository:
             )
             for row in rows
         ][::-1]
+
+    def create_snapshot(self, snapshot_key: str = "global") -> SLAAnalyticsSnapshot:
+        """Materialize current dashboard KPIs into a snapshot row."""
+        kpis = self.aggregate_dashboard_kpis()
+        perf = self.aggregate_performance()
+        orm = SLAAnalyticsSnapshotORM(
+            snapshot_key=snapshot_key,
+            total_outages=kpis.total_outages,
+            total_violations=kpis.total_violations,
+            total_rewards=kpis.total_rewards,
+            total_penalties=kpis.total_penalties,
+            net_payout=kpis.net_payout,
+            avg_mttr=perf.avg_mttr,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        self.db.add(orm)
+        self.db.commit()
+        self.db.refresh(orm)
+        return SLAAnalyticsSnapshot(
+            id=orm.id,
+            snapshot_key=orm.snapshot_key,
+            total_outages=orm.total_outages,
+            total_violations=orm.total_violations,
+            total_rewards=orm.total_rewards,
+            total_penalties=orm.total_penalties,
+            net_payout=orm.net_payout,
+            avg_mttr=orm.avg_mttr,
+            created_at=str(orm.created_at),
+        )
+
+    def get_latest_snapshot(self, snapshot_key: str = "global") -> Optional[SLAAnalyticsSnapshot]:
+        """Return the most recent snapshot for the given key."""
+        orm = (
+            self.db.query(SLAAnalyticsSnapshotORM)
+            .filter(SLAAnalyticsSnapshotORM.snapshot_key == snapshot_key)
+            .order_by(SLAAnalyticsSnapshotORM.created_at.desc())
+            .first()
+        )
+        if not orm:
+            return None
+        return SLAAnalyticsSnapshot(
+            id=orm.id,
+            snapshot_key=orm.snapshot_key,
+            total_outages=orm.total_outages,
+            total_violations=orm.total_violations,
+            total_rewards=orm.total_rewards,
+            total_penalties=orm.total_penalties,
+            net_payout=orm.net_payout,
+            avg_mttr=orm.avg_mttr,
+            created_at=str(orm.created_at),
+        )
