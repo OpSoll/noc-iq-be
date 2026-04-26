@@ -16,7 +16,7 @@ from app.services.metrics import increment_counter, timer
 from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import enqueue_sla_computation, enqueue_bulk_sla_computation
 from app.utils.correlation import get_correlation_id
-from app.utils.logging import get_structured_logger
+from app.core.security import require_engineer, require_admin
 
 logger = get_structured_logger("jobs_api")
 
@@ -131,7 +131,7 @@ def _sync_job_status_from_celery(db: Session, job: Job) -> Job:
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def submit_sla_computation(payload: SLAJobRequest, request: Request, db: Session = Depends(get_db)):
+def submit_sla_computation(payload: SLAJobRequest, request: Request, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     """
     Enqueue an async SLA computation job for a single device.
     Returns immediately with a job record for status polling.
@@ -169,7 +169,7 @@ def submit_sla_computation(payload: SLAJobRequest, request: Request, db: Session
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def submit_bulk_sla_computation(payload: BulkSLAJobRequest, request: Request, db: Session = Depends(get_db)):
+def submit_bulk_sla_computation(payload: BulkSLAJobRequest, request: Request, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     """
     Enqueue an async bulk SLA computation job for multiple devices.
     Returns immediately with a job record for status polling.
@@ -215,6 +215,7 @@ def list_jobs(
     job_type: Optional[JobType] = Query(None),
     status_filter: Optional[JobStatus] = Query(None, alias="status"),
     limit: int = Query(50, ge=1, le=200),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     """List all jobs with optional filters."""
@@ -227,7 +228,7 @@ def list_jobs(
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-def get_job(job_id: UUID, db: Session = Depends(get_db)):
+def get_job(job_id: UUID, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     """
     Get a single job's status. Syncs status from Celery backend
     for in-progress jobs before responding.
@@ -238,7 +239,7 @@ def get_job(job_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-def cancel_job(job_id: UUID, db: Session = Depends(get_db)):
+def cancel_job(job_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     """
     Revoke a pending or running Celery task and mark the job as REVOKED.
     Does not interrupt already-executing tasks unless terminate=True is set.

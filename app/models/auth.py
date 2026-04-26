@@ -3,12 +3,14 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from app.models.enums import Role
+
 
 class AuthUser(BaseModel):
     id: str
     email: str
     full_name: Optional[str] = None
-    role: str = "engineer"
+    role: Role = Role.engineer
     stellar_wallet: Optional[str] = None
     created_at: datetime
 
@@ -20,7 +22,7 @@ class LoginRequest(BaseModel):
 
 class RegisterRequest(LoginRequest):
     full_name: str = Field(..., min_length=1)
-    role: str = "engineer"
+    role: Role = Role.engineer
 
 
 class AuthSessionResponse(BaseModel):

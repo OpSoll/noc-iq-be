@@ -26,6 +26,23 @@ class Settings(BaseSettings):
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
+    # Auth rate limiting settings
+    AUTH_MAX_FAILED_ATTEMPTS: int = 5  # Max failed login attempts before lockout
+    AUTH_LOCKOUT_DURATION_MINUTES: int = 15  # Lockout duration in minutes
+    AUTH_RATE_LIMIT_REQUESTS: int = 10  # Max requests per window
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 300  # Rate limit window in seconds
+
+    # Input size and payload guardrails
+    MAX_REQUEST_BODY_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB max request body size
+    MAX_FILE_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB max file upload size (matches existing import limit)
+    MAX_BULK_OUTAGES_COUNT: int = 1000  # Max number of outages in bulk create/import
+    MAX_WEBHOOK_PAYLOAD_SIZE_BYTES: int = 1024 * 1024  # 1 MB max webhook payload size
+    MAX_AFFECTED_SERVICES_COUNT: int = 100  # Max number of affected services per outage
+    MAX_SITE_NAME_LENGTH: int = 255  # Max site name length
+    MAX_DESCRIPTION_LENGTH: int = 5000  # Max description length
+    MAX_WEBHOOK_EVENTS_COUNT: int = 50  # Max webhook events per webhook
+    MAX_WEBHOOK_NAME_LENGTH: int = 255  # Max webhook name length
+    MAX_WEBHOOK_URL_LENGTH: int = 2048  # Max webhook URL length
 
     class Config:
         env_file = ".env"

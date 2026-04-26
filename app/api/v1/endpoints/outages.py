@@ -22,6 +22,8 @@ from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
 from app.utils.exporter import export_outages
 from app.api.v1.endpoints.sla import _invalidate_analytics_cache
+from app.core.security import require_engineer, require_admin
+from app.core.config import settings
 
 router = APIRouter()
 
@@ -34,6 +36,7 @@ def export_outages_endpoint(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
@@ -59,7 +62,7 @@ def export_outages_endpoint(
 
 
 @router.get("/violations")
-def list_violations(db: Session = Depends(get_db)):
+def list_violations(current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     return repo.list_violations()
 
@@ -81,6 +84,7 @@ def list_outages(
         default=OutageSortDirection.desc,
         description="Sort direction: asc or desc. Default is desc.",
     ),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
@@ -98,7 +102,7 @@ def list_outages(
 
 
 @router.get("/{outage_id}", response_model=Outage)
-def get_outage(outage_id: str, db: Session = Depends(get_db)):
+def get_outage(outage_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     outage = repo.get(outage_id)
     if not outage:
@@ -107,7 +111,7 @@ def get_outage(outage_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/", response_model=Outage)
-def create_outage(payload: OutageCreate, db: Session = Depends(get_db)):
+def create_outage(payload: OutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     try:
         outage = repo.create(payload)
@@ -121,7 +125,7 @@ def create_outage(payload: OutageCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/bulk", response_model=dict)
-def bulk_create_outages(payload: BulkOutageCreate, db: Session = Depends(get_db)):
+def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     try:
         created = repo.bulk_create(payload.outages)
@@ -135,9 +139,10 @@ async def import_outages(
     file: UploadFile = File(...),
     dry_run: bool = Query(default=False, description="Validate rows without writing to the database"),
     atomic: bool = Query(default=True, description="Roll back all writes if any row fails"),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    MAX_BYTES = 10 * 1024 * 1024  # 10 MB
+    MAX_BYTES = settings.MAX_FILE_UPLOAD_SIZE_BYTES  # Use configurable limit
     CHUNK_SIZE = 64 * 1024  # 64 KB
 
     filename = file.filename or ""
@@ -171,6 +176,13 @@ async def import_outages(
             raise HTTPException(status_code=400, detail=f"Invalid CSV: {exc}") from exc
     else:
         raise HTTPException(status_code=400, detail="Unsupported file format. Use .json or .csv")
+
+    # Validate row count limit
+    if len(rows) > settings.MAX_BULK_OUTAGES_COUNT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many rows in file. Maximum allowed is {settings.MAX_BULK_OUTAGES_COUNT}."
+        )
 
     repo = OutageRepository(db)
     row_outcomes: list[dict] = []
@@ -273,7 +285,7 @@ def _import_response(mode: str, total: int, persisted: int, outcomes: list[dict]
 
 
 @router.put("/{outage_id}", response_model=Outage)
-def update_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(get_db)):
+def update_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
@@ -288,7 +300,7 @@ def update_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(g
 
 
 @router.patch("/{outage_id}", response_model=Outage)
-def patch_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(get_db)):
+def patch_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
@@ -303,7 +315,7 @@ def patch_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(ge
 
 
 @router.delete("/{outage_id}")
-def delete_outage(outage_id: str, db: Session = Depends(get_db)):
+def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
@@ -314,7 +326,7 @@ def delete_outage(outage_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{outage_id}/resolve")
-def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = Depends(get_db)):
+def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
     try:
         outage = repo.resolve(outage_id, payload.mttr_minutes)

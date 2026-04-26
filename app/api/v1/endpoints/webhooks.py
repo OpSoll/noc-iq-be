@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
 from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION
+from app.core.security import require_admin
+from app.core.config import settings
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
@@ -26,11 +28,28 @@ class WebhookCreate(BaseModel):
     max_retries: int = 3
     is_active: bool = True
 
+    @field_validator("name")
+    @classmethod
+    def validate_name_length(cls, v: str) -> str:
+        if len(v) > settings.MAX_WEBHOOK_NAME_LENGTH:
+            raise ValueError(f"name too long. Maximum length is {settings.MAX_WEBHOOK_NAME_LENGTH} characters.")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+        url_str = str(v)
+        if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
+            raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        return v
+
     @field_validator("events")
     @classmethod
-    def events_not_empty(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
+    def validate_events_count(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
         if not v:
             raise ValueError("At least one event must be specified.")
+        if len(v) > settings.MAX_WEBHOOK_EVENTS_COUNT:
+            raise ValueError(f"too many events. Maximum allowed is {settings.MAX_WEBHOOK_EVENTS_COUNT}.")
         return v
 
 
@@ -41,6 +60,32 @@ class WebhookUpdate(BaseModel):
     events: Optional[List[WebhookEvent]] = None
     max_retries: Optional[int] = None
     is_active: Optional[bool] = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name_length(cls, v: str) -> str:
+        if v is not None and len(v) > settings.MAX_WEBHOOK_NAME_LENGTH:
+            raise ValueError(f"name too long. Maximum length is {settings.MAX_WEBHOOK_NAME_LENGTH} characters.")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+        if v is not None:
+            url_str = str(v)
+            if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
+                raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def validate_events_count(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
+        if v is not None:
+            if not v:
+                raise ValueError("At least one event must be specified.")
+            if len(v) > settings.MAX_WEBHOOK_EVENTS_COUNT:
+                raise ValueError(f"too many events. Maximum allowed is {settings.MAX_WEBHOOK_EVENTS_COUNT}.")
+        return v
 
 
 class WebhookResponse(BaseModel):
@@ -133,7 +178,7 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
 # --------------------------------------------------------------------------- #
 
 @router.post("", response_model=WebhookResponse, status_code=status.HTTP_201_CREATED)
-def create_webhook(payload: WebhookCreate, db: Session = Depends(get_db)):
+def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = Webhook(
         name=payload.name,
         url=str(payload.url),
@@ -154,6 +199,7 @@ def list_webhooks(
     name: Optional[str] = Query(None, description="Filter by name (case-insensitive substring match)"),  # BE-083
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),  # BE-083
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),  # BE-083
+    current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     query = db.query(Webhook)
@@ -166,13 +212,13 @@ def list_webhooks(
 
 
 @router.get("/{webhook_id}", response_model=WebhookResponse)
-def get_webhook(webhook_id: UUID, db: Session = Depends(get_db)):
+def get_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
     return _serialize_webhook(webhook)
 
 
 @router.patch("/{webhook_id}", response_model=WebhookResponse)
-def update_webhook(webhook_id: UUID, payload: WebhookUpdate, db: Session = Depends(get_db)):
+def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
 
     if payload.name is not None:
@@ -194,7 +240,7 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, db: Session = Depen
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_webhook(webhook_id: UUID, db: Session = Depends(get_db)):
+def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
     db.delete(webhook)
     db.commit()

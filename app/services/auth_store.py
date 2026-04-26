@@ -11,6 +11,7 @@ from app.repositories.session_repository import SessionRepository
 from app.core.security import get_password_hash, verify_password, validate_password_policy
 from app.services.audit_log import audit_log
 from app.db.session import SessionLocal
+from app.core.config import settings
 
 TOKEN_TTL_SECONDS = 3600
 
@@ -70,10 +71,29 @@ class AuthStore:
         user_repo = UserRepository(db)
         session_repo = SessionRepository(db)
         
+        # Check if account is locked
+        if user_repo.is_account_locked(payload.email):
+            audit_log.log_event(db, "login_failed_locked", email=payload.email)
+            raise ValueError("Account is temporarily locked due to too many failed login attempts")
+        
         stored_user = user_repo.get_by_email(payload.email)
         if not stored_user or not verify_password(payload.password, stored_user.hashed_password):
+            # Increment failed attempts
+            user_repo.increment_failed_attempts(payload.email)
+            
+            # Check if we need to lock the account
+            if stored_user and (stored_user.failed_login_attempts or 0) >= settings.AUTH_MAX_FAILED_ATTEMPTS:
+                lockout_until = cls._now() + timedelta(minutes=settings.AUTH_LOCKOUT_DURATION_MINUTES)
+                user_repo.lock_account(payload.email, lockout_until)
+                audit_log.log_event(db, "account_locked", email=payload.email, 
+                                  details={"lockout_duration_minutes": settings.AUTH_LOCKOUT_DURATION_MINUTES})
+                raise ValueError(f"Account locked due to too many failed attempts. Try again in {settings.AUTH_LOCKOUT_DURATION_MINUTES} minutes")
+            
             audit_log.log_event(db, "login_failed", email=payload.email)
             raise ValueError("Invalid credentials")
+
+        # Successful login - reset failed attempts
+        user_repo.reset_failed_attempts(payload.email)
 
         access_token = f"atk_{uuid4().hex}"
         refresh_token = f"rtk_{uuid4().hex}"
@@ -144,6 +164,12 @@ class AuthStore:
             raise ValueError("Invalid or expired refresh token")
 
         email = old_session.email
+        
+        # Check if account is locked
+        if user_repo.is_account_locked(email):
+            audit_log.log_event(db, "refresh_failed_locked", email=email)
+            raise ValueError("Account is temporarily locked")
+        
         session_repo.delete_session(old_session.access_token)
 
         stored_user = user_repo.get_by_email(email)

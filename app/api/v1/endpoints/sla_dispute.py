@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.sla_dispute import DisputeAuditLog, SLADispute, DisputeStatus
 from app.schemas.sla_dispute import DisputeAuditLogResponse, DisputeFlagRequest, DisputeResolveRequest, DisputeResponse
+from app.core.security import require_engineer, require_admin
 
 router = APIRouter()
 
@@ -17,6 +18,7 @@ router = APIRouter()
 )
 def list_disputes(
     status_filter: DisputeStatus | None = Query(default=None, alias="status"),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     query = db.query(SLADispute).order_by(SLADispute.flagged_at.desc())
@@ -34,6 +36,7 @@ def list_disputes(
 def flag_dispute(
     sla_result_id: int,
     payload: DisputeFlagRequest,
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     existing = (
@@ -77,6 +80,7 @@ def flag_dispute(
 def resolve_dispute(
     sla_result_id: int,
     payload: DisputeResolveRequest,
+    current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     if payload.status not in (DisputeStatus.RESOLVED, DisputeStatus.REJECTED):

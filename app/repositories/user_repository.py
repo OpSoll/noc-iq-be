@@ -1,14 +1,16 @@
 from typing import Optional
+from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.orm.user import UserORM
 from app.models.auth import AuthUser
+from app.models.enums import Role
 
 def user_orm_to_pydantic(orm: UserORM) -> AuthUser:
     return AuthUser(
         id=orm.id,
         email=orm.email,
         full_name=orm.full_name,
-        role=orm.role,
+        role=Role(orm.role),
         created_at=orm.created_at,
     )
 
@@ -22,7 +24,7 @@ class UserRepository:
     def get_by_id(self, user_id: str) -> Optional[UserORM]:
         return self.db.query(UserORM).filter(UserORM.id == user_id).first()
 
-    def create(self, user_id: str, email: str, hashed_password: str, full_name: str, role: str) -> UserORM:
+    def create(self, user_id: str, email: str, hashed_password: str, full_name: str, role: Role) -> UserORM:
         user = UserORM(
             id=user_id,
             email=email,
@@ -34,3 +36,34 @@ class UserRepository:
         self.db.commit()
         self.db.refresh(user)
         return user
+
+    def increment_failed_attempts(self, email: str) -> None:
+        """Increment failed login attempts for a user."""
+        user = self.get_by_email(email)
+        if user:
+            user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+            self.db.commit()
+
+    def reset_failed_attempts(self, email: str) -> None:
+        """Reset failed login attempts for a user (on successful login)."""
+        user = self.get_by_email(email)
+        if user:
+            user.failed_login_attempts = 0
+            user.locked_until = None
+            self.db.commit()
+
+    def lock_account(self, email: str, locked_until: datetime) -> None:
+        """Lock a user account until the specified time."""
+        user = self.get_by_email(email)
+        if user:
+            user.locked_until = locked_until
+            self.db.commit()
+
+    def is_account_locked(self, email: str) -> bool:
+        """Check if a user account is currently locked."""
+        user = self.get_by_email(email)
+        if not user:
+            return False
+        if user.locked_until is None:
+            return False
+        return user.locked_until > datetime.utcnow()
