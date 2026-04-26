@@ -64,6 +64,7 @@ class WebhookDeliveryResponse(BaseModel):
     response_status_code: Optional[int]
     error_message: Optional[str]
     delivered_at: Optional[str]
+    dead_lettered_at: Optional[str]  # BE-086: Include dead-letter timestamp
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -72,6 +73,17 @@ class WebhookDeliveryResponse(BaseModel):
 class WebhookSecretRotateResponse(BaseModel):
     webhook_id: UUID
     new_secret: str
+    message: str
+
+
+class WebhookReplayRequest(BaseModel):
+    device_id: Optional[str] = None
+    outage_id: Optional[str] = None
+    limit: int = 50
+
+
+class WebhookReplayResponse(BaseModel):
+    replayed_count: int
     message: str
 
 
@@ -111,6 +123,7 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
         response_status_code=delivery.response_status_code,
         error_message=delivery.error_message,
         delivered_at=delivery.delivered_at.isoformat() if delivery.delivered_at else None,
+        dead_lettered_at=delivery.dead_lettered_at.isoformat() if delivery.dead_lettered_at else None,
         created_at=delivery.created_at.isoformat(),
     )
 
@@ -244,3 +257,74 @@ def retry_delivery(webhook_id: UUID, delivery_id: UUID, db: Session = Depends(ge
     dispatch_delivery(db, delivery.id)
     db.refresh(delivery)
     return _serialize_delivery(delivery)
+
+
+# BE-086: Dead-letter handling endpoints
+
+@router.get("/{webhook_id}/dead-letter-deliveries", response_model=List[WebhookDeliveryResponse])
+def list_dead_letter_deliveries(
+    webhook_id: UUID,
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """List dead-lettered deliveries for a webhook."""
+    _get_webhook_or_404(db, webhook_id)
+    from app.services.webhook_service import get_dead_letter_deliveries
+    deliveries = get_dead_letter_deliveries(db, webhook_id=webhook_id, limit=limit)
+    return [_serialize_delivery(d) for d in deliveries]
+
+
+@router.post("/{webhook_id}/deliveries/{delivery_id}/replay", response_model=WebhookDeliveryResponse)
+def replay_dead_letter_delivery(
+    webhook_id: UUID, 
+    delivery_id: UUID, 
+    db: Session = Depends(get_db)
+):
+    """Replay a dead-lettered delivery."""
+    _get_webhook_or_404(db, webhook_id)
+    delivery = (
+        db.query(WebhookDelivery)
+        .filter(
+            WebhookDelivery.id == delivery_id,
+            WebhookDelivery.webhook_id == webhook_id,
+        )
+        .first()
+    )
+    if not delivery:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found.")
+    
+    from app.services.webhook_service import replay_dead_letter_delivery
+    success = replay_dead_letter_delivery(db, delivery_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Failed to replay delivery. It may not be in dead-letter status."
+        )
+    
+    db.refresh(delivery)
+    return _serialize_delivery(delivery)
+
+
+# BE-085: Webhook replay by event or outage filters
+
+@router.post("/replay-by-context", response_model=WebhookReplayResponse)
+def replay_deliveries_by_context(
+    event: WebhookEvent,
+    payload: WebhookReplayRequest,
+    db: Session = Depends(get_db)
+):
+    """Replay deliveries by event and context (device or outage)."""
+    from app.services.webhook_service import replay_deliveries_by_event_context
+    
+    replayed_count = replay_deliveries_by_event_context(
+        db,
+        event=event,
+        device_id=payload.device_id,
+        outage_id=payload.outage_id,
+        limit=payload.limit
+    )
+    
+    return WebhookReplayResponse(
+        replayed_count=replayed_count,
+        message=f"Replayed {replayed_count} deliveries for event {event.value}"
+    )

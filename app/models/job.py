@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, Enum as SAEnum, Float
+from sqlalchemy import Column, String, DateTime, Text, Enum as SAEnum, Float, JSON
 from sqlalchemy.dialects.postgresql import UUID
 import enum
 
@@ -32,6 +32,9 @@ class Job(Base):
     result = Column(Text, nullable=True)         # JSON-encoded result
     error = Column(Text, nullable=True)
     progress = Column(Float, default=0.0)        # 0.0 – 100.0
+    progress_details = Column(JSON, nullable=True)  # Structured progress information
+    partial_results = Column(JSON, nullable=True)   # Partial results for bulk operations
+    per_item_errors = Column(JSON, nullable=True)   # Per-item error tracking
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
