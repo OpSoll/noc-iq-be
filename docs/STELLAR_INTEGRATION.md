@@ -147,11 +147,11 @@ STELLAR_NETWORK=testnet
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 STELLAR_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 
-# Pool Wallet (keep secret key secure!)
-STELLAR_POOL_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+# Pool Wallet - NEVER commit secret keys to version control!
+# Generate these using: stellar-sdk Keypair.random()
 STELLAR_POOL_PUBLIC_KEY=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
-# Smart Contract IDs
+# Smart Contract IDs - obtained after contract deployment
 SLA_CONTRACT_ID=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
 USDC_TOKEN_ADDRESS=CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 NOCIQ_TOKEN_ADDRESS=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -161,19 +161,30 @@ AUTO_PAYMENT_ENABLED=true
 MAX_AUTO_PAYMENT_AMOUNT=10000
 ```
 
+> **SECURITY WARNING**: Never commit secret keys to version control. Use environment variables or secure key management systems. The `STELLAR_POOL_SECRET_KEY` should be stored securely and never exposed in logs, documentation, or code examples.
+
 ### 2. Create Stellar Accounts
+
+**SECURITY CRITICAL**: Handle secret keys with extreme care. Never expose them in logs, documentation, or share them electronically.
 
 **Using Stellar Laboratory (Testnet):**
 
 1. Go to [Stellar Laboratory](https://laboratory.stellar.org/#account-creator?network=test)
 2. Click "Generate keypair"
-3. Save the **Secret Key** securely (starts with 'S')
-4. Copy the **Public Key** (starts with 'G')
+3. **IMMEDIATELY SAVE the Secret Key securely** (starts with 'S') - store in password manager or hardware security module
+4. Copy the **Public Key** (starts with 'G') for configuration
 5. Click "Fund account" to get testnet XLM from Friendbot
 
-**Create two accounts:**
-- **Pool Account**: For holding and distributing funds
-- **Operator Account**: For testing penalty payments
+**Create accounts with clear purposes:**
+- **Pool Account**: For holding and distributing funds (highest security requirement)
+- **Operator Account**: For testing penalty payments (medium security)
+
+**NEVER**:
+- Commit secret keys to version control
+- Log secret keys in application logs
+- Include secret keys in documentation examples
+- Share secret keys via email, chat, or unencrypted channels
+- Use the same keys for testnet and mainnet
 
 ### 3. Establish Trustlines (USDC)
 
@@ -225,10 +236,13 @@ cargo build --target wasm32-unknown-unknown --release
 
 **Deploy to testnet:**
 ```bash
+# SECURITY: Use environment variable for secret key, never hardcode
+export STELLAR_DEPLOYER_SECRET="your-actual-secret-key-here"
+
 soroban contract deploy \
   --wasm target/wasm32-unknown-unknown/release/sla_calculator.wasm \
   --network testnet \
-  --source-account SXXX...
+  --source-account "$STELLAR_DEPLOYER_SECRET"
 ```
 
 **Initialize contract:**
@@ -236,7 +250,7 @@ soroban contract deploy \
 soroban contract invoke \
   --id CCCC... \
   --network testnet \
-  --source-account SXXX... \
+  --source-account "$STELLAR_DEPLOYER_SECRET" \
   -- initialize \
   --admin GXXX... \
   --usdc_token CBBB... \
@@ -276,14 +290,32 @@ async function connectWallet() {
 from stellar_sdk import Keypair
 
 def create_wallet():
-    """Create a new Stellar keypair"""
+    """Create a new Stellar keypair for a user"""
     keypair = Keypair.random()
-    
+
+    # SECURITY: Never return or log the secret key
+    # Only return the public key for wallet linking
     return {
         "public_key": keypair.public_key,
-        "secret_key": keypair.secret  # Store securely!
+        "secret_key": "[REDACTED - Store securely server-side or use hardware security module]"
+    }
+
+# CORRECT implementation - only expose public key
+def create_wallet_secure():
+    """Create a new Stellar keypair"""
+    keypair = Keypair.random()
+
+    # Store secret key securely (database with encryption, HSM, etc.)
+    # NEVER return it in API responses
+    store_secret_key_securely(keypair.secret)
+
+    return {
+        "public_key": keypair.public_key,
+        "message": "Wallet created. Secret key stored securely."
     }
 ```
+
+> **SECURITY WARNING**: The above example shows what NOT to do. Secret keys should never be returned in API responses. Use secure key management systems and only expose public keys for wallet operations.
 
 ### Check Balance
 
@@ -420,18 +452,25 @@ async def process_outage_resolution(outage_id: str):
 ### Invoking Contract (Backend)
 
 ```python
-from stellar_sdk import SorobanServer, TransactionBuilder
+import os
+from stellar_sdk import SorobanServer, TransactionBuilder, Network
 from stellar_sdk.soroban_rpc import GetTransactionStatus
 
 async def invoke_sla_contract(outage_id: str, severity: str, mttr: int):
     """Invoke SLA calculator contract"""
-    
+
     soroban_server = SorobanServer("https://soroban-testnet.stellar.org")
-    source_keypair = Keypair.from_secret(os.getenv("STELLAR_POOL_SECRET_KEY"))
-    
+
+    # SECURITY: Load secret from environment, never hardcode
+    source_secret = os.getenv("STELLAR_POOL_SECRET_KEY")
+    if not source_secret:
+        raise ValueError("STELLAR_POOL_SECRET_KEY environment variable not set")
+
+    source_keypair = Keypair.from_secret(source_secret)
+
     # Build contract invocation
     source_account = server.load_account(source_keypair.public_key)
-    
+
     transaction = (
         TransactionBuilder(source_account, Network.TESTNET_NETWORK_PASSPHRASE, base_fee=100)
         .append_invoke_contract_function_op(
@@ -446,27 +485,29 @@ async def invoke_sla_contract(outage_id: str, severity: str, mttr: int):
         .set_timeout(30)
         .build()
     )
-    
+
     # Simulate first
     simulated = soroban_server.simulate_transaction(transaction)
-    
+
     # Prepare and sign
     prepared = soroban_server.prepare_transaction(transaction, simulated)
     prepared.sign(source_keypair)
-    
+
     # Submit
     response = soroban_server.send_transaction(prepared)
-    
+
     # Wait for confirmation
     while True:
         status = soroban_server.get_transaction(response.hash)
         if status.status != GetTransactionStatus.NOT_FOUND:
             break
         await asyncio.sleep(1)
-    
+
     # Parse result
     return parse_contract_result(status.return_value)
 ```
+
+> **SECURITY NOTE**: Always load sensitive keys from environment variables or secure key management systems. Never hardcode or log secret keys.
 
 ---
 
@@ -496,8 +537,12 @@ from app.services.stellar.payment_service import PaymentService
 
 service = PaymentService(network="testnet")
 
+# SECURITY: Load from environment, never pass as parameter
+import os
+source_secret = os.getenv("TEST_PAYMENT_SECRET_KEY")
+
 result = await service.create_payment(
-    source_secret="SXXX...",
+    source_secret=source_secret,  # Only use for testing with testnet keys
     destination="GXXX...",
     amount="10.00",
     asset_code="USDC"
@@ -506,6 +551,8 @@ result = await service.create_payment(
 print(f"Transaction hash: {result['tx_hash']}")
 print(f"View on explorer: https://stellar.expert/explorer/testnet/tx/{result['tx_hash']}")
 ```
+
+> **SECURITY WARNING**: Only use testnet keys for testing. Never use mainnet keys in test scripts. Consider using dedicated test accounts with minimal funds.
 
 ### 4. Test SLA Flow
 
@@ -590,7 +637,74 @@ Transfer sufficient USDC to your pool account to cover expected payments.
 
 ---
 
-## API Reference
+## Security Best Practices
+
+### Key Management
+
+**NEVER**:
+- Commit secret keys to version control
+- Log secret keys in application logs
+- Include secret keys in documentation or examples
+- Share secret keys via email, chat, or unencrypted channels
+- Use the same keys for testnet and mainnet
+
+**ALWAYS**:
+- Use environment variables or secure key management systems (AWS KMS, HashiCorp Vault, etc.)
+- Rotate keys regularly, especially after any suspected compromise
+- Use hardware security modules (HSM) for production keys
+- Implement proper access controls and audit logging for key operations
+- Use separate accounts/keys for different environments (dev/testnet/mainnet)
+
+### API Security
+
+**Wallet Operations**:
+- Never return secret keys in API responses
+- Only expose public keys for wallet linking and balance checks
+- Implement proper authentication and authorization for wallet operations
+- Use rate limiting to prevent abuse
+
+**Payment Operations**:
+- Validate all payment amounts and destinations
+- Implement idempotency to prevent duplicate payments
+- Log all payment operations for audit purposes
+- Use transaction monitoring and alerting
+
+### Smart Contract Security
+
+**Contract Deployment**:
+- Audit contracts before mainnet deployment
+- Use multisig for critical contract operations
+- Implement proper access controls in contracts
+- Test extensively on testnet before mainnet
+
+**Contract Invocation**:
+- Validate all inputs before sending to contracts
+- Handle contract errors gracefully
+- Implement retry logic with exponential backoff
+- Monitor contract gas usage and costs
+
+### Environment Separation
+
+**Testnet vs Mainnet**:
+- Never reuse keys between environments
+- Use different contract addresses for each environment
+- Implement environment-specific configuration validation
+- Test all operations on testnet before mainnet deployment
+
+### Monitoring and Alerting
+
+**Implement monitoring for**:
+- Failed transactions
+- Unusual payment amounts
+- Contract errors
+- Key access patterns
+- Balance changes
+
+**Set up alerts for**:
+- Large payment attempts
+- Contract failures
+- Key compromise indicators
+- Balance anomalies
 
 ### Payments
 

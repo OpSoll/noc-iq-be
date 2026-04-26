@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.payment import PaginatedPayments, PaymentTransaction
 from app.repositories.payment_repository import PaymentRepository
 from app.services.audit_log import audit_log
+from app.core.security import get_current_user, require_admin, require_engineer
 
 router = APIRouter()
 
@@ -25,6 +26,7 @@ def list_payments(
     outage_id: Optional[str] = None,
     date_from: Optional[datetime] = Query(default=None),
     date_to: Optional[datetime] = Query(default=None),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     if date_from and date_to and date_from > date_to:
@@ -48,7 +50,7 @@ def payments_ping():
 
 
 @router.get("/{transaction_id}/history", response_model=List[Dict[str, Any]])
-def get_payment_history(transaction_id: str, db: Session = Depends(get_db)):
+def get_payment_history(transaction_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = PaymentRepository(db)
     if not repo.get(transaction_id):
         raise HTTPException(status_code=404, detail="Payment not found")
@@ -56,7 +58,7 @@ def get_payment_history(transaction_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{transaction_id}", response_model=PaymentTransaction)
-def get_payment(transaction_id: str, db: Session = Depends(get_db)):
+def get_payment(transaction_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = PaymentRepository(db)
     payment = repo.get(transaction_id)
     if not payment:
@@ -69,7 +71,12 @@ class ReconcileRequest(BaseModel):
 
 
 @router.post("/{transaction_id}/reconcile", response_model=PaymentTransaction)
-def reconcile_payment(transaction_id: str, payload: ReconcileRequest, db: Session = Depends(get_db)):
+def reconcile_payment(
+    transaction_id: str,
+    payload: ReconcileRequest,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db)
+):
     repo = PaymentRepository(db)
     try:
         payment = repo.reconcile(transaction_id, payload.status)
@@ -82,7 +89,11 @@ def reconcile_payment(transaction_id: str, payload: ReconcileRequest, db: Sessio
 
 
 @router.post("/{transaction_id}/retry", response_model=PaymentTransaction)
-def retry_payment(transaction_id: str, db: Session = Depends(get_db)):
+def retry_payment(
+    transaction_id: str,
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db)
+):
     repo = PaymentRepository(db)
     existing = repo.get(transaction_id)
     if not existing:

@@ -18,6 +18,7 @@ from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.models import SLAResult
 from app.utils.cache import TTLCache
+from app.core.security import require_admin
 
 router = APIRouter()
 
@@ -68,7 +69,7 @@ def get_sla_config_by_severity(severity: str):
 
 
 @router.put("/config/{severity}", response_model=SLASeverityConfig)
-def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
+def update_sla_config(severity: str, payload: SLAConfigUpdateRequest, current_user=Depends(require_admin)):
     try:
         return update_config_for_severity(severity, payload)
     except ValueError as exc:
@@ -79,6 +80,7 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest):
 def get_sla_dashboard_kpis(
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     cache_key = f"dashboard_kpis_{severity}_{site_id}"
@@ -98,6 +100,7 @@ def get_sla_trends(
     tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     if bucket not in VALID_BUCKETS:

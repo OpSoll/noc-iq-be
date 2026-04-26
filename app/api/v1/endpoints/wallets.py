@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, Depends
 
 from app.models.wallet import (
     Wallet,
@@ -11,17 +11,18 @@ from app.models.wallet import (
     WalletTrustlineResponse,
 )
 from app.services.wallet_registry import WalletRegistry
+from app.core.security import require_engineer
 
 router = APIRouter()
 
 
 @router.post("/create", response_model=WalletCreateResponse, status_code=status.HTTP_201_CREATED)
-def create_wallet(payload: WalletCreateRequest):
+def create_wallet(payload: WalletCreateRequest, current_user=Depends(require_engineer)):
     return WalletRegistry.create_wallet(payload)
 
 
 @router.post("/link", response_model=Wallet)
-def link_wallet(payload: WalletLinkRequest):
+def link_wallet(payload: WalletLinkRequest, current_user=Depends(require_engineer)):
     try:
         return WalletRegistry.link_wallet(payload)
     except ValueError as exc:
@@ -37,6 +38,7 @@ def wallets_ping():
 def get_wallet(
     user_id: str,
     refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+    current_user=Depends(require_engineer),
 ):
     wallet = WalletRegistry.get_wallet(user_id, refresh=refresh)
     if not wallet:
@@ -48,6 +50,7 @@ def get_wallet(
 def get_wallet_status(
     user_id: str,
     refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+    current_user=Depends(require_engineer),
 ):
     wallet_status = WalletRegistry.get_status(user_id, refresh=refresh)
     if not wallet_status:
@@ -59,6 +62,7 @@ def get_wallet_status(
 def get_wallet_trustline(
     user_id: str,
     refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+    current_user=Depends(require_engineer),
 ):
     result = WalletRegistry.get_trustline(user_id, refresh=refresh)
     if not result:
@@ -70,6 +74,7 @@ def get_wallet_trustline(
 def get_wallet_funding_state(
     user_id: str,
     refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+    current_user=Depends(require_engineer),
 ):
     result = WalletRegistry.get_funding_state(user_id, refresh=refresh)
     if not result:
@@ -81,6 +86,7 @@ def get_wallet_funding_state(
 def get_wallet_balance(
     address: str,
     refresh: bool = Query(False, description="Force a live re-fetch instead of returning cached data"),
+    current_user=Depends(require_engineer),
 ):
     balance = WalletRegistry.get_balance(address, refresh=refresh)
     if not balance:

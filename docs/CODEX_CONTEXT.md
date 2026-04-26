@@ -91,8 +91,11 @@ Key endpoints:
 - GET /wallets/{user_id}
 - GET /wallets/{address}/balance
 
-Important constraint:
+**SECURITY CRITICAL**:
 - private keys are NEVER returned via API
+- private keys are NEVER logged or exposed
+- only public keys and balance information are accessible
+- wallet operations require proper authentication
 
 ---
 
@@ -179,6 +182,26 @@ Treat the following as non-routed or legacy helper paths:
 - Wallet operations must avoid private key exposure
 - SLA must be deterministic and reproducible
 - API responses must follow a consistent structure
+
+---
+
+## Security Constraints & Rules
+
+**CRITICAL SECURITY REQUIREMENTS**:
+
+- **Private Key Protection**: Private keys for Stellar wallets are never exposed via API responses, logs, or documentation
+- **Credential Management**: All sensitive credentials (database passwords, API keys, JWT secrets) must use environment variables
+- **Documentation Safety**: Examples must use placeholder values clearly marked as non-production
+- **Logging Security**: Never log sensitive information including partial keys, tokens, or passwords
+- **Environment Separation**: Testnet and mainnet credentials must be completely separate
+- **Access Control**: All financial operations require proper authentication and authorization
+- **Audit Trail**: All payment and SLA operations must be logged for audit purposes
+
+**Documentation Standards**:
+- Use `[REDACTED]` or `[EXAMPLE]` for sensitive placeholder values
+- Include security warnings for any blockchain or financial operations
+- Show secure patterns (environment variables, secure key management)
+- Distinguish clearly between testnet and mainnet examples
 
 ---
 

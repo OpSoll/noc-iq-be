@@ -18,7 +18,34 @@ Base URL: `http://localhost:8000` (development) | `https://api.nociq.com` (produ
 
 ---
 
-## Runtime Status
+## Payload Size and Input Guardrails
+
+The API enforces strict limits on request payloads and input data to prevent abuse and ensure system stability:
+
+### Request Body Limits
+- **Maximum request body size**: 10 MB for all endpoints
+- **Error response**: `413 Payload Too Large` with message "Request body too large. Maximum allowed size is 10485760 bytes."
+
+### File Upload Limits
+- **Maximum file upload size**: 10 MB (applies to `/api/v1/outages/import`)
+- **Error response**: `413 Payload Too Large` with message "File exceeds 10 MB limit"
+
+### Data Structure Limits
+- **Bulk operations**: Maximum 1000 items per bulk request
+- **Affected services**: Maximum 100 services per outage
+- **Site name**: Maximum 255 characters
+- **Description**: Maximum 5000 characters
+- **Webhook name**: Maximum 255 characters
+- **Webhook URL**: Maximum 2048 characters
+- **Webhook events**: Maximum 50 events per webhook
+
+### Validation Behavior
+- Oversized inputs are rejected with `400 Bad Request` and descriptive error messages
+- File uploads exceeding size limits fail fast during upload
+- All limits are configurable via environment variables
+- Validation occurs at both middleware and model levels for defense in depth
+
+---
 
 This document mixes current runtime endpoints with some roadmap-style descriptions. For contributor onboarding, use the following status guide first:
 
@@ -76,6 +103,16 @@ Current status:
 }
 ```
 
+> **SECURITY NOTE**: The tokens shown above are example JWTs for documentation purposes only. Never use these values in production. Real tokens are cryptographically secure and expire according to the configured TTL.
+
+**Rate Limiting & Security:**
+- **IP-based Rate Limiting**: Maximum 10 login attempts per IP address within a 5-minute window
+- **Account Lockout**: After 5 consecutive failed login attempts, the account is locked for 15 minutes
+- **Error Responses**:
+  - `429 Too Many Requests`: Rate limit exceeded
+  - `401 Unauthorized`: Invalid credentials or account locked
+- **Lockout Reset**: Successful login resets the failed attempt counter
+
 ### POST `/api/v1/auth/register`
 
 Register new user account.
@@ -100,6 +137,38 @@ Register new user account.
   "created_at": "2026-01-16T10:00:00Z"
 }
 ```
+
+### POST `/api/v1/auth/refresh`
+
+Refresh access token using refresh token.
+
+**Request Body:**
+```json
+{
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs..."
+}
+```
+
+**Response (200 OK):**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIs...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "user": {
+    "id": "user123",
+    "email": "user@example.com",
+    "role": "engineer",
+    "stellar_wallet": "GXXX..."
+  }
+}
+```
+
+**Rate Limiting & Security:**
+- Same IP-based rate limiting as login (10 requests per 5-minute window)
+- Account lockout also applies to refresh attempts for locked accounts
+- Returns `429 Too Many Requests` when rate limit exceeded
 
 ---
 

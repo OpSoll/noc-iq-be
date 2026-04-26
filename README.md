@@ -129,19 +129,14 @@ pip install -r requirements.txt
 
 ### Configure Environment
 
-Create a `.env` file in the repo root.
+Create a `.env` file in the repo root using `.env.example` as a template.
 
-Common settings used by the app:
-
-```env
-PROJECT_NAME=NOCIQ API
-VERSION=1.0.0
-DEBUG=true
-DATABASE_URL=postgresql://postgres:password@localhost:5432/nociq
-ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:3001"]
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```bash
+cp .env.example .env
+# Edit .env with your actual configuration values
 ```
+
+**SECURITY WARNING**: Never commit `.env` files to version control. The `.env.example` file shows the required variables with placeholder values.
 
 Startup validation fails fast if critical settings are malformed. In particular:
 
@@ -190,7 +185,54 @@ Examples:
 - the contract path exists, but the default runtime still favors the local adapter mode
 - documentation and contributor expectations should follow the routed API surface, not every helper or legacy module under `app/services`
 
-## Related Repositories
+## Security Guidelines
 
-- `noc-iq-fe` -> frontend application
-- `noc-iq-contracts` -> Soroban smart contracts
+### For Contributors
+
+**NEVER commit sensitive information**:
+- API keys, secret keys, or passwords
+- Private keys for any blockchain network
+- Database connection strings with credentials
+- JWT secrets or encryption keys
+- Personal access tokens
+
+**ALWAYS use environment variables** for:
+- Database credentials
+- API keys and secrets
+- Blockchain private keys
+- JWT signing secrets
+- External service credentials
+
+**Documentation examples** should:
+- Use placeholder values clearly marked as examples
+- Never include real credentials or keys
+- Include security warnings where sensitive operations are discussed
+- Show secure patterns (environment variables, secure key management)
+
+### Environment Variables
+
+The application uses the following sensitive environment variables:
+
+```env
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/nociq
+
+# Authentication
+JWT_SECRET_KEY=your-jwt-secret-here
+
+# Stellar Blockchain (if enabled)
+STELLAR_POOL_SECRET_KEY=your-stellar-secret-key-here
+
+# External Services
+REDIS_URL=redis://user:password@localhost:6379
+CELERY_BROKER_URL=redis://user:password@localhost:6379/0
+```
+
+**Never commit `.env` files** to version control. Use `.env.example` for documentation.
+
+### Reporting Security Issues
+
+If you discover a security vulnerability:
+1. Do not create a public issue
+2. Email security@noc-iq.com with details
+3. Allow time for the issue to be addressed before public disclosure
