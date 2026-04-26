@@ -54,10 +54,30 @@ class DatabaseTask(Task):
             job.finished_at = datetime.utcnow()
             db.commit()
 
-    def _update_progress(self, db, celery_task_id: str, progress: float):
+    def _update_progress(self, db, celery_task_id: str, progress: float, details: Optional[Dict[str, Any]] = None):
         job = self._get_job(db, celery_task_id)
         if job:
             job.progress = min(progress, 99.0)
+            if details:
+                job.progress_details = details
+            db.commit()
+
+    def _add_partial_result(self, db, celery_task_id: str, item_id: str, result: Any):
+        """Add a partial result for bulk operations."""
+        job = self._get_job(db, celery_task_id)
+        if job:
+            if not job.partial_results:
+                job.partial_results = {}
+            job.partial_results[item_id] = result
+            db.commit()
+
+    def _add_item_error(self, db, celery_task_id: str, item_id: str, error: str):
+        """Add an error for a specific item in bulk operations."""
+        job = self._get_job(db, celery_task_id)
+        if job:
+            if not job.per_item_errors:
+                job.per_item_errors = {}
+            job.per_item_errors[item_id] = error
             db.commit()
 
     def _log_retry(self, db, celery_task_id: str, retry_count: int, error: str):
@@ -109,11 +129,32 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
         # SLA computation logic — replace with actual domain implementation   #
         # ------------------------------------------------------------------ #
         from app.services.sla_service import compute_device_sla  # type: ignore
+        
+        # Update progress with structured details
+        self._update_progress(db, self.request.id, 30.0, {
+            "stage": "data_collection",
+            "device_id": device_id,
+            "period": period
+        })
+        
         result = compute_device_sla(db, device_id=device_id, period=period)
-        self._update_progress(db, self.request.id, 70.0)
+        
+        self._update_progress(db, self.request.id, 70.0, {
+            "stage": "sla_computation_complete",
+            "device_id": device_id,
+            "period": period,
+            "is_violated": result.get("is_violated", False)
+        })
 
         # Check for violations and dispatch webhooks
         if result.get("is_violated"):
+            self._update_progress(db, self.request.id, 85.0, {
+                "stage": "triggering_webhooks",
+                "device_id": device_id,
+                "period": period,
+                "violation_detected": True
+            })
+            
             from app.services.webhook_service import trigger_sla_violation_webhooks
             trigger_sla_violation_webhooks(
                 db,
@@ -124,6 +165,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
                 },
                 event=WebhookEvent.SLA_VIOLATION,
             )
+
+        self._update_progress(db, self.request.id, 95.0, {
+            "stage": "finalizing",
+            "device_id": device_id,
+            "period": period
+        })
 
         self._mark_success(db, self.request.id, result)
         logger.info("SLA computation complete for device=%s", device_id)
@@ -161,14 +208,26 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
         total = len(device_ids)
         logger.info("Starting bulk SLA computation for %d devices, period=%s", total, period)
 
+        # Initialize progress tracking
+        self._update_progress(db, self.request.id, 5.0, {
+            "stage": "initialization",
+            "total_devices": total,
+            "period": period
+        })
+
         results = []
         violations = []
+        processed_count = 0
+        error_count = 0
 
         for idx, device_id in enumerate(device_ids, start=1):
             try:
                 from app.services.sla_service import compute_device_sla  # type: ignore
                 result = compute_device_sla(db, device_id=device_id, period=period)
                 results.append({"device_id": device_id, "result": result})
+                
+                # Store partial result
+                self._add_partial_result(db, self.request.id, device_id, result)
 
                 if result.get("is_violated"):
                     violations.append(device_id)
@@ -178,22 +237,49 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                         sla_data={"device_id": device_id, "period": period, **result},
                         event=WebhookEvent.SLA_VIOLATION,
                     )
+                
+                processed_count += 1
 
             except Exception as device_exc:
                 logger.warning("SLA failed for device=%s: %s", device_id, device_exc)
                 results.append({"device_id": device_id, "error": str(device_exc)})
+                
+                # Store per-item error
+                self._add_item_error(db, self.request.id, device_id, str(device_exc))
+                error_count += 1
 
+            # Update progress with detailed information
             progress = (idx / total) * 100
-            self._update_progress(db, self.request.id, progress)
+            self._update_progress(db, self.request.id, progress, {
+                "stage": "processing_devices",
+                "current_device": device_id,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "total_devices": total,
+                "violations_found": len(violations),
+                "progress_percentage": round(progress, 2)
+            })
 
+        # Final summary with structured progress
+        self._update_progress(db, self.request.id, 95.0, {
+            "stage": "finalizing",
+            "total_devices": total,
+            "processed_count": processed_count,
+            "error_count": error_count,
+            "violations_found": len(violations)
+        })
+        
         summary = {
             "total": total,
             "violations": len(violations),
             "violated_devices": violations,
+            "processed_count": processed_count,
+            "error_count": error_count,
             "results": results,
         }
+        
         self._mark_success(db, self.request.id, summary)
-        logger.info("Bulk SLA computation complete. Violations: %d/%d", len(violations), total)
+        logger.info("Bulk SLA computation complete. Violations: %d/%d, Errors: %d", len(violations), total, error_count)
         return summary
 
     except Exception as exc:

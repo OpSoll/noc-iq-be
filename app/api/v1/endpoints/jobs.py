@@ -43,6 +43,9 @@ class JobResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     progress: float
+    progress_details: Optional[dict] = None
+    partial_results: Optional[dict] = None
+    per_item_errors: Optional[dict] = None
     payload: Optional[dict] = None
     result: Optional[dict] = None
     error: Optional[str] = None
@@ -72,6 +75,9 @@ def _serialize_job(job: Job) -> JobResponse:
         job_type=job.job_type,
         status=job.status,
         progress=job.progress,
+        progress_details=job.progress_details,
+        partial_results=job.partial_results,
+        per_item_errors=job.per_item_errors,
         payload=_parse(job.payload),
         result=_parse(job.result),
         error=job.error,

@@ -19,6 +19,7 @@ class WebhookDeliveryStatus(str, enum.Enum):
     SUCCESS = "success"
     FAILED = "failed"
     RETRYING = "retrying"
+    DEAD_LETTER = "dead_letter"  # BE-086: Dead-letter status for permanently failed deliveries
 
 
 class Webhook(Base):
@@ -51,6 +52,7 @@ class WebhookDelivery(Base):
     response_body = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
+    dead_lettered_at = Column(DateTime, nullable=True)  # BE-086: When delivery was marked as dead-letter
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
