@@ -7,6 +7,7 @@ from uuid import UUID
 from app.tasks.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
+from app.services.audit_log import audit_log
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,21 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
         logger.info("Webhook delivery %s dispatched.", delivery_id)
         return {"delivery_id": delivery_id, "dispatched": True}
     except Exception as exc:
-        logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, exc)
+        error_msg = str(exc)
+        logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, error_msg)
+        
+        # Log retry attempt if we have retries left
+        if self.request.retries < self.max_retries:
+            audit_log.log_event(
+                db,
+                event_type="webhook_retried",
+                details={
+                    "delivery_id": delivery_id,
+                    "retry_count": self.request.retries + 1,
+                    "error": error_msg
+                }
+            )
+        
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -74,7 +89,22 @@ def trigger_sla_violation_async(
         logger.info("Triggered %d webhook deliveries for event=%s.", len(deliveries), event)
         return {"triggered": len(deliveries), "event": event}
     except Exception as exc:
-        logger.exception("trigger_sla_violation_async failed: %s", exc)
+        error_msg = str(exc)
+        logger.exception("trigger_sla_violation_async failed: %s", error_msg)
+        
+        # Log retry attempt if we have retries left
+        if self.request.retries < self.max_retries:
+            audit_log.log_event(
+                db,
+                event_type="sla_violation_webhook_retried",
+                details={
+                    "sla_data": sla_data,
+                    "event": event,
+                    "retry_count": self.request.retries + 1,
+                    "error": error_msg
+                }
+            )
+        
         raise self.retry(exc=exc)
     finally:
         db.close()
