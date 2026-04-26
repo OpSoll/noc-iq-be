@@ -7,10 +7,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from fastapi import Request
+
 from app.db.session import get_db
 from app.models.job import Job, JobStatus, JobType
+from app.services.audit_log import audit_log
+from app.services.metrics import increment_counter, timer
 from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import enqueue_sla_computation, enqueue_bulk_sla_computation
+from app.utils.correlation import get_correlation_id
+from app.utils.logging import get_structured_logger
+
+logger = get_structured_logger("jobs_api")
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 
@@ -117,13 +125,37 @@ def _sync_job_status_from_celery(db: Session, job: Job) -> Job:
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def submit_sla_computation(payload: SLAJobRequest, db: Session = Depends(get_db)):
+def submit_sla_computation(payload: SLAJobRequest, request: Request, db: Session = Depends(get_db)):
     """
     Enqueue an async SLA computation job for a single device.
     Returns immediately with a job record for status polling.
     """
-    job = enqueue_sla_computation(db, device_id=payload.device_id, period=payload.period)
-    return _serialize_job(job)
+    correlation_id = get_correlation_id()
+    
+    logger.info(
+        "Submitting SLA computation job",
+        device_id=payload.device_id,
+        period=payload.period,
+        correlation_id=correlation_id
+    )
+    
+    with timer("job_submission_duration", {"job_type": "sla_computation"}):
+        increment_counter("jobs_submitted", tags={"job_type": "sla_computation"})
+        job = enqueue_sla_computation(
+            db, 
+            device_id=payload.device_id, 
+            period=payload.period,
+            correlation_id=correlation_id
+        )
+        
+        logger.info(
+            "SLA computation job submitted",
+            job_id=str(job.id),
+            celery_task_id=job.celery_task_id,
+            correlation_id=correlation_id
+        )
+        
+        return _serialize_job(job)
 
 
 @router.post(
@@ -131,18 +163,45 @@ def submit_sla_computation(payload: SLAJobRequest, db: Session = Depends(get_db)
     response_model=JobResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-def submit_bulk_sla_computation(payload: BulkSLAJobRequest, db: Session = Depends(get_db)):
+def submit_bulk_sla_computation(payload: BulkSLAJobRequest, request: Request, db: Session = Depends(get_db)):
     """
     Enqueue an async bulk SLA computation job for multiple devices.
     Returns immediately with a job record for status polling.
     """
+    correlation_id = get_correlation_id()
+    
     if not payload.device_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="device_ids must not be empty.",
         )
-    job = enqueue_bulk_sla_computation(db, device_ids=payload.device_ids, period=payload.period)
-    return _serialize_job(job)
+    
+    logger.info(
+        "Submitting bulk SLA computation job",
+        device_count=len(payload.device_ids),
+        period=payload.period,
+        correlation_id=correlation_id
+    )
+    
+    with timer("job_submission_duration", {"job_type": "bulk_sla_computation"}):
+        increment_counter("jobs_submitted", tags={"job_type": "bulk_sla_computation"})
+        increment_counter("bulk_job_devices_submitted", value=len(payload.device_ids))
+        job = enqueue_bulk_sla_computation(
+            db, 
+            device_ids=payload.device_ids, 
+            period=payload.period,
+            correlation_id=correlation_id
+        )
+        
+        logger.info(
+            "Bulk SLA computation job submitted",
+            job_id=str(job.id),
+            celery_task_id=job.celery_task_id,
+            device_count=len(payload.device_ids),
+            correlation_id=correlation_id
+        )
+        
+        return _serialize_job(job)
 
 
 @router.get("", response_model=List[JobResponse])
@@ -185,6 +244,21 @@ def cancel_job(job_id: UUID, db: Session = Depends(get_db)):
             detail=f"Cannot cancel a job with status '{job.status}'.",
         )
 
+    # Log job revocation before performing the action
+    audit_log.log_event(
+        db,
+        event_type="job_revoked",
+        details={
+            "job_id": str(job.id),
+            "celery_task_id": job.celery_task_id,
+            "job_type": job.job_type.value,
+            "previous_status": job.status.value,
+            "payload": job.payload
+        }
+    )
+
+    increment_counter("jobs_cancelled", tags={"job_type": job.job_type.value})
+    
     celery_app.control.revoke(job.celery_task_id, terminate=False)
     job.status = JobStatus.REVOKED
     db.commit()

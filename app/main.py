@@ -3,6 +3,7 @@ from fastapi import FastAPI
 
 from app.api.v1.router import api_router
 from app.core.config import settings, validate_critical_settings
+from app.middleware.correlation import CorrelationMiddleware
 
 validate_critical_settings(settings)
 
@@ -12,6 +13,8 @@ app = FastAPI(
     description="NOCIQ Backend API"
 )
 
+# Add correlation middleware first (before CORS to ensure it runs on all requests)
+app.add_middleware(CorrelationMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

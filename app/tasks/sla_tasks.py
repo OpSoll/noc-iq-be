@@ -10,8 +10,12 @@ from app.tasks.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
 from app.models.webhook import WebhookEvent
+from app.services.audit_log import audit_log
+from app.utils.correlation import set_correlation_id
+from app.utils.logging import get_structured_logger
 
 logger = logging.getLogger(__name__)
+task_logger = get_structured_logger("sla_tasks")
 
 
 class DatabaseTask(Task):
@@ -56,6 +60,23 @@ class DatabaseTask(Task):
             job.progress = min(progress, 99.0)
             db.commit()
 
+    def _log_retry(self, db, celery_task_id: str, retry_count: int, error: str):
+        """Log job retry events for audit purposes."""
+        job = self._get_job(db, celery_task_id)
+        if job:
+            audit_log.log_event(
+                db,
+                event_type="job_retried",
+                details={
+                    "job_id": str(job.id),
+                    "celery_task_id": celery_task_id,
+                    "job_type": job.job_type.value,
+                    "retry_count": retry_count,
+                    "error": error,
+                    "payload": job.payload
+                }
+            )
+
 
 @celery_app.task(
     bind=True,
@@ -64,15 +85,25 @@ class DatabaseTask(Task):
     max_retries=3,
     default_retry_delay=30,
 )
-def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str) -> Dict[str, Any]:
+def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Compute SLA metrics for a single device over a given period.
     Triggers SLA violation webhooks if thresholds are breached.
     """
+    # Set correlation ID for this task execution
+    if correlation_id:
+        set_correlation_id(correlation_id)
+    
     db = self.get_db()
     try:
         self._mark_started(db, self.request.id)
-        logger.info("Starting SLA computation for device=%s period=%s", device_id, period)
+        task_logger.info(
+            "Starting SLA computation",
+            device_id=device_id,
+            period=period,
+            celery_task_id=self.request.id,
+            correlation_id=correlation_id
+        )
 
         # ------------------------------------------------------------------ #
         # SLA computation logic — replace with actual domain implementation   #
@@ -101,6 +132,11 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str) -> D
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("SLA computation failed for device=%s: %s", device_id, error_msg)
+        
+        # Log retry attempt if we have retries left
+        if self.request.retries < self.max_retries:
+            self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
+        
         self._mark_failure(db, self.request.id, error_msg)
         raise self.retry(exc=exc)
     finally:
@@ -163,6 +199,11 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Bulk SLA computation failed: %s", error_msg)
+        
+        # Log retry attempt if we have retries left
+        if self.request.retries < self.max_retries:
+            self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
+        
         self._mark_failure(db, self.request.id, error_msg)
         raise self.retry(exc=exc)
     finally:
@@ -174,6 +215,7 @@ def enqueue_sla_computation(
     device_id: str,
     period: str,
     job_type: JobType = JobType.SLA_COMPUTATION,
+    correlation_id: Optional[str] = None,
 ) -> Job:
     """
     Enqueue an SLA computation task and create a Job record for tracking.
@@ -181,14 +223,18 @@ def enqueue_sla_computation(
     """
     from app.models.job import Job, JobType  # local import avoids circular deps
 
+    payload = {"device_id": device_id, "period": period}
+    if correlation_id:
+        payload["correlation_id"] = correlation_id
+
     task_result = compute_sla_for_device.apply_async(
-        kwargs={"device_id": device_id, "period": period}
+        kwargs=payload
     )
 
     job = Job(
         celery_task_id=task_result.id,
         job_type=job_type,
-        payload=json.dumps({"device_id": device_id, "period": period}),
+        payload=json.dumps(payload),
     )
     db.add(job)
     db.commit()
@@ -196,18 +242,22 @@ def enqueue_sla_computation(
     return job
 
 
-def enqueue_bulk_sla_computation(db, device_ids: List[str], period: str) -> Job:
+def enqueue_bulk_sla_computation(db, device_ids: List[str], period: str, correlation_id: Optional[str] = None) -> Job:
     """Enqueue a bulk SLA computation task and return the tracking Job."""
     from app.models.job import Job, JobType
 
+    payload = {"device_ids": device_ids, "period": period}
+    if correlation_id:
+        payload["correlation_id"] = correlation_id
+
     task_result = compute_bulk_sla.apply_async(
-        kwargs={"device_ids": device_ids, "period": period}
+        kwargs=payload
     )
 
     job = Job(
         celery_task_id=task_result.id,
         job_type=JobType.BULK_SLA_COMPUTATION,
-        payload=json.dumps({"device_ids": device_ids, "period": period}),
+        payload=json.dumps(payload),
     )
     db.add(job)
     db.commit()
