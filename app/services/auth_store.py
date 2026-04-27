@@ -211,3 +211,56 @@ class AuthStore:
             email = session.email
             session_repo.delete_session(token)
             audit_log.log_event(db, "logout", email=email)
+
+    @classmethod
+    def get_user_sessions(cls, email: str, db: Session = None) -> list:
+        """Get all active sessions for a user (without token material)."""
+        if db is None:
+            with SessionLocal() as db:
+                return cls._get_user_sessions_with_db(email, db)
+        return cls._get_user_sessions_with_db(email, db)
+
+    @classmethod
+    def _get_user_sessions_with_db(cls, email: str, db: Session) -> list:
+        session_repo = SessionRepository(db)
+        sessions = session_repo.list_sessions_by_email(email)
+        
+        # Return session info without sensitive token material
+        session_list = []
+        now = datetime.utcnow()
+        for session in sessions:
+            expires_at = session.expires_at
+            if expires_at.tzinfo is not None:
+                expires_at = expires_at.replace(tzinfo=None)
+            
+            is_expired = now > expires_at
+            session_list.append({
+                "access_token_preview": session.access_token[:12] + "..." if session.access_token else None,
+                "refresh_token_preview": session.refresh_token[:12] + "..." if session.refresh_token else None,
+                "email": session.email,
+                "expires_at": session.expires_at,
+                "created_at": session.created_at,
+                "is_active": not is_expired,
+            })
+        
+        return session_list
+
+    @classmethod
+    def logout_all_sessions(cls, email: str, db: Session = None) -> int:
+        """Logout all sessions for a user. Returns count of invalidated sessions."""
+        if db is None:
+            with SessionLocal() as db:
+                return cls._logout_all_sessions_with_db(email, db)
+        return cls._logout_all_sessions_with_db(email, db)
+
+    @classmethod
+    def _logout_all_sessions_with_db(cls, email: str, db: Session) -> int:
+        session_repo = SessionRepository(db)
+        count = session_repo.delete_sessions_by_email(email)
+        audit_log.log_event(
+            db, 
+            "logout_all_sessions", 
+            email=email,
+            details={"sessions_invalidated": count}
+        )
+        return count

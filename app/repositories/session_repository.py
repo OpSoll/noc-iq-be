@@ -30,3 +30,21 @@ class SessionRepository:
         if session:
             self.db.delete(session)
             self.db.commit()
+
+    def list_sessions_by_email(self, email: str) -> list[SessionORM]:
+        """List all active sessions for a given email."""
+        return (
+            self.db.query(SessionORM)
+            .filter(SessionORM.email == email)
+            .order_by(SessionORM.created_at.desc())
+            .all()
+        )
+
+    def delete_sessions_by_email(self, email: str) -> int:
+        """Delete all sessions for a given email. Returns count of deleted sessions."""
+        sessions = self.list_sessions_by_email(email)
+        count = len(sessions)
+        for session in sessions:
+            self.db.delete(session)
+        self.db.commit()
+        return count

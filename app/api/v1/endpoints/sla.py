@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -18,7 +18,13 @@ from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.models import SLAResult
 from app.utils.cache import TTLCache
-from app.core.security import require_admin
+from app.utils.analytics_exporter import (
+    export_dashboard_kpi,
+    export_trends,
+    export_performance_aggregation,
+    export_analytics_summary,
+)
+from app.core.security import require_admin, require_engineer
 
 router = APIRouter()
 
@@ -164,3 +170,148 @@ def get_latest_analytics_snapshot(
     if not snapshot:
         raise HTTPException(status_code=404, detail="No snapshot found for the given key")
     return snapshot
+
+
+@router.get("/analytics/dashboard/export")
+def export_dashboard_kpis(
+    format: str = Query(default="json", description="Export format: json or csv"),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Export dashboard KPI data in JSON or CSV format."""
+    repo = SLARepository(db)
+    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    
+    try:
+        exported = export_dashboard_kpi(kpi, format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    if format.lower() == "csv":
+        return Response(
+            content=exported,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=sla_dashboard_kpi.csv"},
+        )
+    return exported
+
+
+@router.get("/analytics/trends/export")
+def export_sla_trends(
+    format: str = Query(default="json", description="Export format: json or csv"),
+    days: int = Query(default=7, ge=1, le=365, description="Number of days to export (max 365 for exports)"),
+    bucket: str = Query(default="day", description="Bucket interval: day, week, month"),
+    tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Export SLA trends data in JSON or CSV format."""
+    if bucket not in VALID_BUCKETS:
+        raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
+    
+    repo = SLARepository(db)
+    try:
+        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    try:
+        exported = export_trends(trends, format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    if format.lower() == "csv":
+        return Response(
+            content=exported,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=sla_trends_{days}d.csv"},
+        )
+    return exported
+
+
+@router.get("/analytics/performance/export")
+def export_performance_aggregation_endpoint(
+    format: str = Query(default="json", description="Export format: json or csv"),
+    start_date: datetime | None = Query(default=None),
+    end_date: datetime | None = Query(default=None),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Export performance aggregation data in JSON or CSV format."""
+    if start_date and start_date.tzinfo is not None:
+        start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
+    if end_date and end_date.tzinfo is not None:
+        end_date = end_date.astimezone(timezone.utc).replace(tzinfo=None)
+    
+    if start_date and end_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
+    
+    repo = SLARepository(db)
+    aggregation = repo.aggregate_performance(
+        start_date=start_date, end_date=end_date, severity=severity, site_id=site_id
+    )
+    
+    try:
+        exported = export_performance_aggregation(aggregation, format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    if format.lower() == "csv":
+        return Response(
+            content=exported,
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=sla_performance.csv"},
+        )
+    return exported
+
+
+@router.get("/analytics/export")
+def export_analytics_summary_endpoint(
+    format: str = Query(default="json", description="Export format: json or csv"),
+    days: int = Query(default=7, ge=1, le=365, description="Number of days for trends"),
+    bucket: str = Query(default="day", description="Bucket interval: day, week, month"),
+    tz: str = Query(default="UTC", description="IANA timezone name"),
+    severity: str | None = Query(default=None),
+    site_id: str | None = Query(default=None),
+    include_aggregation: bool = Query(default=True, description="Include performance aggregation"),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Export comprehensive analytics summary (KPI + trends + optional aggregation)."""
+    if bucket not in VALID_BUCKETS:
+        raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
+    
+    repo = SLARepository(db)
+    
+    # Get KPI data
+    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    
+    # Get trends data
+    try:
+        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    # Get aggregation data if requested
+    aggregation = None
+    if include_aggregation:
+        aggregation = repo.aggregate_performance(severity=severity, site_id=site_id)
+    
+    try:
+        exported = export_analytics_summary(kpi, trends, aggregation, format)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    
+    if format.lower() == "csv":
+        return Response(
+            content=exported,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=sla_analytics_summary_{days}d.csv"},
+        )
+    return exported
