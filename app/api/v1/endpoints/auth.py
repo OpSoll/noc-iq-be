@@ -43,14 +43,30 @@ Configuration (in app.core.config):
 """
 
 
+from app.core.config import settings
+
+
 def _get_client_ip(request: Request) -> str:
-    """Get client IP address from request."""
-    # Check for forwarded headers first (behind proxy/load balancer)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    
-    # Fall back to direct connection
+    """
+    Extract the real client IP, respecting TRUSTED_PROXY_COUNT.
+
+    When TRUSTED_PROXY_COUNT > 0 the app sits behind that many trusted proxy
+    hops.  We take the Nth-from-the-right entry in X-Forwarded-For (where N =
+    TRUSTED_PROXY_COUNT) so that a client cannot spoof its IP by injecting
+    extra entries at the left of the header.
+
+    When TRUSTED_PROXY_COUNT == 0 (default) we ignore forwarded headers
+    entirely and use the direct connection address.
+    """
+    trusted = settings.TRUSTED_PROXY_COUNT
+    if trusted > 0:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            parts = [p.strip() for p in forwarded.split(",")]
+            # The rightmost `trusted` entries are added by our own proxies.
+            # The entry just to the left of those is the real client.
+            idx = max(len(parts) - trusted, 0)
+            return parts[idx]
     return request.client.host if request.client else "unknown"
 
 

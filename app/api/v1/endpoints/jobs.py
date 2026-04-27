@@ -238,6 +238,35 @@ def get_job(job_id: UUID, current_user=Depends(require_engineer), db: Session = 
     return _serialize_job(job)
 
 
+class JobProgressResponse(BaseModel):
+    id: UUID
+    status: JobStatus
+    progress: float
+    progress_details: Optional[dict] = None
+    partial_results: Optional[dict] = None
+    per_item_errors: Optional[dict] = None
+
+    model_config = {"from_attributes": True}
+
+
+@router.get("/{job_id}/progress", response_model=JobProgressResponse)
+def get_job_progress(job_id: UUID, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    """
+    Lightweight polling endpoint returning only progress fields.
+    Syncs status from Celery for in-progress jobs before responding.
+    """
+    job = _get_job_or_404(db, job_id)
+    job = _sync_job_status_from_celery(db, job)
+    return JobProgressResponse(
+        id=job.id,
+        status=job.status,
+        progress=job.progress,
+        progress_details=job.progress_details,
+        partial_results=job.partial_results,
+        per_item_errors=job.per_item_errors,
+    )
+
+
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
 def cancel_job(job_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     """

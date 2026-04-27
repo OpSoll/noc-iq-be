@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
+    # Trusted-proxy settings (#205)
+    # Number of trusted reverse-proxy hops in front of this app.
+    # Set to 0 when running without a proxy (uses direct connection IP).
+    # Set to N when N proxy hops are trusted (e.g. 1 for a single load balancer).
+    # Only the Nth entry from the right of X-Forwarded-For is used, preventing
+    # spoofed headers injected by untrusted clients from being trusted.
+    TRUSTED_PROXY_COUNT: int = 0
+
     # Auth rate limiting settings
     AUTH_MAX_FAILED_ATTEMPTS: int = 5  # Max failed login attempts before lockout
     AUTH_LOCKOUT_DURATION_MINUTES: int = 15  # Lockout duration in minutes
@@ -43,6 +51,13 @@ class Settings(BaseSettings):
     MAX_WEBHOOK_EVENTS_COUNT: int = 50  # Max webhook events per webhook
     MAX_WEBHOOK_NAME_LENGTH: int = 255  # Max webhook name length
     MAX_WEBHOOK_URL_LENGTH: int = 2048  # Max webhook URL length
+
+    # Webhook retry backoff policy (#236)
+    # Comma-separated base delay seconds for each retry attempt.
+    # e.g. "30,120,600" means 30 s on first retry, 2 min on second, 10 min on third.
+    WEBHOOK_RETRY_BASE_DELAYS: str = "30,120,600"
+    # Hard cap on any single computed delay (seconds) to prevent retry storms.
+    WEBHOOK_RETRY_MAX_DELAY_SECONDS: int = 3600
 
     class Config:
         env_file = ".env"
@@ -116,6 +131,21 @@ def validate_critical_settings(config: Settings) -> None:
         errors.append("PAYMENT_FROM_ADDRESS must not be empty.")
     if not config.PAYMENT_TO_ADDRESS.strip():
         errors.append("PAYMENT_TO_ADDRESS must not be empty.")
+
+    if config.TRUSTED_PROXY_COUNT < 0:
+        errors.append("TRUSTED_PROXY_COUNT must be >= 0.")
+
+    try:
+        delays = [int(d.strip()) for d in config.WEBHOOK_RETRY_BASE_DELAYS.split(",") if d.strip()]
+        if not delays:
+            errors.append("WEBHOOK_RETRY_BASE_DELAYS must contain at least one value.")
+        elif any(d < 0 for d in delays):
+            errors.append("WEBHOOK_RETRY_BASE_DELAYS values must be >= 0.")
+    except ValueError:
+        errors.append("WEBHOOK_RETRY_BASE_DELAYS must be a comma-separated list of integers.")
+
+    if config.WEBHOOK_RETRY_MAX_DELAY_SECONDS <= 0:
+        errors.append("WEBHOOK_RETRY_MAX_DELAY_SECONDS must be > 0.")
 
     if errors:
         raise ValueError("Invalid startup configuration:\n- " + "\n- ".join(errors))
