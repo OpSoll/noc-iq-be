@@ -11,9 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
-RETRY_DELAYS = [30, 120, 600]  # seconds: 30s, 2m, 10m (exponential backoff)
+
+def _get_retry_delays() -> list[int]:
+    """Parse WEBHOOK_RETRY_BASE_DELAYS from settings into a list of ints."""
+    return [int(d.strip()) for d in settings.WEBHOOK_RETRY_BASE_DELAYS.split(",") if d.strip()]
 
 
 WEBHOOK_SCHEMA_VERSION = "1"
@@ -116,9 +121,11 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
     else:
         retry_index = delivery.attempt_count - 1
         max_retries = webhook.max_retries or 3
+        retry_delays = _get_retry_delays()
 
-        if retry_index < max_retries and retry_index < len(RETRY_DELAYS):
-            delay = RETRY_DELAYS[retry_index] * (2 ** retry_index)
+        if retry_index < max_retries and retry_index < len(retry_delays):
+            base_delay = retry_delays[retry_index]
+            delay = min(base_delay * (2 ** retry_index), settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS)
             delivery.next_retry_at = datetime.utcnow() + timedelta(seconds=delay)
             delivery.status = WebhookDeliveryStatus.RETRYING
             logger.warning(
