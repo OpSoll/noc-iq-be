@@ -8,10 +8,13 @@ from app.models.auth import (
     AuthUser,
     LoginRequest,
     RegisterRequest,
+    SessionInventoryResponse,
+    SessionInfo,
+    LogoutAllSessionsResponse,
 )
 from app.services.auth_store import AuthStore
 from app.db.session import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_admin
 from app.core.rate_limiter import rate_limiter
 
 router = APIRouter()
@@ -119,6 +122,70 @@ def logout(
     token = _extract_bearer_token(authorization)
     AuthStore.logout(token, db=db)
     return AuthLogoutResponse(message="Logged out successfully")
+
+
+@router.get("/sessions", response_model=SessionInventoryResponse)
+def get_session_inventory(
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Get all active sessions for the current user."""
+    sessions = AuthStore.get_user_sessions(current_user.email, db=db)
+    
+    session_infos = [SessionInfo(**s) for s in sessions]
+    active_count = sum(1 for s in session_infos if s.is_active)
+    
+    return SessionInventoryResponse(
+        sessions=session_infos,
+        total_count=len(session_infos),
+        active_count=active_count,
+    )
+
+
+@router.get("/admin/sessions/{email}", response_model=SessionInventoryResponse)
+def get_admin_session_inventory(
+    email: str,
+    admin_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin endpoint to get all sessions for a specific user."""
+    sessions = AuthStore.get_user_sessions(email, db=db)
+    
+    session_infos = [SessionInfo(**s) for s in sessions]
+    active_count = sum(1 for s in session_infos if s.is_active)
+    
+    return SessionInventoryResponse(
+        sessions=session_infos,
+        total_count=len(session_infos),
+        active_count=active_count,
+    )
+
+
+@router.post("/logout-all", response_model=LogoutAllSessionsResponse)
+def logout_all_sessions(
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Invalidate all active sessions for the current user."""
+    count = AuthStore.logout_all_sessions(current_user.email, db=db)
+    return LogoutAllSessionsResponse(
+        message=f"Logged out from {count} session(s)",
+        sessions_invalidated=count,
+    )
+
+
+@router.post("/admin/logout-all/{email}", response_model=LogoutAllSessionsResponse)
+def admin_logout_all_sessions(
+    email: str,
+    admin_user: AuthUser = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Admin endpoint to invalidate all sessions for a specific user."""
+    count = AuthStore.logout_all_sessions(email, db=db)
+    return LogoutAllSessionsResponse(
+        message=f"Logged out user {email} from {count} session(s)",
+        sessions_invalidated=count,
+    )
 
 
 @router.get("/ping")
