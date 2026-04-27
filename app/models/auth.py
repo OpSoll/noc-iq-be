@@ -58,3 +58,9 @@ class LogoutAllSessionsResponse(BaseModel):
     """Response for logout-all-sessions endpoint."""
     message: str
     sessions_invalidated: int
+
+
+class ProfileUpdateRequest(BaseModel):
+    """Allowed mutable profile fields. Role and email changes are not permitted here."""
+    full_name: Optional[str] = Field(default=None, min_length=1, max_length=255)
+    stellar_wallet: Optional[str] = Field(default=None, max_length=255)

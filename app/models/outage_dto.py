@@ -83,3 +83,35 @@ class BulkOutageCreate(BaseModel):
         if len(v) > settings.MAX_BULK_OUTAGES_COUNT:
             raise ValueError(f"too many outages in bulk request. Maximum allowed is {settings.MAX_BULK_OUTAGES_COUNT}.")
         return v
+
+
+# --- #215: Stable machine-readable import error shapes ---
+
+class ImportFieldError(BaseModel):
+    """A single field-level validation error within an import row."""
+    field: Optional[str] = None
+    type: Optional[str] = None
+    message: str
+
+
+class ImportRowResult(BaseModel):
+    """Machine-readable result for a single import row."""
+    row: int
+    id: Optional[str] = None
+    status: str  # "ok" | "error"
+    errors: Optional[List[ImportFieldError]] = None
+    outage_id: Optional[str] = None
+    persisted: Optional[bool] = None
+    duplicate: Optional[bool] = None
+    existing_id: Optional[str] = None
+
+
+class ImportResponse(BaseModel):
+    """Top-level response for the import endpoint."""
+    mode: str  # "dry_run" | "import"
+    total_rows: int
+    persisted: int
+    validated: int
+    error_count: int
+    errors: List[ImportRowResult]
+    rows: List[ImportRowResult]
