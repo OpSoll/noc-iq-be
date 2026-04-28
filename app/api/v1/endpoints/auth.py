@@ -18,6 +18,7 @@ from app.db.session import get_db
 from app.core.security import get_current_user, require_admin
 from app.core.rate_limiter import rate_limiter
 from app.repositories.user_repository import UserRepository, user_orm_to_pydantic
+from app.utils.correlation import get_correlation_id
 
 router = APIRouter()
 

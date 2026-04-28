@@ -13,6 +13,7 @@ from app.core.security import get_password_hash, verify_password, validate_passw
 from app.services.audit_log import audit_log
 from app.db.session import SessionLocal
 from app.core.config import settings
+from app.utils.correlation import get_correlation_id
 
 TOKEN_TTL_SECONDS = 3600
 
@@ -55,6 +56,7 @@ class AuthStore:
             db, 
             "registration", 
             email=payload.email, 
+            actor_id=user_id,
             details={"user_id": user_id, "role": payload.role}
         )
         
@@ -74,7 +76,12 @@ class AuthStore:
         
         # Check if account is locked
         if user_repo.is_account_locked(payload.email):
-            audit_log.log_event(db, "login_failed_locked", email=payload.email)
+            audit_log.log_event(
+                db, 
+                "login_failed_locked", 
+                email=payload.email,
+                details={"reason": "account_locked"}
+            )
             raise ValueError("Account is temporarily locked due to too many failed login attempts")
         
         stored_user = user_repo.get_by_email(payload.email)
@@ -86,11 +93,25 @@ class AuthStore:
             if stored_user and (stored_user.failed_login_attempts or 0) >= settings.AUTH_MAX_FAILED_ATTEMPTS:
                 lockout_until = cls._now() + timedelta(minutes=settings.AUTH_LOCKOUT_DURATION_MINUTES)
                 user_repo.lock_account(payload.email, lockout_until)
-                audit_log.log_event(db, "account_locked", email=payload.email, 
-                                  details={"lockout_duration_minutes": settings.AUTH_LOCKOUT_DURATION_MINUTES})
+                audit_log.log_event(
+                    db, 
+                    "account_locked", 
+                    email=payload.email,
+                    actor_id=stored_user.user_id,
+                    details={
+                        "lockout_duration_minutes": settings.AUTH_LOCKOUT_DURATION_MINUTES,
+                        "failed_attempts": stored_user.failed_login_attempts
+                    }
+                )
                 raise ValueError(f"Account locked due to too many failed attempts. Try again in {settings.AUTH_LOCKOUT_DURATION_MINUTES} minutes")
             
-            audit_log.log_event(db, "login_failed", email=payload.email)
+            audit_log.log_event(
+                db, 
+                "login_failed", 
+                email=payload.email,
+                actor_id=stored_user.user_id if stored_user else None,
+                details={"reason": "invalid_credentials"}
+            )
             raise ValueError("Invalid credentials")
 
         # Successful login - reset failed attempts
@@ -113,7 +134,12 @@ class AuthStore:
             expires_at=expires_at,
         )
 
-        audit_log.log_event(db, "login_success", email=payload.email)
+        audit_log.log_event(
+            db, 
+            "login_success", 
+            email=payload.email,
+            actor_id=stored_user.user_id
+        )
         
         return AuthSessionResponse(
             access_token=access_token,
@@ -178,7 +204,12 @@ class AuthStore:
         
         # Check if account is locked
         if user_repo.is_account_locked(email):
-            audit_log.log_event(db, "refresh_failed_locked", email=email)
+            audit_log.log_event(
+                db, 
+                "refresh_failed_locked", 
+                email=email,
+                details={"reason": "account_locked"}
+            )
             raise ValueError("Account is temporarily locked")
         
         # Handle pre-family sessions (backward compatibility)
@@ -195,7 +226,13 @@ class AuthStore:
             raise ValueError("Invalid token family")
         
         if family.compromised:
-            audit_log.log_event(db, "refresh_failed_compromised", email=email, details={"family_id": family_id})
+            audit_log.log_event(
+                db, 
+                "refresh_failed_compromised", 
+                email=email,
+                actor_id=stored_user.user_id if stored_user else None,
+                details={"family_id": family_id, "reason": "compromised_family"}
+            )
             raise ValueError("Session family has been compromised")
         
         # Reuse detection: if this token's sequence is behind the family's current sequence,
@@ -207,7 +244,13 @@ class AuthStore:
                 db,
                 "refresh_token_reuse",
                 email=email,
-                details={"family_id": family_id, "sequence": old_session.sequence, "expected": family.current_sequence},
+                actor_id=stored_user.user_id if stored_user else None,
+                details={
+                    "family_id": family_id, 
+                    "sequence": old_session.sequence, 
+                    "expected": family.current_sequence,
+                    "reason": "token_replay_detected"
+                },
             )
             raise ValueError("Refresh token reuse detected. Session family invalidated.")
         
@@ -232,7 +275,13 @@ class AuthStore:
             expires_at=expires_at,
         )
 
-        audit_log.log_event(db, "refresh", email=email, details={"family_id": family_id})
+        audit_log.log_event(
+            db, 
+            "refresh", 
+            email=email,
+            actor_id=stored_user.user_id,
+            details={"family_id": family_id, "event": "token_rotation"}
+        )
         
         return AuthSessionResponse(
             access_token=new_access,
@@ -256,7 +305,11 @@ class AuthStore:
         if session:
             email = session.email
             session_repo.delete_session(hashed_token)
-            audit_log.log_event(db, "logout", email=email)
+            audit_log.log_event(
+                db, 
+                "logout", 
+                email=email
+            )
 
     @classmethod
     def get_user_sessions(cls, email: str, db: Session = None) -> list:
