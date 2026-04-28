@@ -40,7 +40,8 @@ def _invalidate_analytics_cache() -> None:
 
 
 @router.get("/calculate", response_model=SLAResult)
-def calculate_sla(outage_id: str, severity: str, mttr_minutes: int):
+def calculate_sla(outage_id: str, severity: str, mttr_minutes: int, current_user=Depends(require_engineer)):
+    """Calculate SLA result for given outage metrics (BE-009)."""
     try:
         return SLACalculator.calculate(
             outage_id=outage_id,
@@ -52,22 +53,26 @@ def calculate_sla(outage_id: str, severity: str, mttr_minutes: int):
 
 
 @router.post("/preview")
-def preview_sla(payload: SLAPreviewRequest):
+def preview_sla(payload: SLAPreviewRequest, current_user=Depends(require_engineer)):
+    """Preview SLA calculation without persisting (BE-009)."""
     result = calculate_sla(
         outage_id="PREVIEW",
         severity=payload.severity.value,
         mttr_minutes=payload.mttr_minutes,
+        current_user=current_user,
     )
     return result
 
 
 @router.get("/config", response_model=dict[str, SLASeverityConfig])
-def get_sla_config():
+def get_sla_config(current_user=Depends(require_engineer)):
+    """Get all SLA configuration by severity (BE-009)."""
     return get_all_config()
 
 
 @router.get("/config/{severity}", response_model=SLASeverityConfig)
-def get_sla_config_by_severity(severity: str):
+def get_sla_config_by_severity(severity: str, current_user=Depends(require_engineer)):
+    """Get SLA configuration for a specific severity (BE-009)."""
     try:
         return get_config_for_severity(severity)
     except ValueError as exc:
@@ -138,8 +143,10 @@ def aggregate_sla_performance(
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
     site: str | None = Query(default=None, description="Alias for site_id"),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
+    """Get SLA performance aggregation with optional date range filtering (BE-009)."""
     resolved_site = site_id or site
     if start_date and start_date.tzinfo is not None:
         start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
@@ -156,9 +163,10 @@ def aggregate_sla_performance(
 @router.post("/analytics/snapshot", response_model=SLAAnalyticsSnapshot, status_code=201)
 def create_analytics_snapshot(
     snapshot_key: str = Query(default="global"),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    """Materialize current SLA aggregates into a persistent snapshot."""
+    """Materialize current SLA aggregates into a persistent snapshot (BE-009)."""
     repo = SLARepository(db)
     snapshot = repo.create_snapshot(snapshot_key=snapshot_key)
     _invalidate_analytics_cache()
@@ -168,9 +176,10 @@ def create_analytics_snapshot(
 @router.get("/analytics/snapshot", response_model=SLAAnalyticsSnapshot)
 def get_latest_analytics_snapshot(
     snapshot_key: str = Query(default="global"),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    """Return the most recent pre-aggregated analytics snapshot."""
+    """Return the most recent pre-aggregated analytics snapshot (BE-009)."""
     repo = SLARepository(db)
     snapshot = repo.get_latest_snapshot(snapshot_key=snapshot_key)
     if not snapshot:
