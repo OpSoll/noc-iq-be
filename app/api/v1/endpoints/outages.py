@@ -24,6 +24,7 @@ from app.utils.exporter import export_outages
 from app.api.v1.endpoints.sla import _invalidate_analytics_cache
 from app.core.security import require_engineer, require_admin
 from app.core.config import settings
+from app.core.lock import advisory_lock_nowait, ConcurrencyLockError
 
 router = APIRouter()
 
@@ -353,40 +354,50 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
     - resolved -> resolved (idempotent if mttr_minutes matches)
     - Other transitions: 400 Bad Request
     
+    Concurrency protection (BE-022):
+    - Uses PostgreSQL advisory locks to prevent duplicate/concurrent resolutions
+    - Returns 409 Conflict if another resolution is already in progress
+    
     Also calculates SLA metrics and triggers webhook notifications.
     """
     repo = OutageRepository(db)
+    
+    # Acquire advisory lock to prevent concurrent resolutions
     try:
-        outage = repo.resolve(outage_id, payload.mttr_minutes)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not outage:
-        raise HTTPException(status_code=404, detail="Outage not found")
+        with advisory_lock_nowait(db, f"resolve:{outage_id}"):
+            try:
+                outage = repo.resolve(outage_id, payload.mttr_minutes)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not outage:
+                raise HTTPException(status_code=404, detail="Outage not found")
 
-    audit_log.log("outage_resolved", {"id": outage.id, "mttr": payload.mttr_minutes})
-    OutageEventRepository(db).record(outage_id, "resolved", {"mttr_minutes": payload.mttr_minutes})
+            audit_log.log("outage_resolved", {"id": outage.id, "mttr": payload.mttr_minutes})
+            OutageEventRepository(db).record(outage_id, "resolved", {"mttr_minutes": payload.mttr_minutes})
 
-    raw_contract_result = SLAContractAdapter.calculate_sla(
-        outage_id=outage.id,
-        severity=outage.severity,
-        mttr_minutes=payload.mttr_minutes,
-    )
-    sla = translate_contract_result(raw_contract_result)
+            raw_contract_result = SLAContractAdapter.calculate_sla(
+                outage_id=outage.id,
+                severity=outage.severity,
+                mttr_minutes=payload.mttr_minutes,
+            )
+            sla = translate_contract_result(raw_contract_result)
 
-    sla_repo = SLARepository(db)
-    stored_sla = sla_repo.create_if_changed(sla)
-    _invalidate_analytics_cache()
-    OutageEventRepository(db).record(outage_id, "sla_computed", {"status": stored_sla.status})
-    payment_repo = PaymentRepository(db)
-    payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
-    webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
-    trigger_sla_violation_webhooks(
-        db,
-        sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
-        event=webhook_event,
-    )
+            sla_repo = SLARepository(db)
+            stored_sla = sla_repo.create_if_changed(sla)
+            _invalidate_analytics_cache()
+            OutageEventRepository(db).record(outage_id, "sla_computed", {"status": stored_sla.status})
+            payment_repo = PaymentRepository(db)
+            payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
+            webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
+            trigger_sla_violation_webhooks(
+                db,
+                sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
+                event=webhook_event,
+            )
 
-    return {"outage": outage, "sla": stored_sla, "payment": payment}
+            return {"outage": outage, "sla": stored_sla, "payment": payment}
+    except ConcurrencyLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{outage_id}/recompute-sla")
@@ -396,6 +407,10 @@ def recompute_sla(outage_id: str, current_user=Depends(require_engineer), db: Se
     Status validation:
     - Only 'resolved' outages can have SLA recomputed
     - Returns 400 if outage not resolved
+    
+    Concurrency protection (BE-022):
+    - Uses PostgreSQL advisory locks to prevent duplicate/concurrent recomputations
+    - Returns 409 Conflict if another recomputation is already in progress
     
     Authorization: requires engineer role
     """
@@ -407,29 +422,34 @@ def recompute_sla(outage_id: str, current_user=Depends(require_engineer), db: Se
     if outage.status != OutageStatus.resolved.value:
         raise HTTPException(status_code=400, detail="Outage must be resolved to recompute SLA")
 
-    orm = repo.get_orm_locked(outage_id)
-    raw_contract_result = SLAContractAdapter.calculate_sla(
-        outage_id=outage.id,
-        severity=outage.severity,
-        mttr_minutes=orm.mttr_minutes,
-    )
-    sla = translate_contract_result(raw_contract_result)
+    # Acquire advisory lock to prevent concurrent recomputations
+    try:
+        with advisory_lock_nowait(db, f"recompute:{outage_id}"):
+            orm = repo.get_orm_locked(outage_id)
+            raw_contract_result = SLAContractAdapter.calculate_sla(
+                outage_id=outage.id,
+                severity=outage.severity,
+                mttr_minutes=orm.mttr_minutes,
+            )
+            sla = translate_contract_result(raw_contract_result)
 
-    sla_repo = SLARepository(db)
-    stored_sla = sla_repo.create_if_changed(sla)
-    _invalidate_analytics_cache()
-    payment_repo = PaymentRepository(db)
-    payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
-    webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
-    trigger_sla_violation_webhooks(
-        db,
-        sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
-        event=webhook_event,
-    )
+            sla_repo = SLARepository(db)
+            stored_sla = sla_repo.create_if_changed(sla)
+            _invalidate_analytics_cache()
+            payment_repo = PaymentRepository(db)
+            payment = payment_repo.create_for_sla_result(outage.id, stored_sla)
+            webhook_event = WebhookEvent.SLA_VIOLATION if stored_sla.status == "violated" else WebhookEvent.SLA_RESOLVED
+            trigger_sla_violation_webhooks(
+                db,
+                sla_data={"outage_id": outage.id, "sla": stored_sla.model_dump(), "payment": payment.model_dump()},
+                event=webhook_event,
+            )
 
-    audit_log.log("sla_recomputed", {"id": outage.id})
-    OutageEventRepository(db).record(outage_id, "sla_recomputed", {"status": stored_sla.status})
-    return {"sla": stored_sla, "payment": payment}
+            audit_log.log("sla_recomputed", {"id": outage.id})
+            OutageEventRepository(db).record(outage_id, "sla_recomputed", {"status": stored_sla.status})
+            return {"sla": stored_sla, "payment": payment}
+    except ConcurrencyLockError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/{outage_id}/timeline")

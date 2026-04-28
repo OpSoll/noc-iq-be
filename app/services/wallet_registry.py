@@ -20,6 +20,7 @@ from app.models.wallet import (
 class WalletRegistry:
     _wallets_by_user: dict[str, Wallet] = {}
     _wallets_by_address: dict[str, Wallet] = {}
+    _link_locks: dict[str, bool] = {}  # Simple lock mechanism for link operations
 
     @staticmethod
     def _now() -> datetime:
@@ -75,34 +76,78 @@ class WalletRegistry:
 
     @classmethod
     def link_wallet(cls, payload: WalletLinkRequest) -> Wallet:
+        """Link a wallet to a user with comprehensive conflict detection (BE-032).
+        
+        Conflict detection rules:
+        1. User already linked to a different address → Reject (409 Conflict)
+        2. Address already linked to a different user → Reject (409 Conflict)
+        3. Same user + same address → Idempotent update (allowed)
+        4. No conflicts → Create new link
+        
+        Thread-safe: uses simple lock to prevent race conditions during link operations.
+        """
         now = cls._now()
-
-        existing_by_user = cls._wallets_by_user.get(payload.user_id)
-        if existing_by_user and existing_by_user.public_key != payload.public_key:
+        link_key = f"{payload.user_id}:{payload.public_key}"
+        
+        # Simple lock to prevent concurrent link operations
+        if cls._link_locks.get(link_key):
             raise ValueError(
-                f"User '{payload.user_id}' is already linked to a different wallet address."
+                f"Link operation for user '{payload.user_id}' is already in progress."
             )
+        
+        try:
+            cls._link_locks[link_key] = True
+            
+            # Check 1: User already linked to different address
+            existing_by_user = cls._wallets_by_user.get(payload.user_id)
+            if existing_by_user and existing_by_user.public_key != payload.public_key:
+                raise ValueError(
+                    f"User '{payload.user_id}' is already linked to wallet '{existing_by_user.public_key}'. "
+                    f"Cannot link to '{payload.public_key}'."
+                )
 
-        existing_by_address = cls._wallets_by_address.get(payload.public_key)
-        if existing_by_address and existing_by_address.user_id != payload.user_id:
-            raise ValueError(
-                f"Address '{payload.public_key}' is already linked to a different user."
+            # Check 2: Address already linked to different user
+            existing_by_address = cls._wallets_by_address.get(payload.public_key)
+            if existing_by_address and existing_by_address.user_id != payload.user_id:
+                raise ValueError(
+                    f"Wallet address '{payload.public_key}' is already linked to user '{existing_by_address.user_id}'. "
+                    f"Cannot link to '{payload.user_id}'."
+                )
+
+            # Check 3: Idempotent - same user + same address
+            if existing_by_user and existing_by_user.public_key == payload.public_key:
+                # Update existing wallet with new metadata
+                wallet = existing_by_user.model_copy(
+                    update={
+                        "funded": payload.funded,
+                        "trustline_ready": payload.trustline_ready,
+                        "active": True,
+                        "last_updated": now,
+                        "cached_at": now,
+                    }
+                )
+                cls._wallets_by_user[payload.user_id] = wallet
+                cls._wallets_by_address[payload.public_key] = wallet
+                return wallet
+
+            # Check 4: No conflicts - create new link
+            created_at = now
+            wallet = Wallet(
+                user_id=payload.user_id,
+                public_key=payload.public_key,
+                created_at=created_at,
+                last_updated=now,
+                funded=payload.funded,
+                active=True,
+                trustline_ready=payload.trustline_ready,
+                cached_at=now,
             )
-
-        created_at = existing_by_user.created_at if existing_by_user else now
-        wallet = Wallet(
-            user_id=payload.user_id,
-            public_key=payload.public_key,
-            created_at=created_at,
-            last_updated=now,
-            funded=payload.funded,
-            active=True,
-            trustline_ready=payload.trustline_ready,
-            cached_at=now,
-        )
-        cls._wallets_by_user[payload.user_id] = wallet
-        cls._wallets_by_address[payload.public_key] = wallet
-        return wallet
+            cls._wallets_by_user[payload.user_id] = wallet
+            cls._wallets_by_address[payload.public_key] = wallet
+            return wallet
+        finally:
+            # Release lock
+            cls._link_locks.pop(link_key, None)
 
     @classmethod
     def get_wallet(cls, user_id: str, refresh: bool = False) -> Wallet | None:

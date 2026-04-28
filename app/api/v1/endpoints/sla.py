@@ -187,6 +187,49 @@ def get_latest_analytics_snapshot(
     return snapshot
 
 
+@router.post("/analytics/snapshot/rebuild", response_model=SLAAnalyticsSnapshot)
+def rebuild_analytics_snapshot(
+    snapshot_key: str = Query(default="global"),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Rebuild analytics snapshot from live data (BE-025).
+    
+    This endpoint:
+    - Aggregates current SLA data from scratch
+    - Creates a new snapshot row (preserves history)
+    - Is idempotent - safe to call multiple times
+    - Requires admin privileges
+    
+    Use this for reconciliation after migrations or data drift.
+    """
+    repo = SLARepository(db)
+    snapshot = repo.rebuild_snapshot(snapshot_key=snapshot_key)
+    _invalidate_analytics_cache()
+    return snapshot
+
+
+@router.get("/analytics/snapshot/reconcile")
+def reconcile_analytics_snapshot(
+    snapshot_key: str = Query(default="global"),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Reconcile snapshot with live data to detect drift (BE-025).
+    
+    This read-only endpoint:
+    - Compares latest snapshot with current live aggregates
+    - Reports any differences found
+    - Provides rebuild recommendation if drift detected
+    - Requires admin privileges
+    
+    Use this to verify snapshot integrity before/after operations.
+    """
+    repo = SLARepository(db)
+    reconciliation = repo.reconcile_snapshots(snapshot_key=snapshot_key)
+    return reconciliation
+
+
 @router.get("/analytics/dashboard/export")
 def export_dashboard_kpis(
     format: str = Query(default="json", description="Export format: json or csv"),
