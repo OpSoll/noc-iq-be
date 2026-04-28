@@ -1,6 +1,6 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from app.models.enums import Severity
 
 
@@ -10,6 +10,21 @@ class SLAPreviewRequest(BaseModel):
 
 
 class SLAResult(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": 1,
+                "outage_id": "outage-001",
+                "status": "met",
+                "mttr_minutes": 30,
+                "threshold_minutes": 60,
+                "amount": 100,
+                "payment_type": "reward",
+                "rating": "excellent"
+            }
+        }
+    )
+
     id: Optional[int] = None
     outage_id: str
     status: Literal["met", "violated"]

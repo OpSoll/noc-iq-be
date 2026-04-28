@@ -162,7 +162,9 @@ The backend will be available at:
 
 - `http://localhost:8000`
 - Swagger docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
+- Liveness check: `http://localhost:8000/health/liveness`
+- Readiness check: `http://localhost:8000/health/readiness`
+- Legacy compatibility: `http://localhost:8000/health`
 
 ## Verification Notes
 
@@ -173,6 +175,8 @@ As of the latest stabilization pass:
 - `/health` returns `200`
 
 To exercise outage and SLA routes meaningfully, you still need a reachable PostgreSQL instance because those routes depend on the database layer.
+
+A new migration verification helper is available in `tests/test_verify_migrations.py` to validate the Alembic chain and ensure the current database state matches the head revision.
 
 ## Current Limitations
 

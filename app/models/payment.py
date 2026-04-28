@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Dict, FrozenSet, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PaymentStatus(str, Enum):
@@ -35,6 +35,27 @@ def validate_transition(current: str, next_status: str) -> None:
 
 
 class PaymentTransaction(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "payment-001",
+                "transaction_hash": "tx-123abc",
+                "type": "reward",
+                "amount": 150.0,
+                "asset_code": "USDC",
+                "from_address": "SYSTEM_POOL",
+                "to_address": "OUTAGE_SETTLEMENT",
+                "status": "confirmed",
+                "outage_id": "outage-001",
+                "sla_result_id": 1,
+                "created_at": "2026-01-01T00:00:00Z",
+                "confirmed_at": "2026-01-01T01:00:00Z",
+                "retry_count": 0,
+                "last_retried_at": None,
+            }
+        }
+    )
+
     id: str
     transaction_hash: str
     type: str

@@ -4,7 +4,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -21,6 +21,19 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 # --------------------------------------------------------------------------- #
 
 class WebhookCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "outage-webhook",
+                "url": "https://example.com/webhook",
+                "secret": "supersecret",
+                "events": ["sla.violation"],
+                "max_retries": 3,
+                "is_active": True,
+            }
+        }
+    )
+
     name: str
     url: HttpUrl
     secret: Optional[str] = None
@@ -89,6 +102,21 @@ class WebhookUpdate(BaseModel):
 
 
 class WebhookResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "name": "outage-webhook",
+                "url": "https://example.com/webhook",
+                "is_active": True,
+                "events": ["sla.violation"],
+                "max_retries": 3,
+                "schema_version": "1",
+            }
+        },
+        from_attributes=True,
+    )
+
     id: UUID
     name: str
     url: str
@@ -96,8 +124,6 @@ class WebhookResponse(BaseModel):
     events: List[str]
     max_retries: int
     schema_version: str = WEBHOOK_SCHEMA_VERSION  # BE-082: explicit schema version
-
-    model_config = {"from_attributes": True}
 
 
 class WebhookDeliveryResponse(BaseModel):
