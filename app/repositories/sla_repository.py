@@ -317,3 +317,152 @@ class SLARepository:
             avg_mttr=orm.avg_mttr,
             created_at=str(orm.created_at),
         )
+
+    def rebuild_snapshot(self, snapshot_key: str = "global") -> SLAAnalyticsSnapshot:
+        """Rebuild a snapshot from current live data. Idempotent operation.
+        
+        This method:
+        1. Aggregates current SLA data from scratch
+        2. Creates a new snapshot row (doesn't delete old ones)
+        3. Returns the new snapshot
+        
+        Safe for reconciliation after migrations or data drift.
+        """
+        # Aggregate fresh data
+        kpis = self.aggregate_dashboard_kpis()
+        perf = self.aggregate_performance()
+        
+        # Create new snapshot with current data
+        orm = SLAAnalyticsSnapshotORM(
+            snapshot_key=snapshot_key,
+            total_outages=kpis.total_outages,
+            total_violations=kpis.total_violations,
+            total_rewards=kpis.total_rewards,
+            total_penalties=kpis.total_penalties,
+            net_payout=kpis.net_payout,
+            avg_mttr=perf.avg_mttr,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        )
+        self.db.add(orm)
+        self.db.commit()
+        self.db.refresh(orm)
+        
+        return SLAAnalyticsSnapshot(
+            id=orm.id,
+            snapshot_key=orm.snapshot_key,
+            total_outages=orm.total_outages,
+            total_violations=orm.total_violations,
+            total_rewards=orm.total_rewards,
+            total_penalties=orm.total_penalties,
+            net_payout=orm.net_payout,
+            avg_mttr=orm.avg_mttr,
+            created_at=str(orm.created_at),
+        )
+
+    def reconcile_snapshots(self, snapshot_key: str = "global") -> dict:
+        """Reconcile snapshots by comparing latest snapshot with live data.
+        
+        Returns reconciliation report showing:
+        - Whether the latest snapshot matches current live aggregates
+        - Differences if any exist
+        - Recommendation to rebuild if drifted
+        
+        This is a read-only operation that helps identify data drift.
+        """
+        # Get latest snapshot
+        latest_snapshot = self.get_latest_snapshot(snapshot_key)
+        
+        # Calculate current live aggregates
+        current_kpis = self.aggregate_dashboard_kpis()
+        current_perf = self.aggregate_performance()
+        
+        if not latest_snapshot:
+            return {
+                "snapshot_key": snapshot_key,
+                "has_snapshot": False,
+                "recommendation": "rebuild",
+                "message": "No snapshot exists. Rebuild recommended.",
+                "current_live_data": {
+                    "total_outages": current_kpis.total_outages,
+                    "total_violations": current_kpis.total_violations,
+                    "total_rewards": current_kpis.total_rewards,
+                    "total_penalties": current_kpis.total_penalties,
+                    "net_payout": current_kpis.net_payout,
+                    "avg_mttr": current_perf.avg_mttr,
+                }
+            }
+        
+        # Compare snapshot with live data
+        drift_detected = (
+            latest_snapshot.total_outages != current_kpis.total_outages or
+            latest_snapshot.total_violations != current_kpis.total_violations or
+            latest_snapshot.total_rewards != current_kpis.total_rewards or
+            latest_snapshot.total_penalties != current_kpis.total_penalties or
+            abs(latest_snapshot.net_payout - current_kpis.net_payout) > 0.01 or
+            abs(latest_snapshot.avg_mttr - current_perf.avg_mttr) > 0.01
+        )
+        
+        differences = {}
+        if drift_detected:
+            if latest_snapshot.total_outages != current_kpis.total_outages:
+                differences["total_outages"] = {
+                    "snapshot": latest_snapshot.total_outages,
+                    "live": current_kpis.total_outages,
+                    "diff": current_kpis.total_outages - latest_snapshot.total_outages,
+                }
+            if latest_snapshot.total_violations != current_kpis.total_violations:
+                differences["total_violations"] = {
+                    "snapshot": latest_snapshot.total_violations,
+                    "live": current_kpis.total_violations,
+                    "diff": current_kpis.total_violations - latest_snapshot.total_violations,
+                }
+            if latest_snapshot.total_rewards != current_kpis.total_rewards:
+                differences["total_rewards"] = {
+                    "snapshot": latest_snapshot.total_rewards,
+                    "live": current_kpis.total_rewards,
+                    "diff": round(current_kpis.total_rewards - latest_snapshot.total_rewards, 2),
+                }
+            if latest_snapshot.total_penalties != current_kpis.total_penalties:
+                differences["total_penalties"] = {
+                    "snapshot": latest_snapshot.total_penalties,
+                    "live": current_kpis.total_penalties,
+                    "diff": round(current_kpis.total_penalties - latest_snapshot.total_penalties, 2),
+                }
+            if abs(latest_snapshot.net_payout - current_kpis.net_payout) > 0.01:
+                differences["net_payout"] = {
+                    "snapshot": latest_snapshot.net_payout,
+                    "live": current_kpis.net_payout,
+                    "diff": round(current_kpis.net_payout - latest_snapshot.net_payout, 2),
+                }
+            if abs(latest_snapshot.avg_mttr - current_perf.avg_mttr) > 0.01:
+                differences["avg_mttr"] = {
+                    "snapshot": latest_snapshot.avg_mttr,
+                    "live": current_perf.avg_mttr,
+                    "diff": round(current_perf.avg_mttr - latest_snapshot.avg_mttr, 2),
+                }
+        
+        return {
+            "snapshot_key": snapshot_key,
+            "has_snapshot": True,
+            "snapshot_id": latest_snapshot.id,
+            "snapshot_created_at": latest_snapshot.created_at,
+            "drift_detected": drift_detected,
+            "recommendation": "rebuild" if drift_detected else "ok",
+            "differences": differences if drift_detected else None,
+            "current_live_data": {
+                "total_outages": current_kpis.total_outages,
+                "total_violations": current_kpis.total_violations,
+                "total_rewards": current_kpis.total_rewards,
+                "total_penalties": current_kpis.total_penalties,
+                "net_payout": current_kpis.net_payout,
+                "avg_mttr": current_perf.avg_mttr,
+            },
+            "snapshot_data": {
+                "total_outages": latest_snapshot.total_outages,
+                "total_violations": latest_snapshot.total_violations,
+                "total_rewards": latest_snapshot.total_rewards,
+                "total_penalties": latest_snapshot.total_penalties,
+                "net_payout": latest_snapshot.net_payout,
+                "avg_mttr": latest_snapshot.avg_mttr,
+            }
+        }
