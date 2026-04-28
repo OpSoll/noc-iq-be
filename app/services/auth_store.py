@@ -8,6 +8,7 @@ from app.models.auth import AuthSessionResponse, AuthUser, LoginRequest, Registe
 from app.models.orm.user import UserORM
 from app.repositories.user_repository import UserRepository, user_orm_to_pydantic
 from app.repositories.session_repository import SessionRepository
+from app.repositories.token_family_repository import TokenFamilyRepository
 from app.core.security import get_password_hash, verify_password, validate_password_policy, hash_token
 from app.services.audit_log import audit_log
 from app.db.session import SessionLocal
@@ -98,12 +99,18 @@ class AuthStore:
         access_token = f"atk_{uuid4().hex}"
         refresh_token = f"rtk_{uuid4().hex}"
         expires_at = cls._now() + timedelta(seconds=TOKEN_TTL_SECONDS)
+        family_id = f"fam_{uuid4().hex}"
+        
+        token_family_repo = TokenFamilyRepository(db)
+        token_family_repo.create_family(family_id=family_id, email=payload.email)
         
         session_repo.create_session(
             access_token=hash_token(access_token),
             refresh_token=hash_token(refresh_token),
             email=payload.email,
-            expires_at=expires_at
+            family_id=family_id,
+            sequence=0,
+            expires_at=expires_at,
         )
 
         audit_log.log_event(db, "login_success", email=payload.email)
@@ -159,6 +166,7 @@ class AuthStore:
     def _refresh_with_db(cls, refresh_token: str, db: Session) -> AuthSessionResponse:
         session_repo = SessionRepository(db)
         user_repo = UserRepository(db)
+        token_family_repo = TokenFamilyRepository(db)
         
         hashed_refresh = hash_token(refresh_token)
         old_session = session_repo.get_session_by_refresh_token(hashed_refresh)
@@ -166,12 +174,45 @@ class AuthStore:
             raise ValueError("Invalid or expired refresh token")
 
         email = old_session.email
+        family_id = old_session.family_id
         
         # Check if account is locked
         if user_repo.is_account_locked(email):
             audit_log.log_event(db, "refresh_failed_locked", email=email)
             raise ValueError("Account is temporarily locked")
         
+        # Handle pre-family sessions (backward compatibility)
+        if family_id is None:
+            family_id = f"fam_{uuid4().hex}"
+            token_family_repo.create_family(family_id=family_id, email=email)
+            # Migrate old session to new family so sequence checks work
+            old_session.family_id = family_id
+            old_session.sequence = 0
+            db.commit()
+        
+        family = token_family_repo.get_family(family_id)
+        if not family:
+            raise ValueError("Invalid token family")
+        
+        if family.compromised:
+            audit_log.log_event(db, "refresh_failed_compromised", email=email, details={"family_id": family_id})
+            raise ValueError("Session family has been compromised")
+        
+        # Reuse detection: if this token's sequence is behind the family's current sequence,
+        # it means this token was already rotated and is being replayed.
+        if old_session.sequence < family.current_sequence:
+            token_family_repo.compromise_family(family_id)
+            session_repo.delete_sessions_by_family(family_id)
+            audit_log.log_event(
+                db,
+                "refresh_token_reuse",
+                email=email,
+                details={"family_id": family_id, "sequence": old_session.sequence, "expected": family.current_sequence},
+            )
+            raise ValueError("Refresh token reuse detected. Session family invalidated.")
+        
+        # Legitimate rotation
+        token_family_repo.increment_sequence(family_id)
         session_repo.delete_session(old_session.access_token)
 
         stored_user = user_repo.get_by_email(email)
@@ -186,10 +227,12 @@ class AuthStore:
             access_token=hash_token(new_access),
             refresh_token=hash_token(new_refresh),
             email=email,
-            expires_at=expires_at
+            family_id=family_id,
+            sequence=family.current_sequence + 1,
+            expires_at=expires_at,
         )
 
-        audit_log.log_event(db, "refresh", email=email)
+        audit_log.log_event(db, "refresh", email=email, details={"family_id": family_id})
         
         return AuthSessionResponse(
             access_token=new_access,
@@ -259,7 +302,9 @@ class AuthStore:
     @classmethod
     def _logout_all_sessions_with_db(cls, email: str, db: Session) -> int:
         session_repo = SessionRepository(db)
+        token_family_repo = TokenFamilyRepository(db)
         count = session_repo.delete_sessions_by_email(email)
+        token_family_repo.delete_families_by_email(email)
         audit_log.log_event(
             db, 
             "logout_all_sessions", 
