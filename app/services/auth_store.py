@@ -8,7 +8,7 @@ from app.models.auth import AuthSessionResponse, AuthUser, LoginRequest, Registe
 from app.models.orm.user import UserORM
 from app.repositories.user_repository import UserRepository, user_orm_to_pydantic
 from app.repositories.session_repository import SessionRepository
-from app.core.security import get_password_hash, verify_password, validate_password_policy
+from app.core.security import get_password_hash, verify_password, validate_password_policy, hash_token
 from app.services.audit_log import audit_log
 from app.db.session import SessionLocal
 from app.core.config import settings
@@ -100,8 +100,8 @@ class AuthStore:
         expires_at = cls._now() + timedelta(seconds=TOKEN_TTL_SECONDS)
         
         session_repo.create_session(
-            access_token=access_token,
-            refresh_token=refresh_token,
+            access_token=hash_token(access_token),
+            refresh_token=hash_token(refresh_token),
             email=payload.email,
             expires_at=expires_at
         )
@@ -127,7 +127,8 @@ class AuthStore:
         session_repo = SessionRepository(db)
         user_repo = UserRepository(db)
         
-        session = session_repo.get_session(token)
+        hashed_token = hash_token(token)
+        session = session_repo.get_session(hashed_token)
         if not session:
             return None
         
@@ -141,7 +142,7 @@ class AuthStore:
              expires_at = expires_at.replace(tzinfo=None)
 
         if now > expires_at:
-            session_repo.delete_session(token)
+            session_repo.delete_session(hashed_token)
             return None
             
         stored_user = user_repo.get_by_email(session.email)
@@ -159,7 +160,8 @@ class AuthStore:
         session_repo = SessionRepository(db)
         user_repo = UserRepository(db)
         
-        old_session = session_repo.get_session_by_refresh_token(refresh_token)
+        hashed_refresh = hash_token(refresh_token)
+        old_session = session_repo.get_session_by_refresh_token(hashed_refresh)
         if not old_session:
             raise ValueError("Invalid or expired refresh token")
 
@@ -181,8 +183,8 @@ class AuthStore:
         expires_at = cls._now() + timedelta(seconds=TOKEN_TTL_SECONDS)
         
         session_repo.create_session(
-            access_token=new_access,
-            refresh_token=new_refresh,
+            access_token=hash_token(new_access),
+            refresh_token=hash_token(new_refresh),
             email=email,
             expires_at=expires_at
         )
@@ -206,10 +208,11 @@ class AuthStore:
     @classmethod
     def _logout_with_db(cls, token: str, db: Session) -> None:
         session_repo = SessionRepository(db)
-        session = session_repo.get_session(token)
+        hashed_token = hash_token(token)
+        session = session_repo.get_session(hashed_token)
         if session:
             email = session.email
-            session_repo.delete_session(token)
+            session_repo.delete_session(hashed_token)
             audit_log.log_event(db, "logout", email=email)
 
     @classmethod
