@@ -37,13 +37,23 @@ class SLARepository:
         else:
             payload = dict(sla_data)
 
-        # Demote any existing latest record for this outage (#154)
-        self.db.execute(
-            update(SLAResultORM)
-            .where(SLAResultORM.outage_id == payload["outage_id"])
-            .where(SLAResultORM.is_latest.is_(True))
-            .values(is_latest=False)
+        # Use row-level locking to prevent race conditions when updating latest flag
+        # First, lock any existing latest row for this outage
+        existing_latest = (
+            self.db.query(SLAResultORM)
+            .filter(SLAResultORM.outage_id == payload["outage_id"], SLAResultORM.is_latest.is_(True))
+            .with_for_update(nowait=False)
+            .first()
         )
+
+        # Demote any existing latest record for this outage (#154, #219)
+        if existing_latest:
+            self.db.execute(
+                update(SLAResultORM)
+                .where(SLAResultORM.outage_id == payload["outage_id"])
+                .where(SLAResultORM.is_latest.is_(True))
+                .values(is_latest=False)
+            )
 
         orm = SLAResultORM(
             outage_id=payload["outage_id"],
