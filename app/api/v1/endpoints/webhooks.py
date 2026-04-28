@@ -124,6 +124,9 @@ class WebhookResponse(BaseModel):
     events: List[str]
     max_retries: int
     schema_version: str = WEBHOOK_SCHEMA_VERSION  # BE-082: explicit schema version
+    # BE-034: Secret lifecycle metadata (without exposing the secret)
+    secret_version: int = 1
+    last_secret_rotation_at: Optional[str] = None
 
 
 class WebhookDeliveryResponse(BaseModel):
@@ -181,6 +184,8 @@ def _serialize_webhook(webhook: Webhook) -> WebhookResponse:
         is_active=webhook.is_active,
         events=events,
         max_retries=webhook.max_retries,
+        secret_version=webhook.secret_version,
+        last_secret_rotation_at=webhook.last_secret_rotation_at.isoformat() if webhook.last_secret_rotation_at else None,
     )
 
 
@@ -292,13 +297,46 @@ def list_webhook_deliveries(
 
 
 @router.post("/{webhook_id}/rotate-secret", response_model=WebhookSecretRotateResponse)  # BE-084
-def rotate_webhook_secret(webhook_id: UUID, db: Session = Depends(get_db)):
+def rotate_webhook_secret(
+    webhook_id: UUID,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db)
+):
     """Rotate the webhook signing secret. The old secret is immediately invalidated;
-    all subsequent deliveries will be signed with the new secret."""
+    all subsequent deliveries will be signed with the new secret.
+    
+    BE-034: Emits durable audit information with timestamp and actor context.
+    """
+    from datetime import datetime
+    from app.services.audit_log import audit_log
+    
     webhook = _get_webhook_or_404(db, webhook_id)
+    
+    # Capture old metadata for audit trail
+    old_secret_version = webhook.secret_version
+    old_rotation_time = webhook.last_secret_rotation_at
+    
+    # Generate new secret and update metadata
     new_secret = secrets.token_hex(32)
     webhook.secret = new_secret
+    webhook.secret_version = old_secret_version + 1
+    webhook.last_secret_rotation_at = datetime.utcnow()
+    
     db.commit()
+    
+    # Emit audit log with actor context and timestamp
+    audit_log.log(
+        "webhook_secret_rotated",
+        {
+            "webhook_id": str(webhook_id),
+            "webhook_name": webhook.name,
+            "old_secret_version": old_secret_version,
+            "new_secret_version": webhook.secret_version,
+            "previous_rotation_at": old_rotation_time.isoformat() if old_rotation_time else None,
+            "rotated_by": getattr(current_user, 'email', 'unknown'),
+        }
+    )
+    
     return WebhookSecretRotateResponse(
         webhook_id=webhook.id,
         new_secret=new_secret,

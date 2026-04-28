@@ -16,7 +16,9 @@ from app.services.metrics import increment_counter, timer
 from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import enqueue_sla_computation, enqueue_bulk_sla_computation
 from app.utils.correlation import get_correlation_id
+from app.utils.logging import get_structured_logger
 from app.core.security import require_engineer, require_admin
+from app.services.job_cleanup import JobCleanupService
 
 logger = get_structured_logger("jobs_api")
 
@@ -54,6 +56,32 @@ class JobResponse(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+# BE-042: Job cleanup schemas
+class JobRetentionStatsResponse(BaseModel):
+    """Current job retention statistics."""
+    total_jobs: int
+    by_status: dict
+    by_age: dict
+
+
+class JobCleanupRequest(BaseModel):
+    """Request parameters for job cleanup."""
+    successful_retention_days: Optional[int] = None
+    failed_retention_days: Optional[int] = None
+    dry_run: bool = False
+
+
+class JobCleanupResponse(BaseModel):
+    """Response from job cleanup operation."""
+    successful_jobs_deleted: int
+    failed_jobs_deleted: int
+    revoked_jobs_deleted: int
+    total_deleted: int
+    cutoff_successful: str
+    cutoff_failed: str
+    dry_run: bool
 
 
 # --------------------------------------------------------------------------- #
@@ -298,3 +326,55 @@ def cancel_job(job_id: UUID, current_user=Depends(require_admin), db: Session = 
     celery_app.control.revoke(job.celery_task_id, terminate=False)
     job.status = JobStatus.REVOKED
     db.commit()
+
+
+# BE-042: Job retention and cleanup endpoints
+
+@router.get("/retention-stats", response_model=JobRetentionStatsResponse)
+def get_job_retention_stats(current_user=Depends(require_admin), db: Session = Depends(get_db)):
+    """Get current job retention statistics without deleting anything.
+    
+    BE-042: Provides visibility into job storage usage and aging.
+    """
+    cleanup_service = JobCleanupService(db)
+    return cleanup_service.get_retention_stats()
+
+
+@router.post("/cleanup", response_model=JobCleanupResponse)
+def cleanup_old_jobs(
+    payload: JobCleanupRequest,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Clean up old completed and failed jobs based on retention policy.
+    
+    BE-042: Removes old job records to prevent unbounded database growth.
+    - Successful/revoked jobs: default 30 day retention
+    - Failed jobs: default 90 day retention (preserved longer for debugging)
+    
+    Use dry_run=True to preview what would be deleted without actually deleting.
+    """
+    cleanup_service = JobCleanupService(db)
+    
+    result = cleanup_service.cleanup_old_jobs(
+        successful_retention_days=payload.successful_retention_days,
+        failed_retention_days=payload.failed_retention_days,
+        dry_run=payload.dry_run,
+    )
+    
+    # Log the cleanup operation
+    audit_log.log_event(
+        db,
+        event_type="job_cleanup_executed",
+        details={
+            "total_deleted": result["total_deleted"],
+            "successful_deleted": result["successful_jobs_deleted"],
+            "failed_deleted": result["failed_jobs_deleted"],
+            "revoked_deleted": result["revoked_jobs_deleted"],
+            "dry_run": payload.dry_run,
+            "executed_by": getattr(current_user, 'email', 'unknown'),
+        }
+    )
+    
+    return JobCleanupResponse(**result)
+

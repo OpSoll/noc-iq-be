@@ -214,3 +214,39 @@ class PaymentRepository:
             for r in rows
             if r.details and r.details.get("id") == transaction_id
         ]
+
+    def get_reconciliation_history(self, transaction_id: str) -> List[dict]:
+        """Return detailed reconciliation history with actor context and status transitions.
+        
+        BE-027: Provides a structured view of who changed what and why, suitable for
+        audit screens and frontend drawers.
+        """
+        rows = (
+            self.db.query(AuditLogORM)
+            .filter(
+                AuditLogORM.event_type.in_(self.HISTORY_EVENT_TYPES),
+            )
+            .order_by(AuditLogORM.created_at.asc())
+            .all()
+        )
+        
+        history = []
+        for r in rows:
+            if r.details and r.details.get("id") == transaction_id:
+                # Extract previous and new status from details
+                previous_status = r.details.get("previous_status")
+                new_status = r.details.get("status") or r.details.get("new_status")
+                
+                history.append({
+                    "event_type": r.event_type,
+                    "actor": r.email,
+                    "previous_status": previous_status,
+                    "new_status": new_status,
+                    "timestamp": r.created_at.isoformat() if r.created_at else None,
+                    "details": {
+                        k: v for k, v in r.details.items() 
+                        if k not in {"previous_status", "status", "new_status", "id"}
+                    } or None,
+                })
+        
+        return history
