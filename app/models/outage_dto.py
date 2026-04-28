@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import OutageStatus, Severity
 from app.core.config import settings
@@ -24,6 +24,25 @@ class OutageSortDirection(str, Enum):
 
 
 class OutageCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "outage-001",
+                "site_name": "Site A",
+                "site_id": "site-A",
+                "severity": "high",
+                "status": "open",
+                "detected_at": "2026-01-01T00:00:00Z",
+                "description": "Example outage affecting core API.",
+                "affected_services": ["core-api"],
+                "affected_subscribers": 50,
+                "assigned_to": "oncall@example.com",
+                "created_by": "reporter@example.com",
+                "location": {"latitude": 40.7128, "longitude": -74.0060},
+            }
+        }
+    )
+
     id: str = Field(..., min_length=1)
     site_name: str = Field(..., min_length=1)
     site_id: Optional[str] = None
@@ -75,6 +94,28 @@ class OutageUpdate(BaseModel):
 
 
 class BulkOutageCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "outages": [
+                    {
+                        "id": "outage-001",
+                        "site_name": "Site A",
+                        "site_id": "site-A",
+                        "severity": "high",
+                        "status": "open",
+                        "detected_at": "2026-01-01T00:00:00Z",
+                        "description": "Example outage affecting core API.",
+                        "affected_services": ["core-api"],
+                        "assigned_to": "oncall@example.com",
+                        "created_by": "reporter@example.com",
+                        "location": {"latitude": 40.7128, "longitude": -74.0060},
+                    }
+                ]
+            }
+        }
+    )
+
     outages: List[OutageCreate]
 
     @field_validator("outages")
