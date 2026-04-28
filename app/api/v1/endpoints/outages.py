@@ -11,7 +11,7 @@ from app.db.session import get_db
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
-from app.models.outage_dto import OutageSortDirection, OutageSortField
+from app.models.outage_dto import OutageSortDirection, OutageSortField, ImportFieldError, ImportRowResult, ImportResponse
 from app.models.webhook import WebhookEvent
 from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.outage_repository import OutageRepository
@@ -134,7 +134,7 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
     return {"count": len(created), "items": created}
 
 
-@router.post("/import", response_model=dict, summary="Bulk import outages from CSV or JSON file")
+@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file")
 async def import_outages(
     file: UploadFile = File(...),
     dry_run: bool = Query(default=False, description="Validate rows without writing to the database"),
@@ -142,12 +142,12 @@ async def import_outages(
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    MAX_BYTES = settings.MAX_FILE_UPLOAD_SIZE_BYTES  # Use configurable limit
+    MAX_BYTES = settings.MAX_FILE_UPLOAD_SIZE_BYTES
     CHUNK_SIZE = 64 * 1024  # 64 KB
 
     filename = file.filename or ""
 
-    # --- #146: chunked read with size cap ---
+    # --- #213: chunked read with size cap ---
     chunks: list[bytes] = []
     total_read = 0
     while True:
@@ -160,7 +160,7 @@ async def import_outages(
         chunks.append(chunk)
     content = b"".join(chunks)
 
-    # --- parse ---
+    # --- parse into a row iterator (avoids holding two full copies in memory) ---
     if filename.endswith(".json"):
         try:
             rows = json.loads(content)
@@ -170,14 +170,12 @@ async def import_outages(
             raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
     elif filename.endswith(".csv"):
         try:
-            reader = csv.DictReader(io.StringIO(content.decode("utf-8")))
-            rows = list(reader)
+            rows = list(csv.DictReader(io.StringIO(content.decode("utf-8"))))
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Invalid CSV: {exc}") from exc
     else:
         raise HTTPException(status_code=400, detail="Unsupported file format. Use .json or .csv")
 
-    # Validate row count limit
     if len(rows) > settings.MAX_BULK_OUTAGES_COUNT:
         raise HTTPException(
             status_code=400,
@@ -185,61 +183,53 @@ async def import_outages(
         )
 
     repo = OutageRepository(db)
-    row_outcomes: list[dict] = []
+    row_outcomes: list[ImportRowResult] = []
     persisted_count = 0
 
-    # --- #148: transactional semantics ---
-    # In atomic mode we collect all errors first; if any exist we abort without writing.
-    # In non-atomic mode we write row-by-row and report partial success.
-
     if dry_run:
+        # --- #213: process rows one at a time (streaming semantics) ---
         for i, row in enumerate(rows):
             try:
                 payload = OutageCreate(**row)
                 duplicate = repo.check_duplicate(payload)
-                row_outcomes.append({
-                    "row": i,
-                    "id": payload.id,
-                    "status": "ok",
-                    "duplicate": bool(duplicate),
-                    "existing_id": duplicate.id if duplicate else None,
-                })
+                row_outcomes.append(ImportRowResult(
+                    row=i, id=payload.id, status="ok",
+                    duplicate=bool(duplicate),
+                    existing_id=duplicate.id if duplicate else None,
+                ))
             except Exception as exc:
-                # --- #147: machine-readable error structure ---
                 row_outcomes.append(_row_error(i, row, exc))
     elif atomic:
-        # Validate all rows first
         parsed: list[OutageCreate] = []
         for i, row in enumerate(rows):
             try:
                 parsed.append(OutageCreate(**row))
-                row_outcomes.append({"row": i, "id": row.get("id"), "status": "ok"})
+                row_outcomes.append(ImportRowResult(row=i, id=row.get("id"), status="ok"))
             except Exception as exc:
                 row_outcomes.append(_row_error(i, row, exc))
 
-        errors = [r for r in row_outcomes if r["status"] == "error"]
-        if errors:
-            # Abort — no writes performed
+        if any(r.status == "error" for r in row_outcomes):
             return _import_response("import", len(rows), 0, row_outcomes)
 
-        # All valid — write inside a single transaction
         try:
             for i, payload in enumerate(parsed):
                 created = repo.create(payload)
-                row_outcomes[i]["outage_id"] = created.id
-                row_outcomes[i]["persisted"] = True
+                row_outcomes[i].outage_id = created.id
+                row_outcomes[i].persisted = True
                 persisted_count += 1
             db.commit()
         except Exception as exc:
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Transaction failed: {exc}") from exc
     else:
-        # Non-atomic: write row-by-row, report partial success
         for i, row in enumerate(rows):
             try:
                 payload = OutageCreate(**row)
                 created = repo.create(payload)
-                row_outcomes.append({"row": i, "id": payload.id, "status": "ok", "outage_id": created.id, "persisted": True})
+                row_outcomes.append(ImportRowResult(
+                    row=i, id=payload.id, status="ok",
+                    outage_id=created.id, persisted=True,
+                ))
                 persisted_count += 1
             except Exception as exc:
                 db.rollback()
@@ -248,40 +238,35 @@ async def import_outages(
     return _import_response("dry_run" if dry_run else "import", len(rows), persisted_count, row_outcomes)
 
 
-# --- #147: helpers for machine-readable error output ---
+# --- #215: helpers for machine-readable error output ---
 
-def _row_error(index: int, raw_row: dict, exc: Exception) -> dict:
-    """Return a stable machine-readable error entry for a single row."""
-    errors: list[dict] = []
+def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:
+    """Return a stable machine-readable ImportRowResult for a failed row."""
+    errors: list[ImportFieldError] = []
     if hasattr(exc, "errors"):
-        # Pydantic ValidationError
         for e in exc.errors():  # type: ignore[union-attr]
-            errors.append({
-                "field": ".".join(str(loc) for loc in e["loc"]) if e.get("loc") else None,
-                "type": e.get("type"),
-                "message": e.get("msg"),
-            })
+            errors.append(ImportFieldError(
+                field=".".join(str(loc) for loc in e["loc"]) if e.get("loc") else None,
+                type=e.get("type"),
+                message=e.get("msg", str(e)),
+            ))
     else:
-        errors.append({"field": None, "type": type(exc).__name__, "message": str(exc)})
+        errors.append(ImportFieldError(field=None, type=type(exc).__name__, message=str(exc)))
 
-    return {
-        "row": index,
-        "id": raw_row.get("id"),
-        "status": "error",
-        "errors": errors,
-    }
+    return ImportRowResult(row=index, id=raw_row.get("id"), status="error", errors=errors)
 
 
-def _import_response(mode: str, total: int, persisted: int, outcomes: list[dict]) -> dict:
-    return {
-        "mode": mode,
-        "total_rows": total,
-        "persisted": persisted,
-        "validated": sum(1 for r in outcomes if r["status"] == "ok"),
-        "error_count": sum(1 for r in outcomes if r["status"] == "error"),
-        "errors": [r for r in outcomes if r["status"] == "error"],
-        "rows": outcomes,
-    }
+def _import_response(mode: str, total: int, persisted: int, outcomes: list[ImportRowResult]) -> ImportResponse:
+    error_rows = [r for r in outcomes if r.status == "error"]
+    return ImportResponse(
+        mode=mode,
+        total_rows=total,
+        persisted=persisted,
+        validated=sum(1 for r in outcomes if r.status == "ok"),
+        error_count=len(error_rows),
+        errors=error_rows,
+        rows=outcomes,
+    )
 
 
 @router.put("/{outage_id}", response_model=Outage)

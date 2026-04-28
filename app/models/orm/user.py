@@ -10,6 +10,7 @@ class UserORM(Base):
     hashed_password = Column(String(255), nullable=False)
     full_name = Column(String(255), nullable=True)
     role = Column(String(50), default="engineer")
+    stellar_wallet = Column(String(255), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     # Auth rate limiting fields
     failed_login_attempts = Column(Integer, default=0)

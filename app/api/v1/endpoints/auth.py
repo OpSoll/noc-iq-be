@@ -7,6 +7,7 @@ from app.models.auth import (
     AuthSessionResponse,
     AuthUser,
     LoginRequest,
+    ProfileUpdateRequest,
     RegisterRequest,
     SessionInventoryResponse,
     SessionInfo,
@@ -16,6 +17,7 @@ from app.services.auth_store import AuthStore
 from app.db.session import get_db
 from app.core.security import get_current_user, require_admin
 from app.core.rate_limiter import rate_limiter
+from app.repositories.user_repository import UserRepository, user_orm_to_pydantic
 
 router = APIRouter()
 
@@ -129,6 +131,32 @@ def refresh(payload: RefreshRequest, request: Request, db: Session = Depends(get
 @router.get("/me", response_model=AuthUser)
 def me(current_user: AuthUser = Depends(get_current_user)):
     return current_user
+
+
+@router.patch("/me/profile", response_model=AuthUser)
+def update_profile(
+    payload: ProfileUpdateRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Update mutable profile fields (full_name, stellar_wallet). Role and email are immutable here."""
+    if payload.full_name is None and payload.stellar_wallet is None:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+
+    repo = UserRepository(db)
+    updated = repo.update_profile(
+        user_id=current_user.id,
+        full_name=payload.full_name,
+        stellar_wallet=payload.stellar_wallet,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    from app.services.audit_log import audit_log
+    changed = {k: v for k, v in payload.model_dump(exclude_none=True).items()}
+    audit_log.log_event(db, "profile_updated", email=current_user.email, details={"changed_fields": list(changed.keys())})
+
+    return user_orm_to_pydantic(updated)
 
 
 @router.post("/logout", response_model=AuthLogoutResponse)

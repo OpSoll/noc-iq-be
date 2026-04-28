@@ -86,15 +86,17 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest, current_us
 def get_sla_dashboard_kpis(
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    cache_key = f"dashboard_kpis_{severity}_{site_id}"
+    resolved_site = site_id or site
+    cache_key = f"dashboard_kpis_{severity}_{resolved_site}"
     cached = _dashboard_cache.get(cache_key)
     if cached is not None:
         return cached
     repo = SLARepository(db)
-    result = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    result = repo.aggregate_dashboard_kpis(severity=severity, site_id=resolved_site)
     _dashboard_cache.set(cache_key, result)
     return result
 
@@ -106,20 +108,22 @@ def get_sla_trends(
     tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     if bucket not in VALID_BUCKETS:
         raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
 
-    cache_key = f"trends_{days}_{bucket}_{tz}_{severity}_{site_id}"
+    resolved_site = site_id or site
+    cache_key = f"trends_{days}_{bucket}_{tz}_{severity}_{resolved_site}"
     cached = _dashboard_cache.get(cache_key)
     if cached is not None:
         return cached
 
     repo = SLARepository(db)
     try:
-        result = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+        result = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=resolved_site)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -133,8 +137,10 @@ def aggregate_sla_performance(
     end_date: datetime | None = Query(default=None),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     db: Session = Depends(get_db),
 ):
+    resolved_site = site_id or site
     if start_date and start_date.tzinfo is not None:
         start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
     if end_date and end_date.tzinfo is not None:
@@ -144,7 +150,7 @@ def aggregate_sla_performance(
         raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
 
     repo = SLARepository(db)
-    return repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=site_id)
+    return repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=resolved_site)
 
 
 @router.post("/analytics/snapshot", response_model=SLAAnalyticsSnapshot, status_code=201)
@@ -177,12 +183,14 @@ def export_dashboard_kpis(
     format: str = Query(default="json", description="Export format: json or csv"),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     """Export dashboard KPI data in JSON or CSV format."""
+    resolved_site = site_id or site
     repo = SLARepository(db)
-    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=resolved_site)
     
     try:
         exported = export_dashboard_kpi(kpi, format)
@@ -206,6 +214,7 @@ def export_sla_trends(
     tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
@@ -213,9 +222,10 @@ def export_sla_trends(
     if bucket not in VALID_BUCKETS:
         raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
     
+    resolved_site = site_id or site
     repo = SLARepository(db)
     try:
-        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=resolved_site)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     
@@ -240,10 +250,12 @@ def export_performance_aggregation_endpoint(
     end_date: datetime | None = Query(default=None),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     """Export performance aggregation data in JSON or CSV format."""
+    resolved_site = site_id or site
     if start_date and start_date.tzinfo is not None:
         start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
     if end_date and end_date.tzinfo is not None:
@@ -254,7 +266,7 @@ def export_performance_aggregation_endpoint(
     
     repo = SLARepository(db)
     aggregation = repo.aggregate_performance(
-        start_date=start_date, end_date=end_date, severity=severity, site_id=site_id
+        start_date=start_date, end_date=end_date, severity=severity, site_id=resolved_site
     )
     
     try:
@@ -279,6 +291,7 @@ def export_analytics_summary_endpoint(
     tz: str = Query(default="UTC", description="IANA timezone name"),
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
+    site: str | None = Query(default=None, description="Alias for site_id"),
     include_aggregation: bool = Query(default=True, description="Include performance aggregation"),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
@@ -287,21 +300,19 @@ def export_analytics_summary_endpoint(
     if bucket not in VALID_BUCKETS:
         raise HTTPException(status_code=400, detail=f"Invalid bucket '{bucket}'. Must be one of: {', '.join(VALID_BUCKETS)}")
     
+    resolved_site = site_id or site
     repo = SLARepository(db)
     
-    # Get KPI data
-    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=site_id)
+    kpi = repo.aggregate_dashboard_kpis(severity=severity, site_id=resolved_site)
     
-    # Get trends data
     try:
-        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=site_id)
+        trends = repo.aggregate_trends(limit_days=days, bucket=bucket, tz=tz, severity=severity, site_id=resolved_site)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     
-    # Get aggregation data if requested
     aggregation = None
     if include_aggregation:
-        aggregation = repo.aggregate_performance(severity=severity, site_id=site_id)
+        aggregation = repo.aggregate_performance(severity=severity, site_id=resolved_site)
     
     try:
         exported = export_analytics_summary(kpi, trends, aggregation, format)

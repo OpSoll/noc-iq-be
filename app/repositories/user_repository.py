@@ -11,6 +11,7 @@ def user_orm_to_pydantic(orm: UserORM) -> AuthUser:
         email=orm.email,
         full_name=orm.full_name,
         role=Role(orm.role),
+        stellar_wallet=orm.stellar_wallet,
         created_at=orm.created_at,
     )
 
@@ -67,3 +68,16 @@ class UserRepository:
         if user.locked_until is None:
             return False
         return user.locked_until > datetime.utcnow()
+
+    def update_profile(self, user_id: str, full_name: Optional[str] = None, stellar_wallet: Optional[str] = None) -> Optional[UserORM]:
+        """Update mutable profile fields. Returns updated ORM or None if not found."""
+        user = self.get_by_id(user_id)
+        if not user:
+            return None
+        if full_name is not None:
+            user.full_name = full_name
+        if stellar_wallet is not None:
+            user.stellar_wallet = stellar_wallet
+        self.db.commit()
+        self.db.refresh(user)
+        return user
