@@ -7,12 +7,22 @@ class SessionRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def create_session(self, access_token: str, refresh_token: str, email: str, expires_at: datetime) -> SessionORM:
+    def create_session(
+        self,
+        access_token: str,
+        refresh_token: str,
+        email: str,
+        family_id: str,
+        sequence: int,
+        expires_at: datetime,
+    ) -> SessionORM:
         session = SessionORM(
             access_token=access_token,
             refresh_token=refresh_token,
             email=email,
-            expires_at=expires_at
+            family_id=family_id,
+            sequence=sequence,
+            expires_at=expires_at,
         )
         self.db.add(session)
         self.db.commit()
@@ -30,6 +40,15 @@ class SessionRepository:
         if session:
             self.db.delete(session)
             self.db.commit()
+
+    def delete_sessions_by_family(self, family_id: str) -> int:
+        """Delete all sessions belonging to a token family. Returns count."""
+        sessions = self.db.query(SessionORM).filter(SessionORM.family_id == family_id).all()
+        count = len(sessions)
+        for session in sessions:
+            self.db.delete(session)
+        self.db.commit()
+        return count
 
     def list_sessions_by_email(self, email: str) -> list[SessionORM]:
         """List all active sessions for a given email."""

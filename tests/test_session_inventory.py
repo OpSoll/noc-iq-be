@@ -8,7 +8,7 @@ from app.db.session import get_db, SessionLocal
 from app.models.orm.session import SessionORM
 from app.models.orm.user import UserORM
 from app.models.enums import Role
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, hash_token
 
 
 def override_get_db():
@@ -41,12 +41,12 @@ def create_test_user(db: Session, email: str, password: str = "Password123!", ro
 
 
 def create_test_session(db: Session, access_token: str, refresh_token: str, email: str) -> SessionORM:
-    """Helper to create a test session."""
+    """Helper to create a test session (stores hashed tokens)."""
     from datetime import datetime, timedelta
     
     session = SessionORM(
-        access_token=access_token,
-        refresh_token=refresh_token,
+        access_token=hash_token(access_token),
+        refresh_token=hash_token(refresh_token),
         email=email,
         expires_at=datetime.utcnow() + timedelta(hours=1),
     )
@@ -246,8 +246,8 @@ def test_session_inventory_no_sessions(db: Session):
     # Manually create expired session to test filtering
     from datetime import datetime, timedelta
     session = SessionORM(
-        access_token="atk_expired",
-        refresh_token="rtk_expired",
+        access_token=hash_token("atk_expired"),
+        refresh_token=hash_token("rtk_expired"),
         email=email,
         expires_at=datetime.utcnow() - timedelta(hours=1),  # Expired
     )
@@ -269,3 +269,63 @@ def test_session_inventory_no_sessions(db: Session):
     # The expired session should be marked as inactive
     inactive_sessions = [s for s in data["sessions"] if not s["is_active"]]
     assert len(inactive_sessions) >= 0  # May or may not include expired depending on cleanup
+
+
+def test_tokens_are_hashed_in_db(db: Session):
+    """Verify that raw tokens are never stored in the database."""
+    email = "hash_test@example.com"
+    password = "Password123!"
+    
+    create_test_user(db, email, password)
+    
+    login_resp = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert login_resp.status_code == 200
+    raw_access = login_resp.json()["access_token"]
+    raw_refresh = login_resp.json()["refresh_token"]
+    
+    # Query DB directly
+    session = db.query(SessionORM).filter(SessionORM.email == email).first()
+    assert session is not None
+    assert session.access_token != raw_access, "Access token must be hashed in DB"
+    assert session.refresh_token != raw_refresh, "Refresh token must be hashed in DB"
+    assert session.access_token == hash_token(raw_access)
+    assert session.refresh_token == hash_token(raw_refresh)
+
+
+def test_lookup_and_revocation_with_hashed_tokens(db: Session):
+    """Token lookup (me endpoint) and revocation (logout) work with hashed storage."""
+    email = "lookup_test@example.com"
+    password = "Password123!"
+    
+    create_test_user(db, email, password)
+    
+    login_resp = client.post("/api/v1/auth/login", json={"email": email, "password": password})
+    assert login_resp.status_code == 200
+    access_token = login_resp.json()["access_token"]
+    refresh_token = login_resp.json()["refresh_token"]
+    
+    # Lookup via /me should work
+    headers = {"Authorization": f"Bearer {access_token}"}
+    resp = client.get("/api/v1/auth/me", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["email"] == email
+    
+    # Refresh should work
+    resp = client.post("/api/v1/auth/refresh", json={"refresh_token": refresh_token})
+    assert resp.status_code == 200
+    new_access = resp.json()["access_token"]
+    
+    # Old access token should be revoked
+    resp = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access_token}"})
+    assert resp.status_code == 401
+    
+    # New access token should work
+    resp = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {new_access}"})
+    assert resp.status_code == 200
+    
+    # Logout should revoke new token
+    resp = client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {new_access}"})
+    assert resp.status_code == 200
+    
+    resp = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {new_access}"})
+    assert resp.status_code == 401
