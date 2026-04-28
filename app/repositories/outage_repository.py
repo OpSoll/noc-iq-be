@@ -42,6 +42,8 @@ ALLOWED_STATUS_TRANSITIONS = {
     OutageStatus.resolved.value: {OutageStatus.resolved.value},
 }
 
+OUTAGE_SORT_FIELDS = {"detected_at", "site_name", "severity", "status", "id"}
+
 
 class OutageRepository:
     def __init__(self, db: Session):

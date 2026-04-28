@@ -78,15 +78,29 @@ def list_outages(
     page_size: int = 20,
     sort_by: OutageSortField = Query(
         default=OutageSortField.detected_at,
-        description="Supported sort fields: detected_at, site_name, severity, status, id",
+        description="Sort field (enum). Supported: detected_at, site_name, severity, status, id. Invalid values rejected with 422.",
     ),
     sort_direction: OutageSortDirection = Query(
         default=OutageSortDirection.desc,
-        description="Sort direction: asc or desc. Default is desc.",
+        description="Sort direction (enum). Supported: asc, desc. Invalid values rejected with 422. Default: desc.",
     ),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
+    """List outages with optional filtering and sorting.
+    
+    **Sorting Contract (BE-012)**
+    - Supported sort fields (all validated):
+      - detected_at: Time the outage was detected (default, stable)
+      - site_name: Name of the affected site
+      - severity: Outage severity (critical, high, medium, low)
+      - status: Outage status (open, resolved)
+      - id: Unique outage identifier
+    
+    - Default sorting: detected_at descending, then id ascending (stable, deterministic)
+    - Invalid sort values: rejected with 422 validation error
+    - Empty results: returns 0 items with total=0
+    """
     repo = OutageRepository(db)
     return repo.list(
         severity=severity,
@@ -134,11 +148,11 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
     return {"count": len(created), "items": created}
 
 
-@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file")
+@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
 async def import_outages(
     file: UploadFile = File(...),
-    dry_run: bool = Query(default=False, description="Validate rows without writing to the database"),
-    atomic: bool = Query(default=True, description="Roll back all writes if any row fails"),
+    dry_run: bool = Query(default=False, description="Validation-only mode: validate all rows WITHOUT persisting to database. Returns same field/row-level errors as live imports."),
+    atomic: bool = Query(default=True, description="All-or-nothing: rollback all writes if any row fails. Only applies when dry_run=false."),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
@@ -187,16 +201,28 @@ async def import_outages(
     persisted_count = 0
 
     if dry_run:
-        # --- #213: process rows one at a time (streaming semantics) ---
+        # --- BE-012: Dry-run validation mode ---
+        # Validates rows exactly as live import: OutageCreate field validation + duplicate detection
+        # Returns field and row-level errors with same semantics, but does NOT persist
         for i, row in enumerate(rows):
             try:
-                payload = OutageCreate(**row)
-                duplicate = repo.check_duplicate(payload)
-                row_outcomes.append(ImportRowResult(
-                    row=i, id=payload.id, status="ok",
-                    duplicate=bool(duplicate),
-                    existing_id=duplicate.id if duplicate else None,
-                ))
+                payload = OutageCreate(**row)  # Full field validation via Pydantic
+                duplicate = repo.check_duplicate(payload)  # Duplicate detection same as live import
+                if duplicate:
+                    row_outcomes.append(ImportRowResult(
+                        row=i, 
+                        id=payload.id, 
+                        status="ok",
+                        duplicate=True,
+                        existing_id=duplicate.id,
+                    ))
+                else:
+                    row_outcomes.append(ImportRowResult(
+                        row=i, 
+                        id=payload.id, 
+                        status="ok",
+                        duplicate=False,
+                    ))
             except Exception as exc:
                 row_outcomes.append(_row_error(i, row, exc))
     elif atomic:
@@ -286,6 +312,14 @@ def update_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(re
 
 @router.patch("/{outage_id}", response_model=Outage)
 def patch_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    """Partially update an outage with status transition validation (BE-013).
+    
+    Enforced transitions:
+    - open -> open (idempotent)
+    - open -> resolved (permitted)
+    - resolved -> resolved (idempotent)
+    - Other transitions: 400 Bad Request
+    """
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
@@ -312,6 +346,15 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
 
 @router.post("/{outage_id}/resolve")
 def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    """Resolve an outage, compute SLA, and create payment (BE-013).
+    
+    Status transition validation:
+    - open -> resolved (permitted)
+    - resolved -> resolved (idempotent if mttr_minutes matches)
+    - Other transitions: 400 Bad Request
+    
+    Also calculates SLA metrics and triggers webhook notifications.
+    """
     repo = OutageRepository(db)
     try:
         outage = repo.resolve(outage_id, payload.mttr_minutes)
@@ -347,14 +390,22 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
 
 
 @router.post("/{outage_id}/recompute-sla")
-def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
+def recompute_sla(outage_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    """Recompute SLA for a resolved outage (BE-013, BE-009).
+    
+    Status validation:
+    - Only 'resolved' outages can have SLA recomputed
+    - Returns 400 if outage not resolved
+    
+    Authorization: requires engineer role
+    """
     repo = OutageRepository(db)
     outage = repo.get(outage_id)
     if not outage:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    if outage.status != OutageStatus.resolved:
-        raise HTTPException(status_code=400, detail="Outage not resolved yet")
+    if outage.status != OutageStatus.resolved.value:
+        raise HTTPException(status_code=400, detail="Outage must be resolved to recompute SLA")
 
     orm = repo.get_orm_locked(outage_id)
     raw_contract_result = SLAContractAdapter.calculate_sla(
@@ -389,8 +440,10 @@ def get_outage_timeline(
     end_date: datetime | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
+    """Get event timeline for an outage (BE-009)."""
     repo = OutageRepository(db)
     if not repo.get(outage_id):
         raise HTTPException(status_code=404, detail="Outage not found")
