@@ -93,6 +93,11 @@ class OutageUpdate(BaseModel):
     location: Optional[Location] = None
 
 
+class ImportConsistency(str, Enum):
+    atomic = "atomic"
+    partial = "partial"
+
+
 class BulkOutageCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -150,6 +155,7 @@ class ImportRowResult(BaseModel):
 class ImportResponse(BaseModel):
     """Top-level response for the import endpoint."""
     mode: str  # "dry_run" | "import"
+    consistency: ImportConsistency
     total_rows: int
     persisted: int
     validated: int

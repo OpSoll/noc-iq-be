@@ -193,10 +193,15 @@ class OutageRepository:
             return _orm_to_pydantic(duplicate)
         return None
 
-    def create(self, payload: OutageCreate) -> Outage:
+    def create_or_get_existing(self, payload: OutageCreate) -> tuple[Outage, bool]:
+        """Create a new outage or return an existing duplicate.
+
+        Returns a tuple of (outage, persisted).
+        Persisted is False when the payload matches an existing outage.
+        """
         existing = self.check_duplicate(payload)
         if existing:
-            return existing
+            return existing, False
 
         location_data = payload.location.model_dump() if payload.location else None
         orm = OutageORM(
@@ -216,7 +221,11 @@ class OutageRepository:
         self.db.add(orm)
         self.db.commit()
         self.db.refresh(orm)
-        return _orm_to_pydantic(orm)
+        return _orm_to_pydantic(orm), True
+
+    def create(self, payload: OutageCreate) -> Outage:
+        outage, _ = self.create_or_get_existing(payload)
+        return outage
 
     def bulk_create(self, outages: List[OutageCreate]) -> List[Outage]:
         return [self.create(payload) for payload in outages]
