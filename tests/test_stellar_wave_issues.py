@@ -88,6 +88,70 @@ out-1,Site A,critical,open,2026-01-01T10:00:00,Major outage,service1"""
         assert data["mode"] == "dry_run"
         assert any(r.get("duplicate") == True for r in data["rows"])
 
+    def test_import_reports_duplicate_rows_in_live_import(self, db: Session):
+        """Live import should report duplicate rows and not persist the duplicate."""
+        csv_content = b"""id,site_name,severity,status,detected_at,description,affected_services
+out-duplicate,Site A,critical,open,2026-01-01T10:00:00,Major outage,service1"""
+
+        response = client.post(
+            "/api/v1/outages/import",
+            files={"file": ("test.csv", csv_content, "text/csv")},
+            headers={"Authorization": "Bearer test-engineer-token"}
+        )
+        assert response.status_code == 200
+
+        response = client.post(
+            "/api/v1/outages/import",
+            files={"file": ("test.csv", csv_content, "text/csv")},
+            headers={"Authorization": "Bearer test-engineer-token"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["mode"] == "import"
+        assert data["total_rows"] == 1
+        assert data["persisted"] == 0
+        assert data["validated"] == 1
+        assert any(r.get("duplicate") == True for r in data["rows"])
+        assert data["rows"][0].get("existing_id") == "out-duplicate"
+
+    def test_bulk_create_reuses_existing_duplicates(self, db: Session):
+        """Bulk create should use the same duplicate detection rules and count persisted rows."""
+        payload = {
+            "outages": [
+                {
+                    "id": "out-bulk-1",
+                    "site_name": "Site B",
+                    "site_id": "site-B",
+                    "severity": "high",
+                    "status": "open",
+                    "detected_at": "2026-01-01T10:00:00",
+                    "description": "Bulk outage",
+                    "affected_services": ["service1"],
+                },
+                {
+                    "id": "out-bulk-1",
+                    "site_name": "Site B",
+                    "site_id": "site-B",
+                    "severity": "high",
+                    "status": "open",
+                    "detected_at": "2026-01-01T10:00:00",
+                    "description": "Bulk outage",
+                    "affected_services": ["service1"],
+                },
+            ]
+        }
+
+        response = client.post(
+            "/api/v1/outages/bulk",
+            json=payload,
+            headers={"Authorization": "Bearer test-engineer-token"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert data["persisted"] == 1
+        assert data["items"][0]["id"] == data["items"][1]["id"]
+
     def test_dry_run_does_not_persist(self, db: Session):
         """Dry-run mode should NOT persist outages to database."""
         csv_content = b"""id,site_name,severity,status,detected_at,description,affected_services
