@@ -1,6 +1,4 @@
 import json
-import hmac
-import hashlib
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -10,7 +8,11 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-
+from app.services.webhook_signing import (
+    CURRENT_SIGNATURE_VERSION,
+    sign_payload,
+    verify_signature,
+)
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -24,18 +26,37 @@ def _get_retry_delays() -> list[int]:
 WEBHOOK_SCHEMA_VERSION = "1"
 
 
-def _sign_payload(secret: str, payload: str) -> str:
-    return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
-
-
-def _build_headers(webhook: Webhook, payload: str, event: WebhookEvent = WebhookEvent.SLA_VIOLATION) -> Dict[str, str]:
+def _build_headers(
+    webhook: Webhook,
+    payload: str,
+    event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
+) -> Dict[str, str]:
+    """Build webhook delivery headers with explicit signature versioning (BE-087).
+    
+    Args:
+        webhook: Webhook configuration
+        payload: JSON payload string
+        event: Webhook event type
+        signature_version: Explicit signature algorithm version
+    
+    Returns:
+        Dictionary of headers including:
+        - Content-Type: application/json
+        - X-Webhook-Event: event type
+        - X-Webhook-Timestamp: ISO-formatted UTC timestamp
+        - X-Webhook-Signature: signature (if secret configured)
+        - X-Webhook-Signature-Version: signature version (if secret configured)
+    """
     headers = {
         "Content-Type": "application/json",
         "X-Webhook-Event": event.value,
         "X-Webhook-Timestamp": datetime.utcnow().isoformat(),
     }
     if webhook.secret:
-        headers["X-Webhook-Signature"] = f"sha256={_sign_payload(webhook.secret, payload)}"
+        sig_hex, _ = sign_payload(webhook.secret, payload, signature_version)
+        headers["X-Webhook-Signature"] = f"sha256={sig_hex}"
+        headers["X-Webhook-Signature-Version"] = str(signature_version)
     return headers
 
 
@@ -57,12 +78,26 @@ def create_delivery(
     webhook: Webhook,
     event: WebhookEvent,
     payload: Dict[str, Any],
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> WebhookDelivery:
+    """Create a webhook delivery record with explicit signature version (BE-087).
+    
+    Args:
+        db: Database session
+        webhook: Webhook configuration
+        event: Webhook event type
+        payload: Event payload dict (will be JSON-serialized)
+        signature_version: Signature algorithm version to use
+    
+    Returns:
+        Created WebhookDelivery record
+    """
     delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=event,
         payload=json.dumps(payload),
         status=WebhookDeliveryStatus.PENDING,
+        signature_version=signature_version,
     )
     db.add(delivery)
     db.commit()
@@ -72,7 +107,12 @@ def create_delivery(
 
 def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_str = delivery.payload
-    headers = _build_headers(webhook, payload_str, delivery.event)
+    headers = _build_headers(
+        webhook,
+        payload_str,
+        delivery.event,
+        delivery.signature_version,
+    )
 
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -150,23 +190,49 @@ def trigger_sla_violation_webhooks(
     db: Session,
     sla_data: Dict[str, Any],
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> List[WebhookDelivery]:
+    """Trigger webhook deliveries for an event with explicit signature versioning (BE-087).
+    
+    Args:
+        db: Database session
+        sla_data: Event data to include in webhook payload
+        event: Webhook event type
+        signature_version: Signature algorithm version (defaults to current supported version)
+    
+    Returns:
+        List of created WebhookDelivery records
+    
+    Note:
+        - Each delivery includes explicit signature_version metadata in headers
+        - Timestamp is immutable across retries (idempotency support)
+        - Future signing changes can use new version without breaking existing consumers
+    """
     webhooks = get_active_webhooks_for_event(db, event)
     deliveries = []
 
+    # Timestamp is captured once and reused across all retries (idempotency support)
+    event_timestamp = datetime.utcnow().isoformat()
+    
     payload = {
         "schema_version": WEBHOOK_SCHEMA_VERSION,
         "event": event.value,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": event_timestamp,
         "data": sla_data,
     }
 
     for webhook in webhooks:
-        delivery = create_delivery(db, webhook, event, payload)
+        delivery = create_delivery(
+            db,
+            webhook,
+            event,
+            payload,
+            signature_version=signature_version,
+        )
         deliveries.append(delivery)
         logger.info(
-            "Queued webhook delivery %s for webhook %s on event %s.",
-            delivery.id, webhook.id, event.value,
+            "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d).",
+            delivery.id, webhook.id, event.value, signature_version,
         )
         # Dispatch immediately (in production, offload to a background task/queue)
         dispatch_delivery(db, delivery.id)
