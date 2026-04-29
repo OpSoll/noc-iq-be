@@ -190,23 +190,49 @@ def trigger_sla_violation_webhooks(
     db: Session,
     sla_data: Dict[str, Any],
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> List[WebhookDelivery]:
+    """Trigger webhook deliveries for an event with explicit signature versioning (BE-087).
+    
+    Args:
+        db: Database session
+        sla_data: Event data to include in webhook payload
+        event: Webhook event type
+        signature_version: Signature algorithm version (defaults to current supported version)
+    
+    Returns:
+        List of created WebhookDelivery records
+    
+    Note:
+        - Each delivery includes explicit signature_version metadata in headers
+        - Timestamp is immutable across retries (idempotency support)
+        - Future signing changes can use new version without breaking existing consumers
+    """
     webhooks = get_active_webhooks_for_event(db, event)
     deliveries = []
 
+    # Timestamp is captured once and reused across all retries (idempotency support)
+    event_timestamp = datetime.utcnow().isoformat()
+    
     payload = {
         "schema_version": WEBHOOK_SCHEMA_VERSION,
         "event": event.value,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": event_timestamp,
         "data": sla_data,
     }
 
     for webhook in webhooks:
-        delivery = create_delivery(db, webhook, event, payload)
+        delivery = create_delivery(
+            db,
+            webhook,
+            event,
+            payload,
+            signature_version=signature_version,
+        )
         deliveries.append(delivery)
         logger.info(
-            "Queued webhook delivery %s for webhook %s on event %s.",
-            delivery.id, webhook.id, event.value,
+            "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d).",
+            delivery.id, webhook.id, event.value, signature_version,
         )
         # Dispatch immediately (in production, offload to a background task/queue)
         dispatch_delivery(db, delivery.id)

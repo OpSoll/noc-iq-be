@@ -139,6 +139,7 @@ class WebhookDeliveryResponse(BaseModel):
     error_message: Optional[str]
     delivered_at: Optional[str]
     dead_lettered_at: Optional[str]  # BE-086: Include dead-letter timestamp
+    signature_version: int  # BE-087: Explicit signature algorithm version
     created_at: str
 
     model_config = {"from_attributes": True}
