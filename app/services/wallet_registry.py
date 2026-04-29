@@ -35,10 +35,20 @@ class WalletRegistry:
         return age > settings.WALLET_CACHE_TTL_SECONDS
 
     @classmethod
+    def _get_cache_ttl_remaining(cls, wallet: Wallet) -> int | None:
+        """Return seconds until cache expires, or None if stale/never cached."""
+        if wallet.cached_at is None:
+            return None
+        age = (cls._now() - wallet.cached_at).total_seconds()
+        remaining = settings.WALLET_CACHE_TTL_SECONDS - age
+        return max(0, int(remaining)) if remaining > 0 else None
+
+    @classmethod
     def _refresh_wallet(cls, wallet: Wallet) -> Wallet:
         """Simulate a live re-fetch and stamp cached_at. In production this would
         call the Stellar Horizon API; here we just update the timestamp."""
-        refreshed = wallet.model_copy(update={"cached_at": cls._now(), "last_updated": cls._now()})
+        now = cls._now()
+        refreshed = wallet.model_copy(update={"cached_at": now, "last_updated": now, "cache_status": "live"})
         cls._wallets_by_user[wallet.user_id] = refreshed
         cls._wallets_by_address[wallet.public_key] = refreshed
         return refreshed
@@ -156,6 +166,9 @@ class WalletRegistry:
             return None
         if refresh or cls._is_stale(wallet):
             wallet = cls._refresh_wallet(wallet)
+        else:
+            # Mark as fresh if within TTL
+            wallet = wallet.model_copy(update={"cache_status": "fresh"})
         return wallet
 
     @classmethod
@@ -177,10 +190,14 @@ class WalletRegistry:
                 asset_code="USDC",
                 asset_issuer="TEST_ISSUER",
             )
+        cache_ttl = cls._get_cache_ttl_remaining(wallet)
         return WalletBalanceResponse(
             address=address,
             balances=balances,
             last_updated=wallet.last_updated,
+            cache_status=wallet.cache_status,
+            cache_ttl_seconds=cache_ttl,
+            cached_at=wallet.cached_at,
         )
 
     @classmethod
@@ -189,6 +206,7 @@ class WalletRegistry:
         if not wallet:
             return None
 
+        cache_ttl = cls._get_cache_ttl_remaining(wallet)
         return WalletStatusResponse(
             user_id=wallet.user_id,
             public_key=wallet.public_key,
@@ -197,6 +215,9 @@ class WalletRegistry:
             usable=wallet.funded and wallet.trustline_ready and wallet.active,
             active=wallet.active,
             last_updated=wallet.last_updated,
+            cache_status=wallet.cache_status,
+            cache_ttl_seconds=cache_ttl,
+            cached_at=wallet.cached_at,
         )
 
     @classmethod
@@ -211,6 +232,8 @@ class WalletRegistry:
             public_key=wallet.public_key,
             trustline_ready=wallet.trustline_ready,
             trustline_error=error,
+            cache_status=wallet.cache_status,
+            cached_at=wallet.cached_at,
         )
 
     @classmethod
@@ -225,4 +248,6 @@ class WalletRegistry:
             public_key=wallet.public_key,
             funded=wallet.funded,
             funding_error=error,
+            cache_status=wallet.cache_status,
+            cached_at=wallet.cached_at,
         )

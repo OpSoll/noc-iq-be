@@ -83,27 +83,29 @@ Current status:
 ```json
 {
   "email": "user@example.com",
-  "password": "securePassword123"
+  "password": "[REDACTED - See password policy]"
 }
 ```
+
+> **SECURITY NOTE**: Never use plaintext passwords in documentation, logs, or version control. The example above shows the field structure only. Always use strong, unique passwords meeting the policy requirements (min 8 chars, uppercase, lowercase, digit, special char).
 
 **Response (200 OK):**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "access_token": "[JWT TOKEN - Expires in 3600s]",
+  "refresh_token": "[JWT TOKEN - Rotates on use]",
   "token_type": "bearer",
   "expires_in": 3600,
   "user": {
     "id": "user123",
     "email": "user@example.com",
     "role": "engineer",
-    "stellar_wallet": "GXXX..."
+    "stellar_wallet": "[Stellar Public Key - G...]"
   }
 }
 ```
 
-> **SECURITY NOTE**: The tokens shown above are example JWTs for documentation purposes only. Never use these values in production. Real tokens are cryptographically secure and expire according to the configured TTL.
+> **SECURITY NOTE**: Tokens shown above are placeholders for documentation purposes only. Real tokens are cryptographically secure, expire according to configured TTL, and should never be logged or shared. Store tokens securely on the client side (e.g., httpOnly cookies or secure storage). Never commit tokens to version control.
 
 **Rate Limiting & Security:**
 - **IP-based Rate Limiting**: Maximum 10 login attempts per IP address within a 5-minute window
@@ -121,11 +123,13 @@ Register new user account.
 ```json
 {
   "email": "newuser@example.com",
-  "password": "securePassword123",
+  "password": "[REDACTED - See password policy]",
   "full_name": "John Doe",
   "role": "engineer"
 }
 ```
+
+> **SECURITY NOTE**: Passwords must meet policy requirements. Never log, store in plaintext, or transmit passwords insecurely. The backend hashes passwords using bcrypt before storage.
 
 **Response (201 Created):**
 ```json
@@ -145,22 +149,24 @@ Refresh access token using refresh token.
 **Request Body:**
 ```json
 {
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs..."
+  "refresh_token": "[REFRESH TOKEN - Rotates on use]"
 }
 ```
+
+> **SECURITY NOTE**: Refresh tokens rotate on each use. If a refresh token is reused (replay attack), the entire session family is invalidated for security.
 
 **Response (200 OK):**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "access_token": "[JWT TOKEN - Rotated]",
+  "refresh_token": "[JWT TOKEN - New rotation]",
   "token_type": "bearer",
   "expires_in": 3600,
   "user": {
     "id": "user123",
     "email": "user@example.com",
     "role": "engineer",
-    "stellar_wallet": "GXXX..."
+    "stellar_wallet": "[Stellar Public Key - G...]"
   }
 }
 ```
@@ -575,17 +581,29 @@ Create a new Stellar wallet for a user.
 
 Get wallet details for a user.
 
+**Query Parameters:**
+- `refresh` (optional, default=false): Force a live re-fetch instead of returning cached data
+
 **Response (200 OK):**
 ```json
 {
   "user_id": "user123",
-  "public_key": "GXXX...",
+  "public_key": "[Stellar Public Key - G...]",
   "created_at": "2026-01-16T10:00:00Z",
   "last_updated": "2026-01-16T11:00:00Z",
   "funded": true,
-  "active": true
+  "active": true,
+  "trustline_ready": true,
+  "cached_at": "2026-01-16T11:00:00Z",
+  "cache_status": "fresh"
 }
 ```
+
+> **Cache Behavior (BE-033)**: Wallet endpoints return cache metadata to help frontend make informed polling decisions:
+> - `cache_status`: "fresh" (within TTL), "stale" (exceeded TTL), or "live" (just refreshed)
+> - `cached_at`: Timestamp when data was last cached
+> - Default TTL: 60 seconds (configurable via `WALLET_CACHE_TTL_SECONDS`)
+> - Use `refresh=true` to force a live re-fetch
 
 ### GET `/api/v1/wallets/{address}/balance`
 
@@ -594,7 +612,7 @@ Get balance for a Stellar address.
 **Response (200 OK):**
 ```json
 {
-  "address": "GXXX...",
+  "address": "[Stellar Public Key - G...]",
   "balances": {
     "XLM": {
       "balance": "1000.0000000",
@@ -604,16 +622,13 @@ Get balance for a Stellar address.
       "balance": "5000.0000000",
       "asset_type": "credit_alphanum4",
       "asset_code": "USDC",
-      "asset_issuer": "GBBD..."
-    },
-    "NOCIQ": {
-      "balance": "500.0000000",
-      "asset_type": "credit_alphanum12",
-      "asset_code": "NOCIQ",
-      "asset_issuer": "GNOC..."
+      "asset_issuer": "[USDC Issuer - G...]"
     }
   },
-  "last_updated": "2026-01-16T11:05:00Z"
+  "last_updated": "2026-01-16T11:05:00Z",
+  "cache_status": "fresh",
+  "cache_ttl_seconds": 45,
+  "cached_at": "2026-01-16T11:05:00Z"
 }
 ```
 

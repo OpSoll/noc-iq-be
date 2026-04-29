@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from app.services.audit_log import audit_log
 from app.services.metrics import increment_counter, timer
 from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import enqueue_sla_computation, enqueue_bulk_sla_computation
+from app.tasks.webhook_tasks import dispatch_webhook_event
 from app.utils.correlation import get_correlation_id
 from app.utils.logging import get_structured_logger
 from app.core.security import require_engineer, require_admin
@@ -51,6 +53,10 @@ class JobResponse(BaseModel):
     payload: Optional[dict] = None
     result: Optional[dict] = None
     error: Optional[str] = None
+    # BE-041: Retry metadata
+    retry_count: int = 0
+    max_retries: int = 3
+    last_retried_at: Optional[str] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     created_at: str
@@ -109,6 +115,10 @@ def _serialize_job(job: Job) -> JobResponse:
         payload=_parse(job.payload),
         result=_parse(job.result),
         error=job.error,
+        # BE-041: Include retry metadata
+        retry_count=job.retry_count,
+        max_retries=job.max_retries,
+        last_retried_at=job.last_retried_at.isoformat() if job.last_retried_at else None,
         started_at=job.started_at.isoformat() if job.started_at else None,
         finished_at=job.finished_at.isoformat() if job.finished_at else None,
         created_at=job.created_at.isoformat(),
@@ -326,6 +336,179 @@ def cancel_job(job_id: UUID, current_user=Depends(require_admin), db: Session = 
     celery_app.control.revoke(job.celery_task_id, terminate=False)
     job.status = JobStatus.REVOKED
     db.commit()
+
+
+# BE-041: Job retry endpoint
+
+class JobRetryResponse(BaseModel):
+    """Response from job retry operation."""
+    id: UUID
+    celery_task_id: str
+    job_type: JobType
+    status: JobStatus
+    retry_count: int
+    max_retries: int
+    message: str
+
+    model_config = {"from_attributes": True}
+
+
+@router.post(
+    "/{job_id}/retry",
+    response_model=JobRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_job(
+    job_id: UUID,
+    request: Request,
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Retry a failed or revoked job.
+    
+    BE-041: Allows authorized users to intentionally retry eligible failed jobs.
+    
+    Retry Policy:
+    - Only FAILED or REVOKED jobs can be retried
+    - Maximum retries per job: configurable via max_retries field (default: 3)
+    - Each retry creates a new Celery task with the original payload
+    - Retry attempts are tracked and audited
+    - Jobs that exceed max_retries are permanently marked as failed
+    
+    Returns:
+        202 Accepted with new job status and incremented retry count
+        400 Bad Request if job is not eligible for retry
+        404 Not Found if job doesn't exist
+    """
+    correlation_id = get_correlation_id()
+    job = _get_job_or_404(db, job_id)
+    
+    # Validate job is eligible for retry
+    if job.status not in (JobStatus.FAILURE, JobStatus.REVOKED):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot retry job with status '{job.status.value}'. Only FAILED or REVOKED jobs can be retried.",
+        )
+    
+    # Check retry limit
+    if job.retry_count >= job.max_retries:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Job has exceeded maximum retry limit ({job.max_retries}). Current retry count: {job.retry_count}",
+        )
+    
+    # Log retry attempt before performing the action
+    audit_log.log_event(
+        db,
+        event_type="job_retry_initiated",
+        details={
+            "job_id": str(job.id),
+            "original_celery_task_id": job.celery_task_id,
+            "job_type": job.job_type.value,
+            "previous_status": job.status.value,
+            "retry_count": job.retry_count + 1,  # Will be incremented
+            "max_retries": job.max_retries,
+            "payload": job.payload,
+            "previous_error": job.error,
+            "correlation_id": correlation_id,
+            "initiated_by": getattr(current_user, 'email', 'unknown'),
+        }
+    )
+    
+    logger.info(
+        "Retrying job",
+        job_id=str(job.id),
+        job_type=job.job_type.value,
+        retry_count=job.retry_count + 1,
+        max_retries=job.max_retries,
+        correlation_id=correlation_id
+    )
+    
+    # Increment retry count and update status
+    job.retry_count += 1
+    job.last_retried_at = datetime.utcnow()
+    job.error = None  # Clear previous error
+    job.status = JobStatus.PENDING
+    job.progress = 0.0
+    job.started_at = None
+    job.finished_at = None
+    
+    # Re-enqueue the job based on its type
+    try:
+        payload = json.loads(job.payload) if job.payload else {}
+        
+        if job.job_type == JobType.SLA_COMPUTATION:
+            new_task = enqueue_sla_computation(
+                db,
+                device_id=payload.get("device_id", ""),
+                period=payload.get("period", ""),
+                correlation_id=correlation_id
+            )
+        elif job.job_type == JobType.BULK_SLA_COMPUTATION:
+            new_task = enqueue_bulk_sla_computation(
+                db,
+                device_ids=payload.get("device_ids", []),
+                period=payload.get("period", ""),
+                correlation_id=correlation_id
+            )
+        elif job.job_type == JobType.WEBHOOK_DISPATCH:
+            # For webhook jobs, re-dispatch with the original payload
+            from app.tasks.webhook_tasks import dispatch_webhook_event
+            task_result = dispatch_webhook_event.delay(payload)
+            job.celery_task_id = task_result.id
+            db.commit()
+            db.refresh(job)
+            
+            return JobRetryResponse(
+                id=job.id,
+                celery_task_id=job.celery_task_id,
+                job_type=job.job_type,
+                status=job.status,
+                retry_count=job.retry_count,
+                max_retries=job.max_retries,
+                message=f"Job retry #{job.retry_count} initiated successfully",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported job type for retry: {job.job_type.value}",
+            )
+        
+        # Update job with new Celery task ID
+        job.celery_task_id = new_task.celery_task_id
+        db.commit()
+        db.refresh(job)
+        
+        logger.info(
+            "Job retry enqueued successfully",
+            job_id=str(job.id),
+            new_celery_task_id=job.celery_task_id,
+            retry_count=job.retry_count,
+            correlation_id=correlation_id
+        )
+        
+        return JobRetryResponse(
+            id=job.id,
+            celery_task_id=job.celery_task_id,
+            job_type=job.job_type,
+            status=job.status,
+            retry_count=job.retry_count,
+            max_retries=job.max_retries,
+            message=f"Job retry #{job.retry_count} initiated successfully",
+        )
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            "Failed to retry job",
+            job_id=str(job.id),
+            error=str(e),
+            correlation_id=correlation_id
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retry job: {str(e)}",
+        )
 
 
 # BE-042: Job retention and cleanup endpoints
