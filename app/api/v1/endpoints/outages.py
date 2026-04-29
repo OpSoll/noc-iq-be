@@ -11,7 +11,14 @@ from app.db.session import get_db
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
-from app.models.outage_dto import OutageSortDirection, OutageSortField, ImportFieldError, ImportRowResult, ImportResponse
+from app.models.outage_dto import (
+    OutageSortDirection,
+    OutageSortField,
+    ImportConsistency,
+    ImportFieldError,
+    ImportRowResult,
+    ImportResponse,
+)
 from app.models.webhook import WebhookEvent
 from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.outage_repository import OutageRepository
@@ -163,8 +170,14 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
 @router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
 async def import_outages(
     file: UploadFile = File(...),
-    dry_run: bool = Query(default=False, description="Validation-only mode: validate all rows WITHOUT persisting to database. Returns same field/row-level errors as live imports."),
-    atomic: bool = Query(default=True, description="All-or-nothing: rollback all writes if any row fails. Only applies when dry_run=false."),
+    dry_run: bool = Query(
+        default=False,
+        description="Validation-only mode: validate all rows WITHOUT persisting to database. Returns the same field/row-level errors as live imports.",
+    ),
+    consistency: ImportConsistency = Query(
+        default=ImportConsistency.atomic,
+        description="Write consistency mode for live imports. atomic=all-or-nothing, partial=persist valid rows and report row-level failures.",
+    ),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
@@ -247,7 +260,7 @@ async def import_outages(
                 row_outcomes.append(_row_error(i, row, exc))
 
         if any(r.status == "error" for r in row_outcomes):
-            return _import_response("import", len(rows), 0, row_outcomes)
+            return _import_response("import", consistency, len(rows), 0, row_outcomes)
 
         try:
             for i, payload in enumerate(parsed):
@@ -283,7 +296,7 @@ async def import_outages(
                 db.rollback()
                 row_outcomes.append(_row_error(i, row, exc))
 
-    return _import_response("dry_run" if dry_run else "import", len(rows), persisted_count, row_outcomes)
+return _import_response("dry_run" if dry_run else "import", consistency, len(rows), persisted_count, row_outcomes)
 
 
 # --- #215: helpers for machine-readable error output ---
@@ -304,10 +317,11 @@ def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:
     return ImportRowResult(row=index, id=raw_row.get("id"), status="error", errors=errors)
 
 
-def _import_response(mode: str, total: int, persisted: int, outcomes: list[ImportRowResult]) -> ImportResponse:
+def _import_response(mode: str, consistency: ImportConsistency, total: int, persisted: int, outcomes: list[ImportRowResult]) -> ImportResponse:
     error_rows = [r for r in outcomes if r.status == "error"]
     return ImportResponse(
         mode=mode,
+        consistency=consistency,
         total_rows=total,
         persisted=persisted,
         validated=sum(1 for r in outcomes if r.status == "ok"),
