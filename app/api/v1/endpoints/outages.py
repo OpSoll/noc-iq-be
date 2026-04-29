@@ -88,8 +88,14 @@ def list_outages(
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    """List outages with optional filtering and sorting.
-    
+    """List outages with optional filtering, search, and sorting.
+
+    **Search (BE-011)**
+    - `search`: case-insensitive substring match across `id`, `site_id`, and `site_name`
+    - Composes with all other filters (severity, status, date range) and pagination
+    - Exact and partial matches are both supported
+    - No match returns 0 items with total=0
+
     **Sorting Contract (BE-012)**
     - Supported sort fields (all validated):
       - detected_at: Time the outage was detected (default, stable)
@@ -97,10 +103,8 @@ def list_outages(
       - severity: Outage severity (critical, high, medium, low)
       - status: Outage status (open, resolved)
       - id: Unique outage identifier
-    
     - Default sorting: detected_at descending, then id ascending (stable, deterministic)
     - Invalid sort values: rejected with 422 validation error
-    - Empty results: returns 0 items with total=0
     """
     repo = OutageRepository(db)
     return repo.list(

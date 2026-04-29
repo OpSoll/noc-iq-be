@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.models.orm.outage_event import OutageEventORM
+from app.models.orm.outage_event import OutageEventORM, CURRENT_SCHEMA_VERSION
 from app.models.outage_event import validate_event_detail
 
 
@@ -20,6 +20,7 @@ class OutageEventRepository:
             outage_id=outage_id,
             event_type=event_type,
             detail=json.dumps(detail) if detail else None,
+            schema_version=CURRENT_SCHEMA_VERSION,
             occurred_at=datetime.utcnow(),
         )
         self.db.add(orm)
@@ -57,6 +58,7 @@ class OutageEventRepository:
                     "id": r.id,
                     "outage_id": r.outage_id,
                     "event_type": r.event_type,
+                    "schema_version": r.schema_version,
                     "detail": json.loads(r.detail) if r.detail else None,
                     "occurred_at": r.occurred_at.isoformat(),
                 }
