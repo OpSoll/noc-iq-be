@@ -1,10 +1,12 @@
 import json
 import secrets
+from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
+from sqlalchemy import cast, func, or_, String
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -144,6 +146,15 @@ class WebhookDeliveryResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class PaginatedWebhookDeliveries(BaseModel):
+    items: List[WebhookDeliveryResponse]
+    total: int
+    offset: int
+    limit: int
+    returned: int
+    has_more: bool
+
+
 class WebhookSecretRotateResponse(BaseModel):
     webhook_id: UUID
     new_secret: str
@@ -277,23 +288,61 @@ def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Se
     db.commit()
 
 
-@router.get("/{webhook_id}/deliveries", response_model=List[WebhookDeliveryResponse])
+@router.get("/{webhook_id}/deliveries", response_model=PaginatedWebhookDeliveries)
 def list_webhook_deliveries(
     webhook_id: UUID,
-    status_filter: Optional[WebhookDeliveryStatus] = Query(None, alias="status"),
+    status: Optional[WebhookDeliveryStatus] = Query(None, description="Filter by delivery status."),
+    event: Optional[WebhookEvent] = Query(None, description="Filter by delivery event type."),
+    search: Optional[str] = Query(None, description="Search delivery id, error message, or response status code."),
+    created_after: Optional[datetime] = Query(None, description="Return deliveries created after this timestamp."),
+    created_before: Optional[datetime] = Query(None, description="Return deliveries created before this timestamp."),
+    delivered_after: Optional[datetime] = Query(None, description="Return deliveries delivered after this timestamp."),
+    delivered_before: Optional[datetime] = Query(None, description="Return deliveries delivered before this timestamp."),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, description="Number of records to skip"),  # BE-083
     db: Session = Depends(get_db),
 ):
     _get_webhook_or_404(db, webhook_id)
-    query = (
-        db.query(WebhookDelivery)
-        .filter(WebhookDelivery.webhook_id == webhook_id)
-        .order_by(WebhookDelivery.created_at.desc())
+    query = db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == webhook_id)
+
+    if status is not None:
+        query = query.filter(WebhookDelivery.status == status)
+    if event is not None:
+        query = query.filter(WebhookDelivery.event == event)
+    if created_after is not None:
+        query = query.filter(WebhookDelivery.created_at >= created_after)
+    if created_before is not None:
+        query = query.filter(WebhookDelivery.created_at <= created_before)
+    if delivered_after is not None:
+        query = query.filter(WebhookDelivery.delivered_at >= delivered_after)
+    if delivered_before is not None:
+        query = query.filter(WebhookDelivery.delivered_at <= delivered_before)
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                cast(WebhookDelivery.id, String).ilike(search_term),
+                WebhookDelivery.error_message.ilike(search_term),
+                cast(WebhookDelivery.response_status_code, String).ilike(search_term),
+            )
+        )
+
+    total = query.order_by(None).count()
+    deliveries = (
+        query.order_by(WebhookDelivery.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
     )
-    if status_filter is not None:
-        query = query.filter(WebhookDelivery.status == status_filter)
-    return [_serialize_delivery(d) for d in query.offset(offset).limit(limit).all()]
+    items = [_serialize_delivery(d) for d in deliveries]
+    return PaginatedWebhookDeliveries(
+        items=items,
+        total=total,
+        offset=offset,
+        limit=limit,
+        returned=len(items),
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("/{webhook_id}/rotate-secret", response_model=WebhookSecretRotateResponse)  # BE-084
