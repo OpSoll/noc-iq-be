@@ -250,7 +250,7 @@ async def import_outages(
                     ))
             except Exception as exc:
                 row_outcomes.append(_row_error(i, row, exc))
-    elif atomic:
+    elif consistency == ImportConsistency.atomic:
         parsed: list[OutageCreate] = []
         for i, row in enumerate(rows):
             try:
