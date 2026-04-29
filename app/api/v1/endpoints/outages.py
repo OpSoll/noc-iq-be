@@ -296,11 +296,7 @@ async def import_outages(
                 db.rollback()
                 row_outcomes.append(_row_error(i, row, exc))
 
-return _import_response("dry_run" if dry_run else "import", consistency, len(rows), persisted_count, row_outcomes)
-
-
-# --- #215: helpers for machine-readable error output ---
-
+    return _import_response("dry_run" if dry_run else "import", consistency, len(rows), persisted_count, row_outcomes)
 def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:
     """Return a stable machine-readable ImportRowResult for a failed row."""
     errors: list[ImportFieldError] = []
