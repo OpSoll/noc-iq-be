@@ -142,11 +142,17 @@ def create_outage(payload: OutageCreate, current_user=Depends(require_engineer),
 @router.post("/bulk", response_model=dict)
 def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
+    items: list[Outage] = []
+    persisted_count = 0
     try:
-        created = repo.bulk_create(payload.outages)
+        for outage_payload in payload.outages:
+            created, persisted = repo.create_or_get_existing(outage_payload)
+            items.append(created)
+            if persisted:
+                persisted_count += 1
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"count": len(created), "items": created}
+    return {"count": len(items), "persisted": persisted_count, "items": items}
 
 
 @router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
@@ -240,10 +246,14 @@ async def import_outages(
 
         try:
             for i, payload in enumerate(parsed):
-                created = repo.create(payload)
+                created, persisted = repo.create_or_get_existing(payload)
                 row_outcomes[i].outage_id = created.id
-                row_outcomes[i].persisted = True
-                persisted_count += 1
+                row_outcomes[i].persisted = persisted
+                if persisted:
+                    persisted_count += 1
+                else:
+                    row_outcomes[i].duplicate = True
+                    row_outcomes[i].existing_id = created.id
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -252,12 +262,18 @@ async def import_outages(
         for i, row in enumerate(rows):
             try:
                 payload = OutageCreate(**row)
-                created = repo.create(payload)
+                created, persisted = repo.create_or_get_existing(payload)
                 row_outcomes.append(ImportRowResult(
-                    row=i, id=payload.id, status="ok",
-                    outage_id=created.id, persisted=True,
+                    row=i,
+                    id=payload.id,
+                    status="ok",
+                    outage_id=created.id,
+                    persisted=persisted,
+                    duplicate=not persisted,
+                    existing_id=created.id if not persisted else None,
                 ))
-                persisted_count += 1
+                if persisted:
+                    persisted_count += 1
             except Exception as exc:
                 db.rollback()
                 row_outcomes.append(_row_error(i, row, exc))
