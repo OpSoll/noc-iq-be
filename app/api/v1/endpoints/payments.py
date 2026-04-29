@@ -1,7 +1,8 @@
-from datetime import datetime
-from typing import Any, Dict, List, Optional
 import hashlib
 import hmac
+import time
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel
@@ -9,12 +10,32 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.payment import PaginatedPayments, PaymentTransaction
+from app.models.payment import PaginatedPayments, PaymentTransaction, PaymentTransitionError
 from app.repositories.payment_repository import PaymentRepository
 from app.services.audit_log import audit_log
 from app.core.security import get_current_user, require_admin, require_engineer
 
 router = APIRouter()
+
+_SEEN_NONCES: dict[str, float] = {}
+CALLBACK_NONCE_TTL_SECONDS = 300  
+
+
+def _evict_stale_nonces() -> None:
+    """Remove nonces older than the replay window (called on each callback)."""
+    cutoff = time.monotonic() - CALLBACK_NONCE_TTL_SECONDS
+    stale = [k for k, ts in _SEEN_NONCES.items() if ts < cutoff]
+    for k in stale:
+        del _SEEN_NONCES[k]
+
+
+def _is_replay(nonce: str) -> bool:
+    """Return True if *nonce* has been seen within the replay window."""
+    _evict_stale_nonces()
+    if nonce in _SEEN_NONCES:
+        return True
+    _SEEN_NONCES[nonce] = time.monotonic()
+    return False
 
 
 # BE-027: Schemas for reconciliation history
@@ -126,8 +147,16 @@ def reconcile_payment(
     
     try:
         payment = repo.reconcile(transaction_id, payload.status)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except PaymentTransitionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "current_status": exc.current,
+                "requested_status": exc.next_status,
+                "allowed_transitions": list(exc.allowed),
+            },
+        )
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     
@@ -155,8 +184,16 @@ def retry_payment(
         raise HTTPException(status_code=404, detail="Payment not found")
     try:
         payment = repo.retry(transaction_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    except PaymentTransitionError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": str(exc),
+                "current_status": exc.current,
+                "requested_status": exc.next_status,
+                "allowed_transitions": list(exc.allowed),
+            },
+        )
     if not payment:
         raise HTTPException(status_code=409, detail="Max retries reached")
     audit_log.log("payment_retried", {"id": transaction_id, "retry_count": payment.retry_count})
@@ -167,10 +204,27 @@ class ProviderCallbackRequest(BaseModel):
     transaction_id: str
     status: str
     provider_ref: Optional[str] = None
+    # BE-028: callers must supply a per-request nonce for replay protection.
+    # The nonce must be unique within the CALLBACK_NONCE_TTL_SECONDS window.
+    nonce: Optional[str] = None
 
 
-def _verify_webhook_signature(payload: str, signature: str, secret: str) -> bool:
-    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+def _verify_callback_signature(
+    transaction_id: str,
+    status: str,
+    nonce: Optional[str],
+    signature: str,
+    secret: str,
+) -> bool:
+    """HMAC-SHA256 verification.
+
+    Canonical message: ``<transaction_id>:<status>:<nonce>``
+    Including the nonce in the signed payload binds the signature to this
+    specific request so that replaying a captured (signature, payload) pair
+    against a different nonce produces a different expected signature.
+    """
+    message = f"{transaction_id}:{status}:{nonce or ''}"
+    expected = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, signature)
 
 
@@ -178,37 +232,99 @@ def _verify_webhook_signature(payload: str, signature: str, secret: str) -> bool
 def provider_callback(
     payload: ProviderCallbackRequest,
     x_webhook_signature: Optional[str] = Header(default=None),
+    x_callback_nonce: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
     """
-    Inbound callback from a payment provider to update payment status.
-    Validates the HMAC signature when PAYMENT_WEBHOOK_SECRET is configured.
-    Idempotent: if the payment is already in the requested status, returns it unchanged.
+    Inbound callback from a payment provider to update payment status (BE-028).
+
+    Security model:
+    - HMAC-SHA256 signature (X-Webhook-Signature) verified when
+      PAYMENT_WEBHOOK_SECRET is configured.  The signed message includes the
+      nonce so replaying a captured request fails if the nonce changes.
+    - Replay protection: the nonce (from X-Callback-Nonce header or the
+      ``nonce`` body field) must be unique within a 5-minute window.
+      Duplicate nonces are rejected with 409 Conflict.
+    - Idempotency: a callback that moves a payment into its current status
+      is silently accepted (returns 200 with the unchanged record).
+    - Failures and suspicious events are written to the audit log so they
+      are reviewable later.
     """
+    # --- 1. Resolve nonce (header takes precedence over body field) ----------
+    effective_nonce = x_callback_nonce or payload.nonce
+
+    # --- 2. Authenticate signature -------------------------------------------
     secret = settings.PAYMENT_WEBHOOK_SECRET
     if secret:
         if not x_webhook_signature:
+            audit_log.log(
+                "callback_rejected_missing_signature",
+                {"transaction_id": payload.transaction_id, "provider_ref": payload.provider_ref},
+            )
             raise HTTPException(status_code=401, detail="Missing webhook signature")
-        raw = f"{payload.transaction_id}:{payload.status}"
-        if not _verify_webhook_signature(raw, x_webhook_signature, secret):
+
+        if not _verify_callback_signature(
+            payload.transaction_id,
+            payload.status,
+            effective_nonce,
+            x_webhook_signature,
+            secret,
+        ):
+            audit_log.log(
+                "callback_rejected_bad_signature",
+                {"transaction_id": payload.transaction_id, "provider_ref": payload.provider_ref},
+            )
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    if effective_nonce:
+        if _is_replay(effective_nonce):
+            audit_log.log(
+                "callback_rejected_replay",
+                {
+                    "transaction_id": payload.transaction_id,
+                    "nonce": effective_nonce,
+                    "provider_ref": payload.provider_ref,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Duplicate callback nonce – possible replay attack",
+            )
 
     repo = PaymentRepository(db)
     existing = repo.get(payload.transaction_id)
     if not existing:
+        audit_log.log(
+            "callback_rejected_unknown_payment",
+            {"transaction_id": payload.transaction_id, "provider_ref": payload.provider_ref},
+        )
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    # Idempotency: already in the desired state
     if existing.status == payload.status:
         return existing
 
     try:
         updated = repo.reconcile(payload.transaction_id, payload.status)
     except ValueError as exc:
+        audit_log.log(
+            "callback_rejected_invalid_transition",
+            {
+                "transaction_id": payload.transaction_id,
+                "from_status": existing.status,
+                "to_status": payload.status,
+                "provider_ref": payload.provider_ref,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(status_code=422, detail=str(exc))
 
     audit_log.log(
         "payment_provider_callback",
-        {"id": payload.transaction_id, "status": payload.status, "provider_ref": payload.provider_ref},
+        {
+            "id": payload.transaction_id,
+            "status": payload.status,
+            "provider_ref": payload.provider_ref,
+            "nonce": effective_nonce,
+        },
     )
     return updated
