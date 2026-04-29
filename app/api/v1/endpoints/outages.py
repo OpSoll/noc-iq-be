@@ -167,7 +167,7 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
 # Duplicate detection is explicit and consistent for imports:
 # - same site_name, detected_at, description, and optional site_id are treated as the same outage
 # - duplicate rows are reported as duplicate and do not create additional persisted rows
-@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
+@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation and explicit consistency mode")
 async def import_outages(
     file: UploadFile = File(...),
     dry_run: bool = Query(
