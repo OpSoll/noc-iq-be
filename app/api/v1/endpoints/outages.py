@@ -127,6 +127,8 @@ def get_outage(outage_id: str, current_user=Depends(require_engineer), db: Sessi
 
 @router.post("/", response_model=Outage)
 def create_outage(payload: OutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    # Creation is idempotent when the same outage payload is submitted again.
+    # Duplicate outage payloads are detected and the existing outage is returned.
     repo = OutageRepository(db)
     try:
         outage = repo.create(payload)
@@ -155,6 +157,9 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
     return {"count": len(items), "persisted": persisted_count, "items": items}
 
 
+# Duplicate detection is explicit and consistent for imports:
+# - same site_name, detected_at, description, and optional site_id are treated as the same outage
+# - duplicate rows are reported as duplicate and do not create additional persisted rows
 @router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
 async def import_outages(
     file: UploadFile = File(...),
