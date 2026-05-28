@@ -16,4 +16,4 @@ class SLAAnalyticsSnapshotORM(Base):
     total_penalties = Column(Float, nullable=False, default=0.0)
     net_payout = Column(Float, nullable=False, default=0.0)
     avg_mttr = Column(Float, nullable=False, default=0.0)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))

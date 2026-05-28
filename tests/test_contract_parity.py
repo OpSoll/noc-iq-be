@@ -135,6 +135,8 @@ class ResolveContractParityTests(unittest.TestCase):
             amount=-300.0,
             payment_type="penalty",
             rating="poor",
+            policy_version="1.0",
+            threshold_source="config",
         )
         self.payment = PaymentTransaction(
             id="pay_c1",
@@ -191,6 +193,8 @@ class ResolveContractParityTests(unittest.TestCase):
         sla_met = SLAResult(
             id=11, outage_id="out_c1", status="met", mttr_minutes=5,
             threshold_minutes=30, amount=150.0, payment_type="reward", rating="exceptional",
+            policy_version="1.0",
+            threshold_source="config",
         )
         payment_met = PaymentTransaction(
             id="pay_c2", transaction_hash="tx_c2", type="reward", amount=150.0,

@@ -10,5 +10,5 @@ class SessionORM(Base):
     email = Column(String(255), ForeignKey("users.email"), nullable=False)
     family_id = Column(String(64), ForeignKey("token_families.family_id"), nullable=False, index=True)
     sequence = Column(Integer, nullable=False, default=0)
-    expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))

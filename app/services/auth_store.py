@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import uuid4
 from sqlalchemy.orm import Session
 
@@ -168,7 +168,7 @@ class AuthStore:
         # Check if expired
         # session.expires_at might be offset-naive or aware depending on how it was stored.
         # SQLAlchemy DateTime usually returns naive. We need to compare carefully.
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires_at = session.expires_at
         if expires_at.tzinfo is not None:
              now = datetime.now(UTC).replace(tzinfo=None) # Keep it naive for comparison if needed
@@ -326,7 +326,7 @@ class AuthStore:
         
         # Return session info without sensitive token material
         session_list = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for session in sessions:
             expires_at = session.expires_at
             if expires_at.tzinfo is not None:

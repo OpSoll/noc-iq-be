@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class Location(BaseModel):
@@ -31,6 +31,28 @@ class Outage(BaseModel):
     created_by: Optional[str] = None
     location: Optional[Location] = None
     sla_status: Optional[SLAStatus] = None
+
+    @field_validator("detected_at")
+    @classmethod
+    def validate_detected_at_timezone(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValidationError("detected_at must be timezone-aware")
+        # Normalize to UTC
+        if v.tzinfo != timezone.utc:
+            v = v.astimezone(timezone.utc)
+        return v
+
+    @field_validator("resolved_at")
+    @classmethod
+    def validate_resolved_at_timezone(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            raise ValidationError("resolved_at must be timezone-aware")
+        # Normalize to UTC
+        if v.tzinfo != timezone.utc:
+            v = v.astimezone(timezone.utc)
+        return v
 
 
 class PaginatedOutages(BaseModel):
