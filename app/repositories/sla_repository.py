@@ -24,6 +24,10 @@ def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
         amount=orm.amount,
         payment_type=orm.payment_type,
         rating=orm.rating,
+        policy_version=orm.policy_version,
+        threshold_source=orm.threshold_source,
+        reason_code=orm.reason_code,
+        decision_trace=orm.decision_trace,
     )
 
 
@@ -66,6 +70,8 @@ class SLARepository:
             policy_version=payload.get("policy_version", "1.0"),
             threshold_source=payload.get("threshold_source", "config"),
             is_latest=True,
+            reason_code=payload.get("reason_code"),
+            decision_trace=payload.get("decision_trace"),
         )
         self.db.add(orm)
         self.db.commit()
@@ -292,7 +298,9 @@ class SLARepository:
             net_payout=kpis.net_payout,
             avg_mttr=perf.avg_mttr,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            checksum="",  # Temporary value, will be computed
         )
+        orm.checksum = orm.compute_checksum()
         self.db.add(orm)
         self.db.commit()
         self.db.refresh(orm)
@@ -305,6 +313,7 @@ class SLARepository:
             total_penalties=orm.total_penalties,
             net_payout=orm.net_payout,
             avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
             created_at=str(orm.created_at),
         )
 
@@ -327,6 +336,7 @@ class SLARepository:
             total_penalties=orm.total_penalties,
             net_payout=orm.net_payout,
             avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
             created_at=str(orm.created_at),
         )
 
@@ -354,7 +364,9 @@ class SLARepository:
             net_payout=kpis.net_payout,
             avg_mttr=perf.avg_mttr,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            checksum="",
         )
+        orm.checksum = orm.compute_checksum()
         self.db.add(orm)
         self.db.commit()
         self.db.refresh(orm)
@@ -368,8 +380,32 @@ class SLARepository:
             total_penalties=orm.total_penalties,
             net_payout=orm.net_payout,
             avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
             created_at=str(orm.created_at),
         )
+
+    def verify_snapshot_integrity(self, snapshot_key: str = "global") -> dict:
+        """Verify integrity of the latest snapshot.
+        
+        Returns a dict with:
+        - "valid": bool indicating if the snapshot is intact
+        - "snapshot_id": int if snapshot exists
+        - "error": str if invalid or snapshot missing
+        """
+        orm = (
+            self.db.query(SLAAnalyticsSnapshotORM)
+            .filter(SLAAnalyticsSnapshotORM.snapshot_key == snapshot_key)
+            .order_by(SLAAnalyticsSnapshotORM.created_at.desc())
+            .first()
+        )
+        if not orm:
+            return {"valid": False, "error": "No snapshot found"}
+        computed_checksum = orm.compute_checksum()
+        is_valid = computed_checksum == orm.checksum
+        result = {"valid": is_valid, "snapshot_id": orm.id}
+        if not is_valid:
+            result["error"] = "Checksum mismatch - snapshot may have been tampered with"
+        return result
 
     def reconcile_snapshots(self, snapshot_key: str = "global") -> dict:
         """Reconcile snapshots by comparing latest snapshot with live data.
