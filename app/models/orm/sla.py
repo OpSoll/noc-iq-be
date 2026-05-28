@@ -17,7 +17,9 @@ class SLAResultORM(Base):
     amount = Column(Float, nullable=False)
     payment_type = Column(String(20), nullable=False)     # "reward" | "penalty"
     rating = Column(String(20), nullable=False)           # "exceptional" | "excellent" | "good" | "poor"
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    policy_version = Column(String(50), nullable=False, default="1.0")
+    threshold_source = Column(String(50), nullable=False, default="config")
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     is_latest = Column(Boolean, nullable=False, default=False)
 
     disputes = relationship("SLADispute", back_populates="sla_result")

@@ -10,5 +10,5 @@ class TokenFamilyORM(Base):
     email = Column(String(255), ForeignKey("users.email"), nullable=False, index=True)
     current_sequence = Column(Integer, nullable=False, default=0)
     compromised = Column(Boolean, nullable=False, default=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))

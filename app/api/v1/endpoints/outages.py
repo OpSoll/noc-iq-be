@@ -379,6 +379,8 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
                 outage_id=outage.id,
                 severity=outage.severity,
                 mttr_minutes=payload.mttr_minutes,
+                policy_version="1.0",
+                threshold_source="config",
             )
             sla = translate_contract_result(raw_contract_result)
 
@@ -430,6 +432,8 @@ def recompute_sla(outage_id: str, current_user=Depends(require_engineer), db: Se
                 outage_id=outage.id,
                 severity=outage.severity,
                 mttr_minutes=orm.mttr_minutes,
+                policy_version="1.0",
+                threshold_source="config",
             )
             sla = translate_contract_result(raw_contract_result)
 

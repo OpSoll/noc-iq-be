@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from uuid import uuid4
 
@@ -149,7 +149,7 @@ class PaymentRepository:
             status="pending",
             outage_id=outage_id,
             sla_result_id=sla_result.id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
             confirmed_at=None,
         )
         return self.create(transaction)
@@ -168,7 +168,7 @@ class PaymentRepository:
         validate_transition(orm.status, new_status)
         orm.status = new_status
         if new_status == "confirmed":
-            orm.confirmed_at = datetime.utcnow()
+            orm.confirmed_at = datetime.now(timezone.utc)
         self.db.commit()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
@@ -186,7 +186,7 @@ class PaymentRepository:
             return None  # caller should raise 409
         validate_transition(orm.status, "pending")
         orm.retry_count += 1
-        orm.last_retried_at = datetime.utcnow()
+        orm.last_retried_at = datetime.now(timezone.utc)
         orm.status = "pending"
         self.db.commit()
         self.db.refresh(orm)

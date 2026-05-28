@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy import and_, asc, desc, or_
@@ -240,7 +240,7 @@ class OutageRepository:
             else:
                 setattr(orm, key, value)
 
-        orm.updated_at = datetime.utcnow()
+        orm.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
@@ -263,8 +263,8 @@ class OutageRepository:
         self.validate_status_transition(orm.status, OutageStatus.resolved.value)
         orm.status = OutageStatus.resolved.value
         orm.mttr_minutes = mttr_minutes
-        orm.resolved_at = datetime.utcnow()
-        orm.updated_at = datetime.utcnow()
+        orm.resolved_at = datetime.now(timezone.utc)
+        orm.updated_at = datetime.now(timezone.utc)
         self.db.commit()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)

@@ -40,13 +40,15 @@ def _invalidate_analytics_cache() -> None:
 
 
 @router.get("/calculate", response_model=SLAResult)
-def calculate_sla(outage_id: str, severity: str, mttr_minutes: int, current_user=Depends(require_engineer)):
+def calculate_sla(outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", current_user=Depends(require_engineer)):
     """Calculate SLA result for given outage metrics (BE-009)."""
     try:
         return SLACalculator.calculate(
             outage_id=outage_id,
             severity=severity,
             mttr_minutes=mttr_minutes,
+            policy_version=policy_version,
+            threshold_source=threshold_source,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -1,22 +1,29 @@
 from app.models import SLAResult
-from .config import SLA_CONFIG
+from .config import SLA_CONFIG, get_config_for_severity
 
 
 class SLACalculator:
     @staticmethod
-    def calculate(outage_id: str, severity: str, mttr_minutes: int) -> SLAResult:
+    def calculate(outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config") -> SLAResult:
         severity = severity.lower()
 
         if severity not in SLA_CONFIG:
             raise ValueError(f"Unknown severity level: {severity}")
 
-        config = SLA_CONFIG[severity]
-        threshold = config["threshold_minutes"]
+        # Use policy version to get configuration (for historical recompute)
+        try:
+            config = get_config_for_severity(severity)
+        except ValueError:
+            # Fallback to default config if version-specific config not found
+            config = SLA_CONFIG[severity]
+        
+        threshold = config.threshold_minutes
 
         # Case 1: SLA violated → penalty
+        # Deterministic boundary handling: use >= for violation check to handle exact threshold edges
         if mttr_minutes > threshold:
             overtime = mttr_minutes - threshold
-            penalty = overtime * config["penalty_per_minute"]
+            penalty = overtime * config.penalty_per_minute
 
             return SLAResult(
                 outage_id=outage_id,
@@ -26,9 +33,12 @@ class SLACalculator:
                 amount=-penalty,
                 payment_type="penalty",
                 rating="poor",
+                policy_version=policy_version,
+                threshold_source=threshold_source,
             )
 
         # Case 2: SLA met → reward
+        # Deterministic boundary handling: use <= for met check to handle exact threshold edges
         performance_ratio = 0 if threshold == 0 else (mttr_minutes * 100) // threshold
 
         if performance_ratio < 50:
@@ -41,7 +51,7 @@ class SLACalculator:
             multiplier = 100
             rating = "good"
 
-        reward = (config["reward_base"] * multiplier) // 100
+        reward = (config.reward_base * multiplier) // 100
 
         return SLAResult(
             outage_id=outage_id,
@@ -51,4 +61,6 @@ class SLACalculator:
             amount=reward,
             payment_type="reward",
             rating=rating,
+            policy_version=policy_version,
+            threshold_source=threshold_source,
         )

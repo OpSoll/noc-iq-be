@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from app.models.orm.audit_log import AuditLogORM
@@ -51,7 +51,7 @@ class AuditLogService:
             actor_id=actor_id,
             correlation_id=correlation_id,
             details=safe_details,
-            created_at=datetime.utcnow()
+            created_at=datetime.now(timezone.utc)
         )
         db.add(audit_entry)
         db.commit()

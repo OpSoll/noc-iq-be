@@ -63,6 +63,8 @@ class SLARepository:
             amount=payload["amount"],
             payment_type=payload["payment_type"],
             rating=payload["rating"],
+            policy_version=payload.get("policy_version", "1.0"),
+            threshold_source=payload.get("threshold_source", "config"),
             is_latest=True,
         )
         self.db.add(orm)

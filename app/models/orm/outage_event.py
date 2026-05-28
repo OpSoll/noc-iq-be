@@ -12,4 +12,4 @@ class OutageEventORM(Base):
     outage_id = Column(String, ForeignKey("outages.id", ondelete="CASCADE"), nullable=False, index=True)
     event_type = Column(String(100), nullable=False)  # e.g. "created", "resolved", "sla_computed", "recomputed"
     detail = Column(Text, nullable=True)
-    occurred_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    occurred_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))

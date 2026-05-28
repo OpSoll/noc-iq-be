@@ -13,4 +13,4 @@ class AuditLogORM(Base):
     # BE-010: Correlation context - request correlation ID
     correlation_id = Column(String(255), index=True, nullable=True)  # Links related events across services
     details = Column(JSON, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))

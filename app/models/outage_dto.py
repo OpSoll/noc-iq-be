@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError
 
 from app.models.enums import OutageStatus, Severity
 from app.core.config import settings
@@ -77,6 +77,28 @@ class OutageCreate(BaseModel):
             raise ValueError("affected_services must contain at least one entry")
         if len(v) > settings.MAX_AFFECTED_SERVICES_COUNT:
             raise ValueError(f"too many affected services. Maximum allowed is {settings.MAX_AFFECTED_SERVICES_COUNT}.")
+        return v
+
+    @field_validator("detected_at")
+    @classmethod
+    def validate_detected_at_timezone(cls, v: datetime) -> datetime:
+        if v.tzinfo is None:
+            raise ValidationError("detected_at must be timezone-aware")
+        # Normalize to UTC
+        if v.tzinfo != timezone.utc:
+            v = v.astimezone(timezone.utc)
+        return v
+
+    @field_validator("resolved_at")
+    @classmethod
+    def validate_resolved_at_timezone(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            raise ValidationError("resolved_at must be timezone-aware")
+        # Normalize to UTC
+        if v.tzinfo != timezone.utc:
+            v = v.astimezone(timezone.utc)
         return v
 
 

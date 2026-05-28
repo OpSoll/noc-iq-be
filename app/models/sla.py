@@ -33,6 +33,8 @@ class SLAResult(BaseModel):
     amount: int
     payment_type: Literal["reward", "penalty"]
     rating: Literal["exceptional", "excellent", "good", "poor"]
+    policy_version: str = Field(..., description="Version of SLA policy used for this calculation")
+    threshold_source: str = Field(..., description="Source of threshold values (e.g., 'config', 'contract')")
 
 
 class SLASeverityConfig(BaseModel):
