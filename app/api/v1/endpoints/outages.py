@@ -11,7 +11,14 @@ from app.db.session import get_db
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import PaginatedOutages, ResolveOutageRequest
-from app.models.outage_dto import OutageSortDirection, OutageSortField, ImportFieldError, ImportRowResult, ImportResponse
+from app.models.outage_dto import (
+    OutageSortDirection,
+    OutageSortField,
+    ImportConsistency,
+    ImportFieldError,
+    ImportRowResult,
+    ImportResponse,
+)
 from app.models.webhook import WebhookEvent
 from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.outage_repository import OutageRepository
@@ -88,8 +95,14 @@ def list_outages(
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    """List outages with optional filtering and sorting.
-    
+    """List outages with optional filtering, search, and sorting.
+
+    **Search (BE-011)**
+    - `search`: case-insensitive substring match across `id`, `site_id`, and `site_name`
+    - Composes with all other filters (severity, status, date range) and pagination
+    - Exact and partial matches are both supported
+    - No match returns 0 items with total=0
+
     **Sorting Contract (BE-012)**
     - Supported sort fields (all validated):
       - detected_at: Time the outage was detected (default, stable)
@@ -97,10 +110,8 @@ def list_outages(
       - severity: Outage severity (critical, high, medium, low)
       - status: Outage status (open, resolved)
       - id: Unique outage identifier
-    
     - Default sorting: detected_at descending, then id ascending (stable, deterministic)
     - Invalid sort values: rejected with 422 validation error
-    - Empty results: returns 0 items with total=0
     """
     repo = OutageRepository(db)
     return repo.list(
@@ -127,6 +138,8 @@ def get_outage(outage_id: str, current_user=Depends(require_engineer), db: Sessi
 
 @router.post("/", response_model=Outage)
 def create_outage(payload: OutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    # Creation is idempotent when the same outage payload is submitted again.
+    # Duplicate outage payloads are detected and the existing outage is returned.
     repo = OutageRepository(db)
     try:
         outage = repo.create(payload)
@@ -142,18 +155,33 @@ def create_outage(payload: OutageCreate, current_user=Depends(require_engineer),
 @router.post("/bulk", response_model=dict)
 def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
     repo = OutageRepository(db)
+    items: list[Outage] = []
+    persisted_count = 0
     try:
-        created = repo.bulk_create(payload.outages)
+        for outage_payload in payload.outages:
+            created, persisted = repo.create_or_get_existing(outage_payload)
+            items.append(created)
+            if persisted:
+                persisted_count += 1
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"count": len(created), "items": created}
+    return {"count": len(items), "persisted": persisted_count, "items": items}
 
 
-@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation")
+# Duplicate detection is explicit and consistent for imports:
+# - same site_name, detected_at, description, and optional site_id are treated as the same outage
+# - duplicate rows are reported as duplicate and do not create additional persisted rows
+@router.post("/import", response_model=ImportResponse, summary="Bulk import outages from CSV or JSON file with optional dry-run validation and explicit consistency mode")
 async def import_outages(
     file: UploadFile = File(...),
-    dry_run: bool = Query(default=False, description="Validation-only mode: validate all rows WITHOUT persisting to database. Returns same field/row-level errors as live imports."),
-    atomic: bool = Query(default=True, description="All-or-nothing: rollback all writes if any row fails. Only applies when dry_run=false."),
+    dry_run: bool = Query(
+        default=False,
+        description="Validation-only mode: validate all rows WITHOUT persisting to database. Returns the same field/row-level errors as live imports.",
+    ),
+    consistency: ImportConsistency = Query(
+        default=ImportConsistency.atomic,
+        description="Write consistency mode for live imports. atomic=all-or-nothing, partial=persist valid rows and report row-level failures.",
+    ),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
@@ -226,7 +254,7 @@ async def import_outages(
                     ))
             except Exception as exc:
                 row_outcomes.append(_row_error(i, row, exc))
-    elif atomic:
+    elif consistency == ImportConsistency.atomic:
         parsed: list[OutageCreate] = []
         for i, row in enumerate(rows):
             try:
@@ -236,14 +264,18 @@ async def import_outages(
                 row_outcomes.append(_row_error(i, row, exc))
 
         if any(r.status == "error" for r in row_outcomes):
-            return _import_response("import", len(rows), 0, row_outcomes)
+            return _import_response("import", consistency, len(rows), 0, row_outcomes)
 
         try:
             for i, payload in enumerate(parsed):
-                created = repo.create(payload)
+                created, persisted = repo.create_or_get_existing(payload)
                 row_outcomes[i].outage_id = created.id
-                row_outcomes[i].persisted = True
-                persisted_count += 1
+                row_outcomes[i].persisted = persisted
+                if persisted:
+                    persisted_count += 1
+                else:
+                    row_outcomes[i].duplicate = True
+                    row_outcomes[i].existing_id = created.id
             db.commit()
         except Exception as exc:
             db.rollback()
@@ -252,21 +284,23 @@ async def import_outages(
         for i, row in enumerate(rows):
             try:
                 payload = OutageCreate(**row)
-                created = repo.create(payload)
+                created, persisted = repo.create_or_get_existing(payload)
                 row_outcomes.append(ImportRowResult(
-                    row=i, id=payload.id, status="ok",
-                    outage_id=created.id, persisted=True,
+                    row=i,
+                    id=payload.id,
+                    status="ok",
+                    outage_id=created.id,
+                    persisted=persisted,
+                    duplicate=not persisted,
+                    existing_id=created.id if not persisted else None,
                 ))
-                persisted_count += 1
+                if persisted:
+                    persisted_count += 1
             except Exception as exc:
                 db.rollback()
                 row_outcomes.append(_row_error(i, row, exc))
 
-    return _import_response("dry_run" if dry_run else "import", len(rows), persisted_count, row_outcomes)
-
-
-# --- #215: helpers for machine-readable error output ---
-
+    return _import_response("dry_run" if dry_run else "import", consistency, len(rows), persisted_count, row_outcomes)
 def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:
     """Return a stable machine-readable ImportRowResult for a failed row."""
     errors: list[ImportFieldError] = []
@@ -283,10 +317,11 @@ def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:
     return ImportRowResult(row=index, id=raw_row.get("id"), status="error", errors=errors)
 
 
-def _import_response(mode: str, total: int, persisted: int, outcomes: list[ImportRowResult]) -> ImportResponse:
+def _import_response(mode: str, consistency: ImportConsistency, total: int, persisted: int, outcomes: list[ImportRowResult]) -> ImportResponse:
     error_rows = [r for r in outcomes if r.status == "error"]
     return ImportResponse(
         mode=mode,
+        consistency=consistency,
         total_rows=total,
         persisted=persisted,
         validated=sum(1 for r in outcomes if r.status == "ok"),

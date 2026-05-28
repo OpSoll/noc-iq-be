@@ -1,6 +1,10 @@
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+from starlette.requests import Request
+from starlette.responses import Response
+import asyncio
 
 from app.core.config import settings
 from app.models.outage_dto import BulkOutageCreate, OutageCreate
@@ -183,3 +187,43 @@ def test_import_row_count_limit(client: TestClient, db: Session):
     response = client.post("/api/v1/outages/import?dry_run=true", files=files)
     assert response.status_code == 400
     assert "Too many rows in file" in response.json()["detail"]
+
+
+def test_payload_size_middleware_enforces_cumulative_chunk_limit(monkeypatch):
+    """Ensure middleware rejects chunked bodies whose total size exceeds limit."""
+    from app.middleware.payload_size import PayloadSizeMiddleware
+
+    limit = 10
+    monkeypatch.setattr(settings, "MAX_REQUEST_BODY_SIZE_BYTES", limit)
+
+    chunks = [
+        {"type": "http.request", "body": b"12345", "more_body": True},
+        {"type": "http.request", "body": b"67890", "more_body": True},
+        {"type": "http.request", "body": b"X", "more_body": False},
+    ]
+
+    async def receive():
+        return chunks.pop(0)
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/test",
+        "headers": [],
+        "query_string": b"",
+        "scheme": "http",
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "http_version": "1.1",
+    }
+
+    request = Request(scope, receive)
+    middleware = PayloadSizeMiddleware(lambda *_args, **_kwargs: None)
+
+    async def call_next(req: Request) -> Response:
+        await req.body()
+        return Response(status_code=200)
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(middleware.dispatch(request, call_next))
+    assert exc_info.value.status_code == 413

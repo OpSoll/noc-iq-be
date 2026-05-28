@@ -19,19 +19,43 @@ VALID_TRANSITIONS: Dict[PaymentStatus, FrozenSet[PaymentStatus]] = {
 }
 
 
+class PaymentTransitionError(ValueError):
+    """Raised when a payment status transition is not allowed.
+
+    Carries structured data so the API layer can produce a consistent,
+    typed 422 response without re-parsing the error message.
+    """
+
+    def __init__(self, current: str, next_status: str, allowed: set[str]) -> None:
+        self.current = current
+        self.next_status = next_status
+        self.allowed = allowed
+        super().__init__(
+            f"Transition from '{current}' to '{next_status}' is not allowed. "
+            f"Allowed: {allowed or 'none'}"
+        )
+
+
 def validate_transition(current: str, next_status: str) -> None:
-    """Raise ValueError if the transition is not allowed."""
+    """Raise :class:`PaymentTransitionError` if the transition is not allowed.
+
+    This is the single authoritative policy for payment status transitions.
+    All code paths – retry, reconcile, callback – MUST call this function
+    rather than implementing their own transition logic.
+    """
     try:
         current_enum = PaymentStatus(current)
         next_enum = PaymentStatus(next_status)
     except ValueError:
-        raise ValueError(f"Invalid payment status: '{next_status}'")
+        raise PaymentTransitionError(
+            current=current,
+            next_status=next_status,
+            allowed={s.value for s in VALID_TRANSITIONS.get(PaymentStatus(current), frozenset())}
+            if current in PaymentStatus._value2member_map_ else set(),
+        )
     if next_enum not in VALID_TRANSITIONS[current_enum]:
         allowed = {s.value for s in VALID_TRANSITIONS[current_enum]}
-        raise ValueError(
-            f"Transition from '{current}' to '{next_status}' is not allowed. "
-            f"Allowed: {allowed or 'none'}"
-        )
+        raise PaymentTransitionError(current=current, next_status=next_status, allowed=allowed)
 
 
 class PaymentTransaction(BaseModel):
