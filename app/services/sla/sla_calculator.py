@@ -35,6 +35,8 @@ class SLACalculator:
                 rating="poor",
                 policy_version=policy_version,
                 threshold_source=threshold_source,
+                reason_code="mttr_exceeded",
+                decision_trace=f"MTTR {mttr_minutes} > threshold {threshold} (overtime {overtime} minutes)",
             )
 
         # Case 2: SLA met → reward
@@ -44,12 +46,15 @@ class SLACalculator:
         if performance_ratio < 50:
             multiplier = 200
             rating = "exceptional"
+            reason_code = "met_exceptional"
         elif performance_ratio < 75:
             multiplier = 150
             rating = "excellent"
+            reason_code = "met_excellent"
         else:
             multiplier = 100
             rating = "good"
+            reason_code = "met_good"
 
         reward = (config.reward_base * multiplier) // 100
 
@@ -63,4 +68,6 @@ class SLACalculator:
             rating=rating,
             policy_version=policy_version,
             threshold_source=threshold_source,
+            reason_code=reason_code,
+            decision_trace=f"MTTR {mttr_minutes} <= threshold {threshold}, performance ratio {performance_ratio}%, rating {rating}",
         )

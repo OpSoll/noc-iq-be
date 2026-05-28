@@ -337,6 +337,19 @@ def export_performance_aggregation_endpoint(
     return exported
 
 
+@router.get("/analytics/snapshot/verify")
+def verify_snapshot_integrity(
+    snapshot_key: str = Query(default="global"),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Verify integrity of the latest analytics snapshot."""
+    repo = SLARepository(db)
+    result = repo.verify_snapshot_integrity(snapshot_key=snapshot_key)
+    if not result["valid"]:
+        raise HTTPException(status_code=409, detail=result.get("error", "Invalid snapshot"))
+    return result
+
 @router.get("/analytics/export")
 def export_analytics_summary_endpoint(
     format: str = Query(default="json", description="Export format: json or csv"),

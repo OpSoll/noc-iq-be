@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from app.db.base import Base
@@ -21,6 +21,8 @@ class SLAResultORM(Base):
     threshold_source = Column(String(50), nullable=False, default="config")
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     is_latest = Column(Boolean, nullable=False, default=False)
+    reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
+    decision_trace = Column(Text, nullable=True)          # Machine-readable decision trace
 
     disputes = relationship("SLADispute", back_populates="sla_result")
 

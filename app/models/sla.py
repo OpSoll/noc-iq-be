@@ -20,7 +20,9 @@ class SLAResult(BaseModel):
                 "threshold_minutes": 60,
                 "amount": 100,
                 "payment_type": "reward",
-                "rating": "excellent"
+                "rating": "excellent",
+                "reason_code": "met_excellent",
+                "decision_trace": "MTTR 30 < 60 threshold, performance ratio 50%"
             }
         }
     )
@@ -35,6 +37,8 @@ class SLAResult(BaseModel):
     rating: Literal["exceptional", "excellent", "good", "poor"]
     policy_version: str = Field(..., description="Version of SLA policy used for this calculation")
     threshold_source: str = Field(..., description="Source of threshold values (e.g., 'config', 'contract')")
+    reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
+    decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
 
 
 class SLASeverityConfig(BaseModel):
@@ -79,4 +83,5 @@ class SLAAnalyticsSnapshot(BaseModel):
     total_penalties: float = Field(ge=0.0)
     net_payout: float
     avg_mttr: float = Field(ge=0.0)
+    checksum: str
     created_at: Optional[str] = None
