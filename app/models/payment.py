@@ -94,6 +94,7 @@ class PaymentTransaction(BaseModel):
     confirmed_at: Optional[datetime] = None
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = None
 
 
 class PaginatedPayments(BaseModel):

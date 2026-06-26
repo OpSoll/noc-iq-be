@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
 
@@ -22,3 +22,4 @@ class PaymentTransactionORM(Base):
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
     last_retried_at = Column(DateTime(timezone=True), nullable=True)
+    idempotency_key = Column(String(255), nullable=True, unique=True, index=True)
