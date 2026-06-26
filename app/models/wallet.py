@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 import re
 
 from pydantic import BaseModel, Field, field_validator
@@ -60,6 +60,10 @@ class WalletBalanceResponse(BaseModel):
     cache_status: str = "fresh"
     cache_ttl_seconds: int | None = None
     cached_at: datetime | None = None
+    # #283: source distinguishes cache hit from live read or stale fallback
+    source: Literal["cache", "live", "stale_fallback"] = "live"
+    error_code: str | None = None
+    error_detail: str | None = None
 
 
 class WalletStatusResponse(BaseModel):
