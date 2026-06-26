@@ -6,7 +6,12 @@ from sqlalchemy.orm import Session
 
 from app.models.orm.audit_log import AuditLogORM
 from app.models.orm.payment import PaymentTransactionORM
-from app.models.payment import PaymentTransaction, validate_transition
+from app.models.payment import (
+    PaymentTransaction,
+    ReconciliationCategory,
+    ReconciliationReport,
+    validate_transition,
+)
 from app.models.sla import SLAResult
 from app.core.config import settings
 
@@ -27,6 +32,7 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         confirmed_at=orm.confirmed_at,
         retry_count=orm.retry_count,
         last_retried_at=orm.last_retried_at,
+        failure_taxonomy=orm.failure_taxonomy,
     )
 
 
@@ -52,6 +58,24 @@ class PaymentRepository:
         self.db.add(orm)
         self.db.commit()
         self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def create_with_submit(self, data: PaymentTransaction) -> PaymentTransaction:
+        orm = PaymentTransactionORM(
+            id=data.id,
+            transaction_hash=data.transaction_hash,
+            type=data.type,
+            amount=data.amount,
+            asset_code=data.asset_code,
+            from_address=data.from_address,
+            to_address=data.to_address,
+            status=data.status,
+            outage_id=data.outage_id,
+            sla_result_id=data.sla_result_id,
+            created_at=data.created_at,
+        )
+        self.db.add(orm)
+        self.db.flush()
         return _orm_to_pydantic(orm)
 
     def get(self, transaction_id: str) -> Optional[PaymentTransaction]:
@@ -155,6 +179,48 @@ class PaymentRepository:
         return self.create(transaction)
 
     MAX_RETRIES = 3
+
+    def reconcile_all(self, expected_statuses: dict[str, str]) -> List[ReconciliationReport]:
+        reports: List[ReconciliationReport] = []
+        for txn_id, expected in expected_statuses.items():
+            orm = (
+                self.db.query(PaymentTransactionORM)
+                .filter(PaymentTransactionORM.id == txn_id)
+                .first()
+            )
+            if not orm:
+                reports.append(ReconciliationReport(
+                    transaction_id=txn_id,
+                    local_status="unknown",
+                    blockchain_status=expected,
+                    category=ReconciliationCategory.missing,
+                    details={"expected_status": expected, "reason": "payment not found in local db"},
+                ))
+                continue
+            if orm.status == expected:
+                reports.append(ReconciliationReport(
+                    transaction_id=txn_id,
+                    local_status=orm.status,
+                    blockchain_status=expected,
+                    category=ReconciliationCategory.matched,
+                ))
+            elif orm.status == "pending":
+                reports.append(ReconciliationReport(
+                    transaction_id=txn_id,
+                    local_status=orm.status,
+                    blockchain_status=expected,
+                    category=ReconciliationCategory.delayed,
+                    details={"expected_status": expected, "reason": "payment still pending locally"},
+                ))
+            else:
+                reports.append(ReconciliationReport(
+                    transaction_id=txn_id,
+                    local_status=orm.status,
+                    blockchain_status=expected,
+                    category=ReconciliationCategory.divergent,
+                    details={"expected_status": expected, "reason": f"local status '{orm.status}' != expected '{expected}'"},
+                ))
+        return reports
 
     def reconcile(self, transaction_id: str, new_status: str) -> Optional[PaymentTransaction]:
         """Refresh payment status and mark as auditable reconciliation."""

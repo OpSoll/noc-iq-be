@@ -1,8 +1,22 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class RetryClass(str, Enum):
+    network = "network"
+    rate_limit = "rate_limit"
+    semantic = "semantic"
+    unknown = "unknown"
+
+
+class ReconciliationCategory(str, Enum):
+    matched = "matched"
+    delayed = "delayed"
+    missing = "missing"
+    divergent = "divergent"
 
 
 class PaymentStatus(str, Enum):
@@ -94,6 +108,7 @@ class PaymentTransaction(BaseModel):
     confirmed_at: Optional[datetime] = None
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
+    failure_taxonomy: Optional[str] = None
 
 
 class PaginatedPayments(BaseModel):
@@ -101,3 +116,11 @@ class PaginatedPayments(BaseModel):
     total: int
     page: int = Field(..., ge=1)
     page_size: int = Field(..., ge=1, le=100)
+
+
+class ReconciliationReport(BaseModel):
+    transaction_id: str
+    local_status: str
+    blockchain_status: Optional[str] = None
+    category: ReconciliationCategory
+    details: Optional[Dict[str, Any]] = None

@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from app.db.base import Base
 
@@ -22,3 +22,4 @@ class PaymentTransactionORM(Base):
     confirmed_at = Column(DateTime(timezone=True), nullable=True)
     retry_count = Column(Integer, nullable=False, default=0)
     last_retried_at = Column(DateTime(timezone=True), nullable=True)
+    failure_taxonomy = Column(String(50), nullable=True)

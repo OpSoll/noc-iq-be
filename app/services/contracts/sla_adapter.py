@@ -1,9 +1,25 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from app.core.config import settings
+from app.models.payment import RetryClass
 from app.services.sla import SLACalculator
+
+
+def check_blockchain_payment_status(transaction_id: str) -> Optional[dict[str, Any]]:
+    return None
+
+
+def classify_error(error: Exception) -> RetryClass:
+    error_str = str(error).lower()
+    if any(kw in error_str for kw in ("timeout", "connection", "dns", "reset")):
+        return RetryClass.network
+    if any(kw in error_str for kw in ("rate limit", "429", "too many")):
+        return RetryClass.rate_limit
+    if any(kw in error_str for kw in ("invalid", "bad request", "unauthorized", "forbidden", "not found")):
+        return RetryClass.semantic
+    return RetryClass.unknown
 
 
 class SLAContractAdapter:
