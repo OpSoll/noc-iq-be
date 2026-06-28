@@ -143,3 +143,8 @@ def set_gauge(name: str, value: float, tags: Dict[str, str] = None):
 def record_histogram(name: str, value: float, tags: Dict[str, str] = None):
     """Record a histogram value."""
     metrics.record_histogram(name, value, tags)
+
+
+def set_dead_letter_gauge(count: int):
+    """Set the dead-letter payment queue gauge metric."""
+    metrics.set_gauge("dead_letter_payments", float(count))
