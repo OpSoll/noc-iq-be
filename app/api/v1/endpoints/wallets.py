@@ -91,4 +91,18 @@ def get_wallet_balance(
     balance = WalletRegistry.get_balance(address, refresh=refresh)
     if not balance:
         raise HTTPException(status_code=404, detail="Wallet not found")
+    # Complete fetch failure -- no data at all, typed 503 so callers can distinguish
+    # this from a 404 and implement their own retry or circuit-break logic.
+    if balance.error_code == "FETCH_FAILED":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": balance.error_code,
+                "detail": balance.error_detail,
+                "address": address,
+            },
+        )
+    # Stale-fallback: data is available but may be expired. Return 200 so the
+    # client still gets a usable payload; error_code/error_detail in the body
+    # signal the degraded state.
     return balance

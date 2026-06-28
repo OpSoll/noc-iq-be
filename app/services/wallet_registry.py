@@ -4,6 +4,7 @@ from datetime import datetime, UTC, timedelta
 from uuid import uuid4
 
 from app.core.config import settings
+from app.services.contracts.sla_adapter import BalanceFetchResult, balance_fetch_adapter
 from app.models.wallet import (
     AssetBalance,
     Wallet,
@@ -52,6 +53,28 @@ class WalletRegistry:
         cls._wallets_by_user[wallet.user_id] = refreshed
         cls._wallets_by_address[wallet.public_key] = refreshed
         return refreshed
+
+    @classmethod
+    def _build_live_balances(cls, address: str) -> dict:
+        """Compute live balances for address. Raises ValueError if not in registry.
+
+        In production this would call the Stellar Horizon API and propagate
+        any network or chain errors to the caller, triggering stale fallback.
+        """
+        wallet = cls._wallets_by_address.get(address)
+        if not wallet:
+            raise ValueError(f"Address {address} not found in registry")
+        wallet = cls._refresh_wallet(wallet)
+        xlm_balance = "1.0000000" if wallet.funded else "0.0000000"
+        balances: dict = {"XLM": AssetBalance(balance=xlm_balance, asset_type="native")}
+        if wallet.trustline_ready:
+            balances["USDC"] = AssetBalance(
+                balance="0.0000000",
+                asset_type="credit_alphanum4",
+                asset_code="USDC",
+                asset_issuer="TEST_ISSUER",
+            )
+        return balances
 
     @classmethod
     def _build_public_key(cls) -> str:
@@ -173,31 +196,32 @@ class WalletRegistry:
 
     @classmethod
     def get_balance(cls, address: str, refresh: bool = False) -> WalletBalanceResponse | None:
-        wallet = cls._wallets_by_address.get(address)
-        if not wallet:
-            return None
-        if refresh or cls._is_stale(wallet):
-            wallet = cls._refresh_wallet(wallet)
+        if not cls._wallets_by_address.get(address):
+            return None  # 404 -- address not in registry
 
-        xlm_balance = "1.0000000" if wallet.funded else "0.0000000"
-        balances = {
-            "XLM": AssetBalance(balance=xlm_balance, asset_type="native"),
-        }
-        if wallet.trustline_ready:
-            balances["USDC"] = AssetBalance(
-                balance="0.0000000",
-                asset_type="credit_alphanum4",
-                asset_code="USDC",
-                asset_issuer="TEST_ISSUER",
-            )
-        cache_ttl = cls._get_cache_ttl_remaining(wallet)
+        result: BalanceFetchResult = balance_fetch_adapter.fetch(
+            address=address,
+            live_fetcher=lambda addr: cls._build_live_balances(addr),
+            force_refresh=refresh,
+        )
+
+        # Map adapter source to legacy cache_status for backwards compatibility
+        legacy_cache_status = {
+            "live": "live",
+            "cache": "fresh",
+            "stale_fallback": "stale",
+        }.get(result.source, "fresh")
+
         return WalletBalanceResponse(
             address=address,
-            balances=balances,
-            last_updated=wallet.last_updated,
-            cache_status=wallet.cache_status,
-            cache_ttl_seconds=cache_ttl,
-            cached_at=wallet.cached_at,
+            balances=result.balances,
+            last_updated=result.cached_at or cls._now(),
+            cache_status=legacy_cache_status,
+            cache_ttl_seconds=result.ttl_remaining,
+            cached_at=result.cached_at,
+            source=result.source,
+            error_code=result.error.code if result.error else None,
+            error_detail=result.error.detail if result.error else None,
         )
 
     @classmethod
