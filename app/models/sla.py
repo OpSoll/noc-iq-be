@@ -1,7 +1,24 @@
+from enum import Enum
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 from app.models.enums import Severity
+
+
+class SLAState(str, Enum):
+    in_progress = "in_progress"
+    met = "met"
+    violated = "violated"
+
+
+class SLAStatusResponse(BaseModel):
+    outage_id: str
+    state: SLAState
+    mttr_minutes: Optional[int] = None
+    threshold_minutes: int
+    time_remaining_minutes: Optional[int] = None
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
 
 
 class SLAPreviewRequest(BaseModel):

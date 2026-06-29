@@ -28,6 +28,7 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         confirmed_at=orm.confirmed_at,
         retry_count=orm.retry_count,
         last_retried_at=orm.last_retried_at,
+        idempotency_key=orm.idempotency_key,
         dead_letter_reason=orm.dead_letter_reason,
         dead_lettered_at=orm.dead_lettered_at,
     )
@@ -51,6 +52,7 @@ class PaymentRepository:
             sla_result_id=data.sla_result_id,
             created_at=data.created_at,
             confirmed_at=data.confirmed_at,
+            idempotency_key=data.idempotency_key,
         )
         self.db.add(orm)
         self.db.commit()
@@ -226,6 +228,7 @@ class PaymentRepository:
             sla_result_id=sla_result.id,
             created_at=datetime.now(timezone.utc),
             confirmed_at=None,
+            idempotency_key=f"sla_result_{sla_result.id}_{sla_result.payment_type}",
         )
         return self.create(transaction)
 

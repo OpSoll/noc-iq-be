@@ -201,3 +201,35 @@ def compute_device_sla(db: Session, device_id: str, period: str, sla_thresholds:
             "is_violated": False,
             "error_type": "computation_failed"
         }
+
+
+def simulate_threshold_change(
+    db: Session,
+    device_id: str,
+    period: str,
+    proposed_thresholds: Dict[str, float],
+    sla_thresholds: Optional[Dict[str, float]] = None,
+) -> dict:
+    """
+    Simulate SLA computation with custom proposed thresholds without persisting.
+    Returns projected metrics alongside a comparison against current thresholds.
+    """
+    current_result = compute_device_sla(db, device_id, period, sla_thresholds)
+    simulated_result = compute_device_sla(db, device_id, period, proposed_thresholds)
+    return {
+        "device_id": device_id,
+        "period": period,
+        "current": {
+            "thresholds": current_result.get("sla_thresholds", sla_thresholds),
+            "is_violated": current_result.get("is_violated", False),
+            "violation_reasons": current_result.get("violation_reasons", []),
+        },
+        "simulated": {
+            "thresholds": proposed_thresholds,
+            "is_violated": simulated_result.get("is_violated", False),
+            "violation_reasons": simulated_result.get("violation_reasons", []),
+        },
+        "projected_outages": simulated_result.get("total_outages", 0),
+        "projected_availability": simulated_result.get("availability_percentage", 100.0),
+        "projected_mttr": simulated_result.get("avg_mttr_minutes", 0.0),
+    }

@@ -99,6 +99,7 @@ class PaymentTransaction(BaseModel):
     confirmed_at: Optional[datetime] = None
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = None
     dead_letter_reason: Optional[str] = None
     dead_lettered_at: Optional[datetime] = None
     residual: float = 0.0
