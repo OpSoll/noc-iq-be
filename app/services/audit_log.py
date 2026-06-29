@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from sqlalchemy.orm import Session
 from app.models.orm.audit_log import AuditLogORM
@@ -6,6 +7,83 @@ from app.db.session import SessionLocal
 from app.utils.correlation import get_correlation_id
 import hashlib
 import json
+
+
+# ---------------------------------------------------------------------------
+# Expected event class taxonomy (prefix-based)
+# Each entry maps an event-class prefix to the analytics metrics it feeds and
+# the ingestion stage most likely responsible for producing it.
+# ---------------------------------------------------------------------------
+EXPECTED_EVENT_CLASSES: dict[str, dict[str, Any]] = {
+    "wallet.": {
+        "impacted_metrics": ["wallet_balance", "wallet_status", "trustline_coverage"],
+        "ingestion_stage": "wallet_registry",
+    },
+    "auth.": {
+        "impacted_metrics": ["login_success_rate", "lockout_rate", "auth_failure_rate"],
+        "ingestion_stage": "auth_store",
+    },
+    "job_": {
+        "impacted_metrics": ["job_success_rate", "retry_rate", "failure_rate"],
+        "ingestion_stage": "sla_tasks / celery",
+    },
+    "sla.": {
+        "impacted_metrics": ["sla_violation_rate", "avg_mttr", "payout_sum"],
+        "ingestion_stage": "sla_service",
+    },
+    "webhook.": {
+        "impacted_metrics": ["webhook_delivery_rate", "webhook_failure_rate"],
+        "ingestion_stage": "webhook_service",
+    },
+    "payment.": {
+        "impacted_metrics": ["payment_success_rate", "payment_volume"],
+        "ingestion_stage": "payment_service",
+    },
+}
+
+
+@dataclass
+class EventClassCoverage:
+    """Coverage status for a single expected event class."""
+    event_class: str
+    present: bool
+    event_count: int
+    impacted_metrics: list[str]
+    ingestion_stage: str
+    severity: str  # "ok" | "warning" | "critical"
+
+
+@dataclass
+class EventCoverageReport:
+    """Full coverage report produced by AuditLogService.check_event_coverage()."""
+    checked_at: str
+    window_hours: int
+    total_expected_classes: int
+    covered_classes: int
+    missing_classes: int
+    underrepresented_classes: int
+    coverage: list[EventClassCoverage] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "checked_at": self.checked_at,
+            "window_hours": self.window_hours,
+            "total_expected_classes": self.total_expected_classes,
+            "covered_classes": self.covered_classes,
+            "missing_classes": self.missing_classes,
+            "underrepresented_classes": self.underrepresented_classes,
+            "coverage": [
+                {
+                    "event_class": c.event_class,
+                    "present": c.present,
+                    "event_count": c.event_count,
+                    "impacted_metrics": c.impacted_metrics,
+                    "ingestion_stage": c.ingestion_stage,
+                    "severity": c.severity,
+                }
+                for c in self.coverage
+            ],
+        }
 
 
 class WalletAuditEvents:
@@ -269,6 +347,78 @@ class AuditLogService:
                 }
                 for r in rows
             ]
+
+    def check_event_coverage(
+        self,
+        window_hours: int = 24,
+        underrepresented_threshold: int = 5,
+    ) -> "EventCoverageReport":
+        """
+        Cross-check expected event classes against the recent audit stream.
+
+        Args:
+            window_hours: How many hours back to look in the audit log.
+            underrepresented_threshold: Classes with fewer than this many events
+                                        in the window are flagged as underrepresented.
+
+        Returns:
+            EventCoverageReport with per-class coverage details and severity ratings.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+
+        with self.db_session_factory() as db:
+            rows = (
+                db.query(AuditLogORM.event_type)
+                .filter(AuditLogORM.created_at >= cutoff)
+                .all()
+            )
+
+        # Count events per expected class prefix
+        counts: dict[str, int] = {prefix: 0 for prefix in EXPECTED_EVENT_CLASSES}
+        for (event_type,) in rows:
+            for prefix in EXPECTED_EVENT_CLASSES:
+                if event_type.startswith(prefix):
+                    counts[prefix] += 1
+                    break
+
+        coverage_list: list[EventClassCoverage] = []
+        missing = 0
+        underrepresented = 0
+        covered = 0
+
+        for prefix, meta in EXPECTED_EVENT_CLASSES.items():
+            count = counts[prefix]
+            if count == 0:
+                severity = "critical"
+                missing += 1
+            elif count < underrepresented_threshold:
+                severity = "warning"
+                underrepresented += 1
+                covered += 1
+            else:
+                severity = "ok"
+                covered += 1
+
+            coverage_list.append(
+                EventClassCoverage(
+                    event_class=prefix,
+                    present=count > 0,
+                    event_count=count,
+                    impacted_metrics=meta["impacted_metrics"],
+                    ingestion_stage=meta["ingestion_stage"],
+                    severity=severity,
+                )
+            )
+
+        return EventCoverageReport(
+            checked_at=datetime.now(timezone.utc).isoformat(),
+            window_hours=window_hours,
+            total_expected_classes=len(EXPECTED_EVENT_CLASSES),
+            covered_classes=covered,
+            missing_classes=missing,
+            underrepresented_classes=underrepresented,
+            coverage=coverage_list,
+        )
 
 
 # Singleton instance for common use
