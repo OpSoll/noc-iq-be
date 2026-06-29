@@ -129,6 +129,8 @@ class WebhookResponse(BaseModel):
     # BE-034: Secret lifecycle metadata (without exposing the secret)
     secret_version: int = 1
     last_secret_rotation_at: Optional[str] = None
+    # BE-295: Grace-window metadata
+    rotation_grace_expires_at: Optional[str] = None
 
 
 class WebhookDeliveryResponse(BaseModel):
@@ -161,6 +163,7 @@ class PaginatedWebhookDeliveries(BaseModel):
 class WebhookSecretRotateResponse(BaseModel):
     webhook_id: UUID
     new_secret: str
+    grace_expires_at: Optional[str]
     message: str
 
 
@@ -200,6 +203,7 @@ def _serialize_webhook(webhook: Webhook) -> WebhookResponse:
         max_retries=webhook.max_retries,
         secret_version=webhook.secret_version,
         last_secret_rotation_at=webhook.last_secret_rotation_at.isoformat() if webhook.last_secret_rotation_at else None,
+        rotation_grace_expires_at=webhook.rotation_grace_expires_at.isoformat() if webhook.rotation_grace_expires_at else None,
     )
 
 
@@ -357,29 +361,37 @@ def rotate_webhook_secret(
     current_user=Depends(require_admin),
     db: Session = Depends(get_db)
 ):
-    """Rotate the webhook signing secret. The old secret is immediately invalidated;
-    all subsequent deliveries will be signed with the new secret.
-    
-    BE-034: Emits durable audit information with timestamp and actor context.
+    """Rotate the webhook signing secret.
+
+    The previous secret remains valid for a configurable grace window
+    (WEBHOOK_SECRET_GRACE_WINDOW_SECONDS, default 1 h) so that consumers
+    that have not yet picked up the new secret are not immediately rejected.
+
+    BE-295: Dual-validation grace window.
+    BE-034: Audit-logged with actor and version metadata.
     """
-    from datetime import datetime
+    from datetime import timedelta
     from app.services.audit_log import audit_log
-    
+
     webhook = _get_webhook_or_404(db, webhook_id)
-    
-    # Capture old metadata for audit trail
+
     old_secret_version = webhook.secret_version
     old_rotation_time = webhook.last_secret_rotation_at
-    
-    # Generate new secret and update metadata
+    grace_seconds = settings.WEBHOOK_SECRET_GRACE_WINDOW_SECONDS
+
+    # Preserve current secret as previous_secret for the grace window
+    now = datetime.utcnow()
+    webhook.previous_secret = webhook.secret
+    webhook.rotation_grace_expires_at = now + timedelta(seconds=grace_seconds)
+
+    # Install new secret
     new_secret = secrets.token_hex(32)
     webhook.secret = new_secret
     webhook.secret_version = old_secret_version + 1
-    webhook.last_secret_rotation_at = datetime.utcnow()
-    
+    webhook.last_secret_rotation_at = now
+
     db.commit()
-    
-    # Emit audit log with actor context and timestamp
+
     audit_log.log(
         "webhook_secret_rotated",
         {
@@ -388,14 +400,19 @@ def rotate_webhook_secret(
             "old_secret_version": old_secret_version,
             "new_secret_version": webhook.secret_version,
             "previous_rotation_at": old_rotation_time.isoformat() if old_rotation_time else None,
-            "rotated_by": getattr(current_user, 'email', 'unknown'),
-        }
+            "grace_expires_at": webhook.rotation_grace_expires_at.isoformat(),
+            "rotated_by": getattr(current_user, "email", "unknown"),
+        },
     )
-    
+
     return WebhookSecretRotateResponse(
         webhook_id=webhook.id,
         new_secret=new_secret,
-        message="Secret rotated. Update your consumer to use the new secret immediately.",
+        grace_expires_at=webhook.rotation_grace_expires_at.isoformat(),
+        message=(
+            f"Secret rotated. Previous secret valid for {grace_seconds}s grace window. "
+            "Update your consumer before the grace window expires."
+        ),
     )
 
 

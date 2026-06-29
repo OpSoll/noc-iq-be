@@ -39,6 +39,10 @@ class Webhook(Base):
     last_secret_rotation_at = Column(DateTime, nullable=True)  # When the secret was last rotated
     secret_version = Column(Integer, default=1, nullable=False)  # Incremented on each rotation
 
+    # BE-295: Grace-window rotation – previous secret kept valid for a short overlap window
+    previous_secret = Column(String(255), nullable=True)  # Previous secret during grace window
+    rotation_grace_expires_at = Column(DateTime, nullable=True)  # When previous_secret expires
+
     deliveries = relationship("WebhookDelivery", back_populates="webhook", cascade="all, delete-orphan")
 
 

@@ -36,7 +36,7 @@ Webhooks include an explicit timestamp in the payload (`timestamp` field) for:
 
 import hmac
 import hashlib
-from typing import Tuple
+from typing import Optional, Tuple
 
 
 # Current signature algorithm version
@@ -113,3 +113,32 @@ def verify_signature(
     else:
         # Unknown version - fail securely
         return False
+
+
+def verify_with_grace_window(
+    current_secret: Optional[str],
+    previous_secret: Optional[str],
+    payload: str,
+    signature: str,
+    version: int = CURRENT_SIGNATURE_VERSION,
+) -> bool:
+    """Verify a signature accepting either the current or previous (grace-window) secret.
+
+    During a rotation grace window both the new and the old secret are valid so
+    that consumers who have not yet picked up the new secret are not locked out.
+
+    Args:
+        current_secret: The active secret after rotation.
+        previous_secret: The previous secret still valid within the grace window.
+        payload: Raw JSON payload string.
+        signature: Hex-encoded signature to verify.
+        version: Signature algorithm version.
+
+    Returns:
+        True if the signature validates against either secret, False otherwise.
+    """
+    if current_secret and verify_signature(current_secret, payload, signature, version):
+        return True
+    if previous_secret and verify_signature(previous_secret, payload, signature, version):
+        return True
+    return False

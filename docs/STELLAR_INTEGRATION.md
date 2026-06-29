@@ -865,3 +865,36 @@ A: Soroban contract invocations cost a few cents in XLM, much cheaper than other
 ---
 
 **Need help?** Open an issue on GitHub or join our Discord community!
+
+---
+
+## Asset-Code and Issuer Validation (BE-364)
+
+Before any payout is submitted to the Stellar network the backend validates the
+configured asset metadata to prevent wrong-asset settlements.
+
+### Validated fields
+
+| Field | Env var | Rules |
+|---|---|---|
+| Asset code | `PAYMENT_ASSET_CODE` | Non-empty, alphanumeric, ≤ 12 chars |
+| Asset issuer | `PAYMENT_ASSET_ISSUER` | Non-empty, 56-char Stellar G-address |
+
+### Behavior on failure
+
+When validation fails the adapter raises `AssetValidationError` with
+`error_code = "INVALID_ASSET_CONFIG"`. This error is **non-retryable** and
+blocks execution immediately — no transaction is ever submitted with a
+misconfigured asset.
+
+### Configuration
+
+```env
+PAYMENT_ASSET_CODE=USDC
+# Circle USDC issuer on testnet:
+PAYMENT_ASSET_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+```
+
+In `local_adapter` mode `PAYMENT_ASSET_ISSUER` may be left empty.
+In `soroban_rpc` mode it **must** be a valid G-address — startup validation
+will reject an empty or malformed value.

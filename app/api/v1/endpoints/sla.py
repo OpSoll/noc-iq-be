@@ -21,6 +21,7 @@ from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.services.sla_service import compute_device_sla, simulate_threshold_change
+from app.services.sla_metric_registry import list_metrics
 from app.services.audit_log import audit_log
 from app.models import SLAResult
 from app.utils.cache import TTLCache
@@ -473,3 +474,26 @@ def export_analytics_summary_endpoint(
             headers={"Content-Disposition": f"attachment; filename=sla_analytics_summary_{days}d.csv"},
         )
     return exported
+
+
+@router.get("/metrics/definitions")
+def get_metric_definitions(current_user=Depends(require_engineer)):
+    """Return the authoritative formula registry for all SLA dashboard KPIs (BE-W5-106).
+
+    Each entry exposes:
+    - name: snake_case key used in API responses
+    - description: human-readable formula explanation
+    - inputs: list of required input field names
+    - unit: measurement unit (%, minutes, count, currency)
+
+    Intended for FE and ops teams to ensure alignment on KPI semantics.
+    """
+    return [
+        {
+            "name": m.name,
+            "description": m.description,
+            "inputs": m.inputs,
+            "unit": m.unit,
+        }
+        for m in list_metrics()
+    ]
