@@ -95,12 +95,34 @@ class MetricsRegistry:
             return summary
     
     def _percentile(self, values: List[float], percentile: float) -> float:
-        """Calculate percentile of values."""
+        """Calculate percentile of values using linear interpolation.
+        
+        This robust formula handles sparse datasets (insufficient sample sizes)
+        by returning 0.0 for empty arrays and the exact value for single-item arrays.
+        For larger outlier-heavy distributions, it uses standard linear interpolation
+        (similar to numpy.percentile with method='linear') to provide a deterministic
+        and statistically sound metric regardless of sample pathology.
+        """
         if not values:
             return 0.0
+        n = len(values)
+        if n == 1:
+            return values[0]
+            
         sorted_values = sorted(values)
-        index = int((percentile / 100) * len(sorted_values))
-        return sorted_values[min(index, len(sorted_values) - 1)]
+        
+        # Position is 0-indexed. Using formula: p * (n - 1)
+        k = (percentile / 100.0) * (n - 1)
+        f = int(k)
+        c = f + 1
+        
+        if c >= n:
+            return sorted_values[-1]
+            
+        # Linear interpolation between f and c
+        d0 = sorted_values[f]
+        d1 = sorted_values[c]
+        return d0 + (d1 - d0) * (k - f)
 
 
 # Global metrics registry instance
