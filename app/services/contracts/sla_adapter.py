@@ -2,6 +2,7 @@
 # Stellar SLA adapter.
 # - Validates network identity before any chain operation (#286).
 # - Checks trustline readiness before payout submission (#285).
+# - Validates asset code/issuer pair before payout submission (#364).
 
 from __future__ import annotations
 
@@ -40,9 +41,14 @@ def classify_error(error: Exception) -> RetryClass:
 
 
 class SLAContractAdapter:
-    """Backend-facing contract adapter (stub)."""
+    """Backend-facing contract adapter (legacy stub)."""
     pass
 
+
+import logging
+from enum import Enum
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +65,11 @@ class TrustlineStatus(str, Enum):
 class NetworkMismatchError(RuntimeError):
     """Raised when a wallet or operation targets the wrong Stellar network (#286)."""
 
-    def __init__(self, expected: StellarNetwork, actual: str) -> None:
+    def __init__(self, expected: str, actual: str) -> None:
         self.expected = expected
         self.actual = actual
         super().__init__(
-            f"Network mismatch: instance is configured for '{expected.value}' "
+            f"Network mismatch: instance is configured for '{expected}' "
             f"but operation targets '{actual}'. Cross-network operations are forbidden."
         )
 
@@ -101,6 +107,26 @@ class SLAAdapter:
         self._settings = settings or get_settings()
         self._horizon = self._settings.horizon_url
 
+    # ── Asset config validation (#364) ───────────────────────────────────────
+
+    def validate_payout_asset(
+        self,
+        asset_code: str | None = None,
+        asset_issuer: str | None = None,
+    ) -> None:
+        """Validate asset code/issuer pair before any payout submission.
+
+        Uses the configured PAYMENT_ASSET_CODE / PAYMENT_ASSET_ISSUER when
+        called with no arguments, or validates an explicitly supplied pair.
+
+        Raises:
+            AssetValidationError: if validation fails. Callers must treat this
+                as non-retryable and block execution.
+        """
+        code = asset_code if asset_code is not None else self._settings.PAYMENT_ASSET_CODE
+        issuer = asset_issuer if asset_issuer is not None else self._settings.PAYMENT_ASSET_ISSUER
+        validate_asset_config(code, issuer)
+
     # ── Network identity guard (#286) ─────────────────────────────────────────
 
     def assert_network(self, wallet_network: str) -> None:
@@ -108,7 +134,7 @@ class SLAAdapter:
 
         Audit-logs every rejection attempt.
         """
-        expected = self._settings.STELLAR_NETWORK.value
+        expected = self._settings.STELLAR_NETWORK
         if wallet_network.lower() != expected:
             logger.warning(
                 "Cross-network operation rejected | expected=%s actual=%s",
@@ -116,7 +142,7 @@ class SLAAdapter:
                 wallet_network,
                 extra={"audit": True},
             )
-            raise NetworkMismatchError(self._settings.STELLAR_NETWORK, wallet_network)
+            raise NetworkMismatchError(expected, wallet_network)
 
     # ── Trustline verification (#285) ─────────────────────────────────────────
 

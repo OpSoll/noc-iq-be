@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
+    # BE-364: Authoritative asset issuer for the configured payout asset.
+    # For USDC on testnet this is the Circle testnet issuer address.
+    # Must be set to a non-empty G-address when CONTRACT_EXECUTION_MODE=soroban_rpc.
+    PAYMENT_ASSET_ISSUER: str = ""
     # Trusted-proxy settings (#205)
     # Number of trusted reverse-proxy hops in front of this app.
     # Set to 0 when running without a proxy (uses direct connection IP).
@@ -58,12 +62,25 @@ class Settings(BaseSettings):
     WEBHOOK_RETRY_BASE_DELAYS: str = "30,120,600"
     # Hard cap on any single computed delay (seconds) to prevent retry storms.
     WEBHOOK_RETRY_MAX_DELAY_SECONDS: int = 3600
+    # BE-295: Grace window (seconds) during which the previous secret is still accepted.
+    WEBHOOK_SECRET_GRACE_WINDOW_SECONDS: int = 3600
+
+    @property
+    def horizon_url(self) -> str:
+        """Horizon base URL derived from STELLAR_NETWORK."""
+        if self.STELLAR_NETWORK == "mainnet":
+            return "https://horizon.stellar.org"
+        return "https://horizon-testnet.stellar.org"
 
     class Config:
         env_file = ".env"
 
 
 settings = Settings()
+
+
+def get_settings() -> Settings:
+    return settings
 
 
 def validate_critical_settings(config: Settings) -> None:
@@ -131,6 +148,18 @@ def validate_critical_settings(config: Settings) -> None:
         errors.append("PAYMENT_FROM_ADDRESS must not be empty.")
     if not config.PAYMENT_TO_ADDRESS.strip():
         errors.append("PAYMENT_TO_ADDRESS must not be empty.")
+
+    # BE-364: Require a well-formed issuer address in soroban_rpc mode.
+    if config.CONTRACT_EXECUTION_MODE == "soroban_rpc":
+        issuer = config.PAYMENT_ASSET_ISSUER.strip()
+        if not issuer:
+            errors.append(
+                "PAYMENT_ASSET_ISSUER must be set when CONTRACT_EXECUTION_MODE=soroban_rpc."
+            )
+        elif not issuer.startswith("G") or len(issuer) != 56:
+            errors.append(
+                "PAYMENT_ASSET_ISSUER must be a valid 56-character Stellar G-address."
+            )
 
     if config.TRUSTED_PROXY_COUNT < 0:
         errors.append("TRUSTED_PROXY_COUNT must be >= 0.")
