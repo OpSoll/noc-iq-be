@@ -26,6 +26,33 @@ def _get_retry_delays() -> list[int]:
 
 WEBHOOK_SCHEMA_VERSION = "1"
 
+# Supported schema versions and their compatible event types.
+# Any payload with a schema_version not in this matrix is dead-lettered.
+SUPPORTED_SCHEMA_VERSIONS: dict[str, list[str]] = {
+    "1": ["sla.violation", "sla.warning", "sla.resolved"],
+}
+
+DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION = "unknown_schema_version"
+DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE = "incompatible_event_type"
+
+
+def validate_payload_schema_version(
+    payload: dict,
+    event: "WebhookEvent",
+) -> tuple[bool, str]:
+    """Validate payload schema_version and event_type compatibility.
+
+    Returns (is_valid, dead_letter_reason).
+    dead_letter_reason is empty string when valid.
+    """
+    schema_version = str(payload.get("schema_version", ""))
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        return False, DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION
+    compatible_events = SUPPORTED_SCHEMA_VERSIONS[schema_version]
+    if event.value not in compatible_events:
+        return False, DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE
+    return True, ""
+
 
 def _generate_idempotency_key(webhook_id: UUID, event: WebhookEvent, event_timestamp: str) -> str:
     """Generate a deterministic idempotency key for webhook delivery.
@@ -269,6 +296,20 @@ def trigger_sla_violation_webhooks(
             signature_version=signature_version,
         )
         deliveries.append(delivery)
+
+        # Validate schema version and event type compatibility before dispatch
+        is_valid, dead_letter_reason = validate_payload_schema_version(payload, event)
+        if not is_valid:
+            delivery.status = WebhookDeliveryStatus.DEAD_LETTER
+            delivery.dead_lettered_at = datetime.utcnow()
+            delivery.error_message = f"dead_lettered: {dead_letter_reason}"
+            db.commit()
+            logger.warning(
+                "Webhook delivery %s dead-lettered: schema_version=%s reason=%s",
+                delivery.id, payload.get("schema_version"), dead_letter_reason,
+            )
+            continue
+
         logger.info(
             "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d, idempotency_key=%s).",
             delivery.id, webhook.id, event.value, signature_version, delivery.idempotency_key,

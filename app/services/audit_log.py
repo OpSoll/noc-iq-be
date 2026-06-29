@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.models.orm.audit_log import AuditLogORM
 from app.db.session import SessionLocal
 from app.utils.correlation import get_correlation_id
+import hashlib
+import json
 
 
 class WalletAuditEvents:
@@ -39,6 +41,39 @@ class WalletAuditEvents:
 
     # Prefix used by the audit query endpoint to filter all wallet events
     PREFIX = "wallet."
+
+
+class BridgeOutcomeClass:
+    """Outcome class taxonomy for contract bridge interactions."""
+    SUCCESS = "success"
+    TRANSIENT_ERROR = "transient_error"   # retryable (network, timeout)
+    SEMANTIC_ERROR = "semantic_error"      # non-retryable (bad input, unauthorized)
+    DEGRADED = "degraded"                  # partial success / stale data returned
+    UNKNOWN = "unknown"
+
+
+class BridgeAuditEvents:
+    """Audit event taxonomy for contract bridge interactions (BE-W5-104)."""
+
+    BRIDGE_CALL_SUCCESS = "bridge.call.success"
+    BRIDGE_CALL_FAILURE = "bridge.call.failure"
+    BRIDGE_CALL_DEGRADED = "bridge.call.degraded"
+
+    PREFIX = "bridge."
+
+
+def _redacted_digest(data: Any) -> Optional[str]:
+    """Return a SHA-256 hex digest of a JSON-serialized payload without exposing secrets.
+
+    Returns None when data is empty/None.
+    """
+    if not data:
+        return None
+    try:
+        serialized = json.dumps(data, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 class AuditLogService:
@@ -108,6 +143,42 @@ class AuditLogService:
         db.add(audit_entry)
         db.commit()
 
+    def log_bridge_event(
+        self,
+        event_type: str,
+        mode: str,
+        outcome_class: str,
+        latency_ms: float,
+        request_data: Optional[Any] = None,
+        response_data: Optional[Any] = None,
+        actor_id: Optional[str] = None,
+        extra: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Emit a bridge audit event enriched with digest, latency, mode, and outcome class.
+
+        Secrets are never stored — only redacted SHA-256 digests of request/response.
+
+        Args:
+            event_type: Bridge event type (e.g. BridgeAuditEvents.BRIDGE_CALL_SUCCESS)
+            mode: Execution mode from CONTRACT_EXECUTION_MODE (e.g. 'local', 'contract')
+            outcome_class: One of BridgeOutcomeClass values
+            latency_ms: End-to-end bridge call latency in milliseconds
+            request_data: Request payload (will be digested, not stored raw)
+            response_data: Response payload (will be digested, not stored raw)
+            actor_id: User ID initiating the bridge call
+            extra: Additional non-sensitive context to store alongside the event
+        """
+        details: dict[str, Any] = {
+            "mode": mode,
+            "outcome_class": outcome_class,
+            "latency_ms": round(latency_ms, 3),
+            "request_digest": _redacted_digest(request_data),
+            "response_digest": _redacted_digest(response_data),
+        }
+        if extra:
+            details.update(self._sanitize(extra))
+        self.log(event_type, details=details, actor_id=actor_id)
+
     def log(
         self,
         event_type: str,
@@ -125,6 +196,7 @@ class AuditLogService:
     def list(
         self,
         event_type_prefix: Optional[str] = None,
+        bridge_outcome: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
@@ -135,6 +207,7 @@ class AuditLogService:
             event_type_prefix: If provided, only return events whose event_type
                                starts with this string (e.g., 'wallet.' returns all
                                wallet events). Case-sensitive.
+            bridge_outcome: If provided, filter bridge.* events by outcome_class in details.
             limit: Maximum number of records to return.
             offset: Number of records to skip (for pagination).
         """
@@ -144,6 +217,40 @@ class AuditLogService:
                 query = query.filter(
                     AuditLogORM.event_type.like(f"{event_type_prefix}%")
                 )
+            if bridge_outcome:
+                # Filter bridge events by outcome_class stored in the JSON details column.
+                # Uses PostgreSQL JSON operator; falls back gracefully on non-PG backends.
+                try:
+                    from sqlalchemy import cast
+                    from sqlalchemy.dialects.postgresql import JSONB
+                    query = query.filter(
+                        AuditLogORM.event_type.like(f"{BridgeAuditEvents.PREFIX}%"),
+                        cast(AuditLogORM.details["outcome_class"].astext, type_=None).isnot(None),
+                        AuditLogORM.details["outcome_class"].astext == bridge_outcome,
+                    )
+                except Exception:
+                    # Non-PostgreSQL or JSON unsupported — filter in Python
+                    rows_all = (
+                        query.filter(AuditLogORM.event_type.like(f"{BridgeAuditEvents.PREFIX}%"))
+                        .order_by(AuditLogORM.created_at.desc())
+                        .all()
+                    )
+                    rows_all = [
+                        r for r in rows_all
+                        if isinstance(r.details, dict) and r.details.get("outcome_class") == bridge_outcome
+                    ]
+                    return [
+                        {
+                            "id": r.id,
+                            "event_type": r.event_type,
+                            "email": r.email,
+                            "actor_id": r.actor_id,
+                            "correlation_id": r.correlation_id,
+                            "details": r.details,
+                            "created_at": r.created_at.isoformat() if r.created_at else None,
+                        }
+                        for r in rows_all[offset: offset + limit]
+                    ]
             rows = (
                 query.order_by(AuditLogORM.created_at.desc())
                 .offset(offset)
