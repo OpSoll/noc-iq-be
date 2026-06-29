@@ -58,6 +58,8 @@ class WebhookDelivery(Base):
     delivered_at = Column(DateTime, nullable=True)
     dead_lettered_at = Column(DateTime, nullable=True)  # BE-086: When delivery was marked as dead-letter
     signature_version = Column(Integer, default=1, nullable=False)  # BE-087: Explicit signature algorithm version
+    idempotency_key = Column(String(255), nullable=False, unique=True, index=True)  # Deterministic key for deduplication
+    event_timestamp = Column(DateTime, nullable=False)  # Immutable: when the event occurred (UTC)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

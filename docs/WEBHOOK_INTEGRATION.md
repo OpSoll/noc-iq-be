@@ -69,6 +69,89 @@ function verifyWebhook(requestBody, signatureHeader, secret) {
 }
 ```
 
+## Idempotency Keys
+
+### Idempotency Key Specification
+
+Each webhook delivery includes a deterministic idempotency key for receiver-safe deduplication:
+
+- **Location**: `X-Webhook-Idempotency-Key` header
+- **Format**: SHA256 hex digest (64 characters)
+- **Determinism**: Derived from `webhook_id + event_type + event_timestamp`
+- **Immutability**: Never changes across retries or manual replays
+- **Uniqueness**: Guaranteed unique per webhook + event + timestamp combination
+
+### Idempotency Key Algorithm
+
+```python
+import hashlib
+
+def generate_idempotency_key(webhook_id: str, event: str, event_timestamp: str) -> str:
+    """Generate deterministic idempotency key."""
+    key_input = f"{webhook_id}:{event}:{event_timestamp}"
+    return hashlib.sha256(key_input.encode()).hexdigest()
+```
+
+### Receiver-Side Deduplication
+
+Use the idempotency key to prevent duplicate processing:
+
+```python
+from sqlalchemy import Column, String, UniqueConstraint
+from sqlalchemy.dialects.postgresql import UUID
+
+class ProcessedWebhook(Base):
+    __tablename__ = "processed_webhooks"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True)
+    idempotency_key = Column(String(64), nullable=False, unique=True, index=True)
+    processed_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('idempotency_key', name='uq_processed_webhooks_idempotency'),
+    )
+
+def process_webhook(idempotency_key: str, payload: dict):
+    # Check if already processed
+    existing = db.query(ProcessedWebhook).filter(
+        ProcessedWebhook.idempotency_key == idempotency_key
+    ).first()
+    
+    if existing:
+        logger.info(f"Webhook {idempotency_key} already processed, skipping")
+        return
+    
+    # Process the webhook
+    # ... your processing logic ...
+    
+    # Record as processed
+    record = ProcessedWebhook(idempotency_key=idempotency_key)
+    db.add(record)
+    db.commit()
+```
+
+### Idempotency in Retry and Replay Scenarios
+
+- **Automatic Retries**: Same idempotency key is preserved across all retry attempts
+- **Manual Replay**: Dead-lettered deliveries retain their original idempotency key when replayed
+- **Event Timestamp**: The `event_timestamp` field in the delivery record is immutable and used in key generation
+
+### Delivery API Metadata
+
+The delivery API exposes idempotency metadata for consumers:
+
+```json
+{
+  "id": "uuid",
+  "webhook_id": "uuid",
+  "event": "sla.violation",
+  "status": "success",
+  "idempotency_key": "a1b2c3d4e5f6...",
+  "event_timestamp": "2026-04-29T14:30:45.123456",
+  "created_at": "2026-04-29T14:30:46.000000"
+}
+```
+
 ## Timestamp Validation Semantics
 
 ### Timestamp Specification

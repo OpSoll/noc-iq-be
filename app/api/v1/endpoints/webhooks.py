@@ -142,6 +142,8 @@ class WebhookDeliveryResponse(BaseModel):
     delivered_at: Optional[str]
     dead_lettered_at: Optional[str]  # BE-086: Include dead-letter timestamp
     signature_version: int  # BE-087: Explicit signature algorithm version
+    idempotency_key: str  # Deterministic key for receiver-side deduplication
+    event_timestamp: str  # Immutable: when the event occurred (UTC)
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -212,6 +214,9 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
         error_message=delivery.error_message,
         delivered_at=delivery.delivered_at.isoformat() if delivery.delivered_at else None,
         dead_lettered_at=delivery.dead_lettered_at.isoformat() if delivery.dead_lettered_at else None,
+        signature_version=delivery.signature_version,
+        idempotency_key=delivery.idempotency_key,
+        event_timestamp=delivery.event_timestamp.isoformat() if delivery.event_timestamp else None,
         created_at=delivery.created_at.isoformat(),
     )
 

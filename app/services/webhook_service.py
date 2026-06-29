@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -26,25 +27,48 @@ def _get_retry_delays() -> list[int]:
 WEBHOOK_SCHEMA_VERSION = "1"
 
 
+def _generate_idempotency_key(webhook_id: UUID, event: WebhookEvent, event_timestamp: str) -> str:
+    """Generate a deterministic idempotency key for webhook delivery.
+    
+    The key is derived from webhook_id, event type, and event timestamp to ensure:
+    - Uniqueness: Different events generate different keys
+    - Consistency: Same event (webhook + event + timestamp) always generates same key
+    - Immutability: Key never changes across retries or manual replays
+    
+    Args:
+        webhook_id: UUID of the webhook configuration
+        event: Webhook event type
+        event_timestamp: ISO-formatted UTC timestamp when event occurred
+    
+    Returns:
+        SHA256 hex digest as the idempotency key
+    """
+    key_input = f"{webhook_id}:{event.value}:{event_timestamp}"
+    return hashlib.sha256(key_input.encode()).hexdigest()
+
+
 def _build_headers(
     webhook: Webhook,
     payload: str,
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
     signature_version: int = CURRENT_SIGNATURE_VERSION,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Build webhook delivery headers with explicit signature versioning (BE-087).
+    """Build webhook delivery headers with explicit signature versioning (BE-087) and idempotency key.
     
     Args:
         webhook: Webhook configuration
         payload: JSON payload string
         event: Webhook event type
         signature_version: Explicit signature algorithm version
+        idempotency_key: Deterministic key for receiver-side deduplication
     
     Returns:
         Dictionary of headers including:
         - Content-Type: application/json
         - X-Webhook-Event: event type
         - X-Webhook-Timestamp: ISO-formatted UTC timestamp
+        - X-Webhook-Idempotency-Key: idempotency key for deduplication
         - X-Webhook-Signature: signature (if secret configured)
         - X-Webhook-Signature-Version: signature version (if secret configured)
     """
@@ -53,6 +77,8 @@ def _build_headers(
         "X-Webhook-Event": event.value,
         "X-Webhook-Timestamp": datetime.utcnow().isoformat(),
     }
+    if idempotency_key:
+        headers["X-Webhook-Idempotency-Key"] = idempotency_key
     if webhook.secret:
         sig_hex, _ = sign_payload(webhook.secret, payload, signature_version)
         headers["X-Webhook-Signature"] = f"sha256={sig_hex}"
@@ -78,26 +104,36 @@ def create_delivery(
     webhook: Webhook,
     event: WebhookEvent,
     payload: Dict[str, Any],
+    event_timestamp: str,
     signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> WebhookDelivery:
-    """Create a webhook delivery record with explicit signature version (BE-087).
+    """Create a webhook delivery record with explicit signature version (BE-087) and idempotency key.
     
     Args:
         db: Database session
         webhook: Webhook configuration
         event: Webhook event type
         payload: Event payload dict (will be JSON-serialized)
+        event_timestamp: ISO-formatted UTC timestamp when event occurred
         signature_version: Signature algorithm version to use
     
     Returns:
         Created WebhookDelivery record
     """
+    # Generate deterministic idempotency key
+    idempotency_key = _generate_idempotency_key(webhook.id, event, event_timestamp)
+    
+    # Parse event_timestamp for storage
+    event_dt = datetime.fromisoformat(event_timestamp)
+    
     delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=event,
         payload=json.dumps(payload),
         status=WebhookDeliveryStatus.PENDING,
         signature_version=signature_version,
+        idempotency_key=idempotency_key,
+        event_timestamp=event_dt,
     )
     db.add(delivery)
     db.commit()
@@ -112,6 +148,7 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         payload_str,
         delivery.event,
         delivery.signature_version,
+        idempotency_key=delivery.idempotency_key,
     )
 
     try:
@@ -192,7 +229,7 @@ def trigger_sla_violation_webhooks(
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
     signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> List[WebhookDelivery]:
-    """Trigger webhook deliveries for an event with explicit signature versioning (BE-087).
+    """Trigger webhook deliveries for an event with explicit signature versioning (BE-087) and idempotency keys.
     
     Args:
         db: Database session
@@ -206,6 +243,7 @@ def trigger_sla_violation_webhooks(
     Note:
         - Each delivery includes explicit signature_version metadata in headers
         - Timestamp is immutable across retries (idempotency support)
+        - Idempotency key is deterministic: webhook_id + event + timestamp
         - Future signing changes can use new version without breaking existing consumers
     """
     webhooks = get_active_webhooks_for_event(db, event)
@@ -227,12 +265,13 @@ def trigger_sla_violation_webhooks(
             webhook,
             event,
             payload,
+            event_timestamp=event_timestamp,
             signature_version=signature_version,
         )
         deliveries.append(delivery)
         logger.info(
-            "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d).",
-            delivery.id, webhook.id, event.value, signature_version,
+            "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d, idempotency_key=%s).",
+            delivery.id, webhook.id, event.value, signature_version, delivery.idempotency_key,
         )
         # Dispatch immediately (in production, offload to a background task/queue)
         dispatch_delivery(db, delivery.id)
@@ -274,7 +313,11 @@ def get_dead_letter_deliveries(db: Session, webhook_id: Optional[UUID] = None, l
 
 
 def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
-    """Replay a dead-lettered delivery by resetting its status and retrying."""
+    """Replay a dead-lettered delivery by resetting its status and retrying.
+    
+    Idempotency key and event_timestamp are preserved across replays to ensure
+    receiver-side deduplication works correctly.
+    """
     delivery = db.query(WebhookDelivery).filter(WebhookDelivery.id == delivery_id).first()
     if not delivery:
         logger.error("Dead-letter delivery %s not found.", delivery_id)
@@ -284,7 +327,7 @@ def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
         logger.warning("Delivery %s is not in dead-letter status (current: %s).", delivery_id, delivery.status)
         return False
     
-    # Reset delivery state for replay
+    # Reset delivery state for replay (preserve idempotency_key and event_timestamp)
     delivery.status = WebhookDeliveryStatus.PENDING
     delivery.attempt_count = 0
     delivery.next_retry_at = None
@@ -293,13 +336,14 @@ def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
     delivery.response_status_code = None
     delivery.response_body = None
     delivery.delivered_at = None
+    # idempotency_key and event_timestamp remain unchanged
     delivery.updated_at = datetime.utcnow()
     
     db.commit()
     
     # Dispatch the replay
     dispatch_delivery(db, delivery.id)
-    logger.info("Replayed dead-letter delivery %s", delivery_id)
+    logger.info("Replayed dead-letter delivery %s (idempotency_key=%s preserved)", delivery_id, delivery.idempotency_key)
     return True
 
 
