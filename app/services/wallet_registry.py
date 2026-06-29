@@ -16,11 +16,14 @@ from app.models.wallet import (
     WalletStatusResponse,
     WalletTrustlineResponse,
 )
+from app.repositories.wallet_repository import WalletRepository, wallet_orm_to_pydantic
+from app.db.session import SessionLocal
+from sqlalchemy.exc import IntegrityError
 
 
 class WalletRegistry:
-    _wallets_by_user: dict[str, Wallet] = {}
-    _wallets_by_address: dict[str, Wallet] = {}
+    _wallets_by_user: dict[str, Wallet] = {}  # In-memory cache for performance
+    _wallets_by_address: dict[str, Wallet] = {}  # In-memory cache for performance
     _link_locks: dict[str, bool] = {}  # Simple lock mechanism for link operations
 
     @staticmethod
@@ -55,6 +58,11 @@ class WalletRegistry:
         return refreshed
 
     @classmethod
+    def _get_db_session(cls):
+        """Get a database session for repository operations."""
+        return SessionLocal()
+
+    @classmethod
     def _build_live_balances(cls, address: str) -> dict:
         """Compute live balances for address. Raises ValueError if not in registry.
 
@@ -63,7 +71,15 @@ class WalletRegistry:
         """
         wallet = cls._wallets_by_address.get(address)
         if not wallet:
-            raise ValueError(f"Address {address} not found in registry")
+            # Try to fetch from database if not in cache
+            with cls._get_db_session() as db:
+                repo = WalletRepository(db)
+                wallet_orm = repo.get_by_public_key(address)
+                if not wallet_orm:
+                    raise ValueError(f"Address {address} not found in registry")
+                wallet = wallet_orm_to_pydantic(wallet_orm)
+                cls._wallets_by_user[wallet.user_id] = wallet
+                cls._wallets_by_address[wallet.public_key] = wallet
         wallet = cls._refresh_wallet(wallet)
         xlm_balance = "1.0000000" if wallet.funded else "0.0000000"
         balances: dict = {"XLM": AssetBalance(balance=xlm_balance, asset_type="native")}
@@ -82,6 +98,15 @@ class WalletRegistry:
 
     @classmethod
     def create_wallet(cls, payload: WalletCreateRequest) -> WalletCreateResponse:
+        """Create a wallet with transactional integrity.
+        
+        This method ensures wallet creation and user linkage are atomic.
+        If the operation fails at any point, the entire transaction rolls back,
+        preventing detached wallet artifacts.
+        
+        Idempotent: Returns existing wallet if one already exists for the user.
+        """
+        # Check cache first for idempotency
         existing = cls._wallets_by_user.get(payload.user_id)
         if existing:
             return WalletCreateResponse(
@@ -89,23 +114,50 @@ class WalletRegistry:
                 message="Wallet already exists for this user.",
             )
 
-        now = cls._now()
-        wallet = Wallet(
-            user_id=payload.user_id,
-            public_key=cls._build_public_key(),
-            created_at=now,
-            last_updated=now,
-            funded=False,
-            active=True,
-            trustline_ready=False,
-            cached_at=now,
-        )
-        cls._wallets_by_user[payload.user_id] = wallet
-        cls._wallets_by_address[wallet.public_key] = wallet
-        return WalletCreateResponse(
-            **wallet.model_dump(),
-            message="Wallet created. Please fund with at least 1 XLM to activate.",
-        )
+        # Use database transaction for atomic wallet creation
+        with cls._get_db_session() as db:
+            repo = WalletRepository(db)
+            
+            # Check database for existing wallet (idempotency check)
+            existing_orm = repo.get_by_user_id(payload.user_id)
+            if existing_orm:
+                wallet = wallet_orm_to_pydantic(existing_orm)
+                cls._wallets_by_user[payload.user_id] = wallet
+                cls._wallets_by_address[wallet.public_key] = wallet
+                return WalletCreateResponse(
+                    **wallet.model_dump(),
+                    message="Wallet already exists for this user.",
+                )
+
+            # Create wallet atomically in database
+            try:
+                public_key = cls._build_public_key()
+                wallet_orm = repo.create_and_link_wallet(
+                    user_id=payload.user_id,
+                    public_key=public_key,
+                    funded=False,
+                    trustline_ready=False,
+                )
+                wallet = wallet_orm_to_pydantic(wallet_orm)
+                cls._wallets_by_user[payload.user_id] = wallet
+                cls._wallets_by_address[wallet.public_key] = wallet
+                return WalletCreateResponse(
+                    **wallet.model_dump(),
+                    message="Wallet created. Please fund with at least 1 XLM to activate.",
+                )
+            except IntegrityError as e:
+                # Handle race condition where wallet was created by another request
+                db.rollback()
+                existing_orm = repo.get_by_user_id(payload.user_id)
+                if existing_orm:
+                    wallet = wallet_orm_to_pydantic(existing_orm)
+                    cls._wallets_by_user[payload.user_id] = wallet
+                    cls._wallets_by_address[wallet.public_key] = wallet
+                    return WalletCreateResponse(
+                        **wallet.model_dump(),
+                        message="Wallet already exists for this user.",
+                    )
+                raise ValueError(f"Failed to create wallet: {str(e)}")
 
     @classmethod
     def link_wallet(cls, payload: WalletLinkRequest) -> Wallet:
@@ -119,7 +171,6 @@ class WalletRegistry:
         
         Thread-safe: uses simple lock to prevent race conditions during link operations.
         """
-        now = cls._now()
         link_key = f"{payload.user_id}:{payload.public_key}"
         
         # Simple lock to prevent concurrent link operations
@@ -131,8 +182,27 @@ class WalletRegistry:
         try:
             cls._link_locks[link_key] = True
             
-            # Check 1: User already linked to different address
-            existing_by_user = cls._wallets_by_user.get(payload.user_id)
+            # Use database transaction for atomic wallet linkage
+            with cls._get_db_session() as db:
+                repo = WalletRepository(db)
+                
+                try:
+                    wallet_orm = repo.link_existing_wallet(
+                        user_id=payload.user_id,
+                        public_key=payload.public_key,
+                        funded=payload.funded,
+                        trustline_ready=payload.trustline_ready,
+                    )
+                    wallet = wallet_orm_to_pydantic(wallet_orm)
+                    cls._wallets_by_user[payload.user_id] = wallet
+                    cls._wallets_by_address[wallet.public_key] = wallet
+                    return wallet
+                except ValueError as e:
+                    # Conflict errors from repository
+                    raise e
+                except IntegrityError as e:
+                    db.rollback()
+                    raise ValueError(f"Failed to link wallet: {str(e)}")
             if existing_by_user and existing_by_user.public_key != payload.public_key:
                 raise ValueError(
                     f"User '{payload.user_id}' is already linked to wallet '{existing_by_user.public_key}'. "
@@ -186,7 +256,15 @@ class WalletRegistry:
     def get_wallet(cls, user_id: str, refresh: bool = False) -> Wallet | None:
         wallet = cls._wallets_by_user.get(user_id)
         if not wallet:
-            return None
+            # Try database if not in cache
+            with cls._get_db_session() as db:
+                repo = WalletRepository(db)
+                wallet_orm = repo.get_by_user_id(user_id)
+                if not wallet_orm:
+                    return None
+                wallet = wallet_orm_to_pydantic(wallet_orm)
+                cls._wallets_by_user[user_id] = wallet
+                cls._wallets_by_address[wallet.public_key] = wallet
         if refresh or cls._is_stale(wallet):
             wallet = cls._refresh_wallet(wallet)
         else:
