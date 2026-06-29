@@ -2,9 +2,42 @@
 import csv
 import io
 import json
+import time
 from typing import Any
 
 from app.models.sla import SLADashboardKPI, SLATrendPoint, SLAPerformanceAggregation
+
+# ---------------------------------------------------------------------------
+# Benchmark regression thresholds
+# ---------------------------------------------------------------------------
+# Maximum acceptable latency (milliseconds) for each export operation type.
+# CI will fail if these are exceeded on the synthetic benchmark datasets.
+AGGREGATION_LATENCY_THRESHOLD_MS: float = 200.0
+EXPORT_LATENCY_THRESHOLD_MS: float = 500.0
+
+
+def benchmark_export(fn, *args, **kwargs) -> dict[str, Any]:
+    """
+    Time a single export call and return a result dict with duration and
+    threshold status.
+
+    Args:
+        fn: Callable export function to benchmark.
+        *args / **kwargs: Forwarded to fn.
+
+    Returns:
+        dict with keys: result, duration_ms, within_threshold, threshold_ms
+    """
+    threshold_ms = kwargs.pop("_threshold_ms", EXPORT_LATENCY_THRESHOLD_MS)
+    t0 = time.perf_counter()
+    result = fn(*args, **kwargs)
+    duration_ms = (time.perf_counter() - t0) * 1000.0
+    return {
+        "result": result,
+        "duration_ms": round(duration_ms, 3),
+        "threshold_ms": threshold_ms,
+        "within_threshold": duration_ms <= threshold_ms,
+    }
 
 
 def export_dashboard_kpi(kpi: SLADashboardKPI, format: str = "json") -> Any:

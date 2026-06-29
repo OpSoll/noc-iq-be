@@ -515,15 +515,92 @@ Use the GitHub issue template and include:
 - **Additional context** (mockups, examples, etc.)
 
 
-## 📞 Getting Help
+---
 
-- **GitHub Issues**: For bugs and feature requests
-- **Discord**: [Join our server] (link TBD)
-- **Stellar Discord**: For Stellar-specific questions
+## 🔁 CI Pipeline
 
-## 📜 License
+NOCIQ uses a **multi-stage GitHub Actions CI pipeline** designed for fast, actionable feedback.  All stages cache pip dependencies using `actions/cache` and upload stage-specific artifacts.
 
-By contributing to NOCIQ, you agree that your contributions will be licensed under the MIT License.
+### Stage Dependency Graph
+
+```
+lint ──┬──► tests ─────────────┐
+       └──► contract-checks ───┴──► integration-checks
+
+release-drift-check  (push to main / release/**)
+benchmarks           (push to main / release/**)
+```
+
+### Stage Summary
+
+| Stage | Job name | What it checks | Artifact |
+|-------|----------|---------------|----------|
+| 1 | `lint` | flake8 + mypy type checks | — |
+| 2a | `tests` | Unit & integration tests (excludes contract/stellar) | `unit-test-results/` (14 days) |
+| 2b | `contract-checks` | Contract parity (`test_contract_parity.py`) | `contract-check-results/` (14 days) |
+| 3 | `integration-checks` | Stellar Wave integration (`test_stellar_wave_issues.py`) | `integration-check-results/` (14 days) |
+| — | `benchmarks` | Analytics export latency benchmarks | `benchmark-results-<sha>/` (30 days) |
+| — | `release-drift-check` | docs/router/config synchronisation drift | `release-drift-report-<sha>.json` (30 days) |
+
+### Fail-fast behaviour
+
+Each stage gate **fails fast** and blocks dependent stages:
+- **`lint` fails** → `tests` and `contract-checks` are skipped immediately.
+- **`tests` or `contract-checks` fails** → `integration-checks` is skipped.
+- **`release-drift-check` exits 1** → workflow fails; the JSON drift report is still uploaded.
+
+### Reproducing locally
+
+```bash
+# Stage 1 — Lint & type check
+flake8 app/ --max-line-length=120 --extend-ignore=E203,W503
+mypy app/ --ignore-missing-imports --no-strict-optional
+
+# Stage 2a — Unit & integration tests
+pytest tests/ \
+  --ignore=tests/test_contract_parity.py \
+  --ignore=tests/test_stellar_wave_issues.py \
+  --ignore=tests/test_analytics_benchmarks.py \
+  -v
+
+# Stage 2b — Contract checks
+pytest tests/test_contract_parity.py -v
+
+# Stage 3 — Integration checks
+pytest tests/test_stellar_wave_issues.py -v
+
+# Benchmarks
+pytest tests/test_analytics_benchmarks.py -v
+
+# Release drift check
+python scripts/check_release_drift.py
+```
+
+### Analytics Benchmark Thresholds
+
+The benchmark suite (`tests/test_analytics_benchmarks.py`) asserts:
+- **Aggregation operations** complete in < `AGGREGATION_LATENCY_THRESHOLD_MS` (default 200 ms).
+- **Export operations** complete in < `EXPORT_LATENCY_THRESHOLD_MS` (default 500 ms).
+
+CI relaxes thresholds via env vars:
+```bash
+AGGREGATION_LATENCY_THRESHOLD_MS=500 EXPORT_LATENCY_THRESHOLD_MS=1000 \
+  pytest tests/test_analytics_benchmarks.py
+```
+
+Benchmark results are written to `tests/benchmark-results.json` and uploaded as a named artifact per commit SHA, enabling trend comparison across releases.
+
+### Release Drift Check
+
+`scripts/check_release_drift.py` cross-checks three sources for synchronisation:
+
+1. **API docs vs router**: Every path documented in `docs/API.md` must be reachable via a registered prefix in `app/api/v1/router.py`.
+2. **Config vs `.env.example`**: Every `Settings` field in `app/core/config.py` should have an entry in `.env.example`.
+3. **Router vs filesystem**: Every module imported in `router.py` must exist on disk.
+
+Drift findings are categorised as `critical`, `warning`, or `info`.  **Critical findings cause a CI failure** (exit code 1).
+
+---
 
 ## 🙏 Thank You!
 
