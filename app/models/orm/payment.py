@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from app.db.base import Base
 
@@ -23,3 +23,5 @@ class PaymentTransactionORM(Base):
     retry_count = Column(Integer, nullable=False, default=0)
     last_retried_at = Column(DateTime(timezone=True), nullable=True)
     idempotency_key = Column(String(255), nullable=True, unique=True, index=True)
+    dead_letter_reason = Column(Text, nullable=True)
+    dead_lettered_at = Column(DateTime(timezone=True), nullable=True)

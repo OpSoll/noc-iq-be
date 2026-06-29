@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import Enum
-from typing import Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -9,6 +9,7 @@ class PaymentStatus(str, Enum):
     pending = "pending"
     confirmed = "confirmed"
     failed = "failed"
+    dead_letter = "dead_letter"
 
 
 # Allowed transitions: from_status -> set of valid to_statuses
@@ -16,6 +17,7 @@ VALID_TRANSITIONS: Dict[PaymentStatus, FrozenSet[PaymentStatus]] = {
     PaymentStatus.pending: frozenset({PaymentStatus.confirmed, PaymentStatus.failed}),
     PaymentStatus.confirmed: frozenset(),
     PaymentStatus.failed: frozenset({PaymentStatus.pending}),
+    PaymentStatus.dead_letter: frozenset({PaymentStatus.pending}),
 }
 
 
@@ -76,6 +78,9 @@ class PaymentTransaction(BaseModel):
                 "confirmed_at": "2026-01-01T01:00:00Z",
                 "retry_count": 0,
                 "last_retried_at": None,
+                "dead_letter_reason": None,
+                "dead_lettered_at": None,
+                "residual": 0.0,
             }
         }
     )
@@ -95,6 +100,9 @@ class PaymentTransaction(BaseModel):
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
     idempotency_key: Optional[str] = None
+    dead_letter_reason: Optional[str] = None
+    dead_lettered_at: Optional[datetime] = None
+    residual: float = 0.0
 
 
 class PaginatedPayments(BaseModel):
@@ -102,3 +110,21 @@ class PaginatedPayments(BaseModel):
     total: int
     page: int = Field(..., ge=1)
     page_size: int = Field(..., ge=1, le=100)
+
+
+class PaymentResponse(BaseModel):
+    data: Optional[Any] = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=lambda: {"correlation_id": None})
+
+
+class PaginatedPaymentResponse(BaseModel):
+    data: Optional[PaginatedPayments] = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=lambda: {"correlation_id": None})
+
+
+class CursorPage(BaseModel):
+    items: List[PaymentTransaction]
+    next_cursor: Optional[str] = None
+    has_more: bool = False
