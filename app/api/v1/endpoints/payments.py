@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.payment import (
+    CursorPage,
+    PaginatedPaymentResponse,
     PaginatedPayments,
+    PaymentResponse,
     PaymentTransaction,
     PaymentTransitionError,
-    ReconciliationReport,
 )
+from app.utils.correlation import get_correlation_id
 from app.repositories.payment_repository import PaymentRepository
 from app.services.contracts.sla_adapter import check_blockchain_payment_status
 from app.services.audit_log import audit_log
@@ -33,6 +36,14 @@ def _evict_stale_nonces() -> None:
     stale = [k for k, ts in _SEEN_NONCES.items() if ts < cutoff]
     for k in stale:
         del _SEEN_NONCES[k]
+
+
+def _envelope(data: Any = None, error: Optional[str] = None) -> dict:
+    return {
+        "data": data,
+        "error": error,
+        "metadata": {"correlation_id": get_correlation_id()},
+    }
 
 
 def _is_replay(nonce: str) -> bool:
@@ -62,10 +73,12 @@ class ReconciliationHistoryResponse(BaseModel):
     history: List[ReconciliationHistoryEntry]
 
 
-@router.get("/", response_model=PaginatedPayments)
+@router.get("/", response_model=PaginatedPaymentResponse)
 def list_payments(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
+    cursor: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
     status: Optional[str] = None,
     type: Optional[str] = None,
     outage_id: Optional[str] = None,
@@ -77,6 +90,21 @@ def list_payments(
     if date_from and date_to and date_from > date_to:
         raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
     repo = PaymentRepository(db)
+
+    if cursor:
+        parts = cursor.split(",", 1)
+        cursor_date = datetime.fromisoformat(parts[0]) if len(parts) > 0 else None
+        cursor_id = parts[1] if len(parts) > 1 else None
+        result = repo.list_cursor(
+            limit=limit,
+            cursor_date=cursor_date,
+            cursor_id=cursor_id,
+            status=status,
+            outage_id=outage_id,
+            type=type,
+        )
+        return _envelope(data=result.model_dump(mode="json"))
+
     items, total = repo.list(
         page=page,
         page_size=page_size,
@@ -86,12 +114,37 @@ def list_payments(
         date_from=date_from,
         date_to=date_to,
     )
-    return PaginatedPayments(items=items, total=total, page=page, page_size=page_size)
+    return _envelope(
+        data=PaginatedPayments(items=items, total=total, page=page, page_size=page_size).model_dump(mode="json")
+    )
 
 
 @router.get("/ping")
 def payments_ping():
-    return {"message": "payments ok"}
+    return _envelope(data={"message": "payments ok"})
+
+
+@router.get("/dead-letter")
+def list_dead_letter_payments(
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    repo = PaymentRepository(db)
+    items = repo.list_dead_letter()
+    return _envelope(data=[i.model_dump(mode="json") for i in items])
+
+
+@router.post("/{transaction_id}/replay")
+def replay_dead_letter_payment(
+    transaction_id: str,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    repo = PaymentRepository(db)
+    payment = repo.replay_dead_letter(transaction_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found or not in dead_letter state")
+    return _envelope(data=payment.model_dump(mode="json"))
 
 
 @router.get("/{transaction_id}/history", response_model=List[Dict[str, Any]])

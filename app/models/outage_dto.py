@@ -54,6 +54,7 @@ class OutageCreate(BaseModel):
     affected_subscribers: Optional[int] = Field(default=None, ge=0)
     assigned_to: Optional[str] = None
     created_by: Optional[str] = None
+    resolved_at: Optional[datetime] = None
     location: Optional[Location] = None
 
     @field_validator("site_name")
