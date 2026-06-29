@@ -114,6 +114,7 @@ class PaymentTransaction(BaseModel):
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
     failure_taxonomy: Optional[str] = None
+    idempotency_key: Optional[str] = None
     dead_letter_reason: Optional[str] = None
     dead_lettered_at: Optional[datetime] = None
     residual: float = 0.0

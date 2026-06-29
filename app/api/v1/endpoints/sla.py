@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
+from typing import Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -10,12 +12,16 @@ from app.models.sla import (
     SLAPerformanceAggregation,
     SLAPreviewRequest,
     SLASeverityConfig,
+    SLAState,
+    SLAStatusResponse,
     SLATrendPoint,
     SLAAnalyticsSnapshot,
 )
 from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
+from app.services.sla_service import compute_device_sla, simulate_threshold_change
+from app.services.audit_log import audit_log
 from app.models import SLAResult
 from app.utils.cache import TTLCache
 from app.utils.analytics_exporter import (
@@ -37,6 +43,58 @@ def _invalidate_analytics_cache() -> None:
     _dashboard_cache.invalidate("dashboard_kpis")
     # Invalidate all trend keys by clearing the entire store
     _dashboard_cache.invalidate_prefix("trends_")
+
+
+@router.get("/status", response_model=SLAStatusResponse)
+def get_sla_status(
+    outage_id: str,
+    severity: str,
+    mttr_minutes: int,
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Get SLA status with consistent response shape (BE-W5-009)."""
+    result = SLACalculator.calculate(
+        outage_id=outage_id,
+        severity=severity,
+        mttr_minutes=mttr_minutes,
+    )
+    return SLAStatusResponse(
+        outage_id=outage_id,
+        state=SLAState(result.status),
+        mttr_minutes=mttr_minutes,
+        threshold_minutes=result.threshold_minutes,
+        time_remaining_minutes=max(0, result.threshold_minutes - mttr_minutes) if result.status == "met" else 0,
+    )
+
+
+class SimulateThresholdRequest(BaseModel):
+    device_id: str
+    period: str
+    proposed_thresholds: Dict[str, float]
+    current_thresholds: Optional[Dict[str, float]] = None
+
+
+@router.post("/simulate")
+def simulate_sla(
+    payload: SimulateThresholdRequest,
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Simulate SLA computation with custom thresholds (BE-W5-010)."""
+    result = simulate_threshold_change(
+        db=db,
+        device_id=payload.device_id,
+        period=payload.period,
+        proposed_thresholds=payload.proposed_thresholds,
+        sla_thresholds=payload.current_thresholds,
+    )
+    audit_log.log("sla_simulation", {
+        "device_id": payload.device_id,
+        "period": payload.period,
+        "proposed_thresholds": payload.proposed_thresholds,
+    })
+    return result
 
 
 @router.get("/calculate", response_model=SLAResult)
