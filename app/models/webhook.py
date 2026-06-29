@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, Text, Integer, ForeignKey, Enum as SAEnum
+from sqlalchemy import Boolean, Column, DateTime, Enum, Enum as SAEnum, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import enum
@@ -19,6 +19,7 @@ class WebhookDeliveryStatus(str, enum.Enum):
     SUCCESS = "success"
     FAILED = "failed"
     RETRYING = "retrying"
+    DEAD_LETTER = "dead_letter"  # BE-086: Dead-letter status for permanently failed deliveries
 
 
 class Webhook(Base):
@@ -33,6 +34,10 @@ class Webhook(Base):
     max_retries = Column(Integer, default=3, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # BE-034: Secret lifecycle metadata
+    last_secret_rotation_at = Column(DateTime, nullable=True)  # When the secret was last rotated
+    secret_version = Column(Integer, default=1, nullable=False)  # Incremented on each rotation
 
     deliveries = relationship("WebhookDelivery", back_populates="webhook", cascade="all, delete-orphan")
 
@@ -51,6 +56,8 @@ class WebhookDelivery(Base):
     response_body = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     delivered_at = Column(DateTime, nullable=True)
+    dead_lettered_at = Column(DateTime, nullable=True)  # BE-086: When delivery was marked as dead-letter
+    signature_version = Column(Integer, default=1, nullable=False)  # BE-087: Explicit signature algorithm version
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

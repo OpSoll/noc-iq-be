@@ -438,13 +438,57 @@ cargo test -- --nocapture
 
 ## 🔒 Security Guidelines
 
-- **Never commit secrets** (API keys, private keys, passwords)
-- Use **environment variables** for sensitive data
-- Follow **principle of least privilege**
-- **Validate all inputs**
-- Use **prepared statements** for database queries
-- **Sanitize user inputs**
-- Keep **dependencies updated**
+**CRITICAL: Security is everyone's responsibility. Follow these guidelines strictly.**
+
+### Secret Management
+- **Never commit secrets** (API keys, private keys, passwords, tokens) to version control
+- Use **environment variables** or a secrets manager (AWS Secrets Manager, HashiCorp Vault) for sensitive data
+- **Never log secrets** or include them in error messages, stack traces, or documentation
+- Use **separate secrets** for each environment (dev/staging/prod)
+- **Rotate secrets** regularly and immediately after any suspected compromise
+
+### Authentication & Authorization
+- Always use **bcrypt** for password hashing (never plaintext or weak hashes)
+- Implement **rate limiting** on auth endpoints to prevent brute force attacks
+- Use **token rotation** for refresh tokens to detect replay attacks
+- Follow the **principle of least privilege** for all API endpoints
+- Validate **role-based access** on every protected endpoint
+
+### Input Validation & Sanitization
+- **Validate all inputs** using Pydantic models with strict type checking
+- Enforce **payload size limits** to prevent abuse (see MAX_REQUEST_BODY_SIZE_BYTES)
+- **Sanitize user inputs** before storage or processing
+- Use **parameterized queries** for database operations (SQLAlchemy handles this)
+- Implement **CORS policies** that restrict allowed origins
+
+### Blockchain & Wallet Security
+- **NEVER expose Stellar secret keys** (starting with 'S') in code, logs, or docs
+- Only use **public keys** (starting with 'G') for wallet linking and balance queries
+- **Separate testnet and mainnet keys** - never reuse across environments
+- Use **hardware security modules (HSM)** or secure enclaves for production key storage
+- Implement **transaction validation** before submission (amount, destination, asset type)
+
+### Webhook Security
+- Always **verify webhook signatures** using HMAC-SHA256 before processing
+- Implement **idempotency** to prevent duplicate webhook processing
+- Use **HTTPS** for all webhook endpoints
+- Validate **webhook payload structure** before acting on events
+
+### Audit Logging (BE-010)
+- **Never log sensitive data** (passwords, tokens, secret keys)
+- Include **actor attribution** (user ID/email) in all audit events
+- Add **correlation IDs** to track requests across services
+- Audit logs are **immutable** - never modify or delete audit entries
+- Redact sensitive fields automatically using the audit service's sanitization logic
+
+### Code Review Security Checklist
+Before approving any PR, verify:
+- [ ] No secrets or credentials in code or comments
+- [ ] All user inputs are validated and sanitized
+- [ ] Auth checks are present on protected endpoints
+- [ ] Error messages don't leak sensitive information
+- [ ] Dependencies are up-to-date and free of known vulnerabilities
+- [ ] Audit logging captures security-relevant events
 
 
 ## 🐛 Reporting Bugs

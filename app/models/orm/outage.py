@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import ARRAY, Column, DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSON
 
 from app.db.base import Base
@@ -14,8 +14,8 @@ class OutageORM(Base):
     site_id = Column(String(255), nullable=True)
     severity = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False, default="open", index=True)
-    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    resolved_at = Column(DateTime, nullable=True)
+    detected_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
     description = Column(Text, nullable=False)
     affected_services = Column(ARRAY(String), nullable=False, default=list)
     affected_subscribers = Column(Integer, nullable=True)
@@ -24,10 +24,10 @@ class OutageORM(Base):
     location = Column(JSON, nullable=True)          # {"latitude": float, "longitude": float}
     sla_status = Column(JSON, nullable=True)        # SLAStatus dict
     mttr_minutes = Column(Integer, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     updated_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=datetime.now(timezone.utc),
+        onupdate=datetime.now(timezone.utc),
     )

@@ -18,7 +18,34 @@ Base URL: `http://localhost:8000` (development) | `https://api.nociq.com` (produ
 
 ---
 
-## Runtime Status
+## Payload Size and Input Guardrails
+
+The API enforces strict limits on request payloads and input data to prevent abuse and ensure system stability:
+
+### Request Body Limits
+- **Maximum request body size**: 10 MB for all endpoints
+- **Error response**: `413 Payload Too Large` with message "Request body too large. Maximum allowed size is 10485760 bytes."
+
+### File Upload Limits
+- **Maximum file upload size**: 10 MB (applies to `/api/v1/outages/import`)
+- **Error response**: `413 Payload Too Large` with message "File exceeds 10 MB limit"
+
+### Data Structure Limits
+- **Bulk operations**: Maximum 1000 items per bulk request
+- **Affected services**: Maximum 100 services per outage
+- **Site name**: Maximum 255 characters
+- **Description**: Maximum 5000 characters
+- **Webhook name**: Maximum 255 characters
+- **Webhook URL**: Maximum 2048 characters
+- **Webhook events**: Maximum 50 events per webhook
+
+### Validation Behavior
+- Oversized inputs are rejected with `400 Bad Request` and descriptive error messages
+- File uploads exceeding size limits fail fast during upload
+- All limits are configurable via environment variables
+- Validation occurs at both middleware and model levels for defense in depth
+
+---
 
 This document mixes current runtime endpoints with some roadmap-style descriptions. For contributor onboarding, use the following status guide first:
 
@@ -56,25 +83,37 @@ Current status:
 ```json
 {
   "email": "user@example.com",
-  "password": "securePassword123"
+  "password": "[REDACTED - See password policy]"
 }
 ```
+
+> **SECURITY NOTE**: Never use plaintext passwords in documentation, logs, or version control. The example above shows the field structure only. Always use strong, unique passwords meeting the policy requirements (min 8 chars, uppercase, lowercase, digit, special char).
 
 **Response (200 OK):**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "access_token": "[JWT TOKEN - Expires in 3600s]",
+  "refresh_token": "[JWT TOKEN - Rotates on use]",
   "token_type": "bearer",
   "expires_in": 3600,
   "user": {
     "id": "user123",
     "email": "user@example.com",
     "role": "engineer",
-    "stellar_wallet": "GXXX..."
+    "stellar_wallet": "[Stellar Public Key - G...]"
   }
 }
 ```
+
+> **SECURITY NOTE**: Tokens shown above are placeholders for documentation purposes only. Real tokens are cryptographically secure, expire according to configured TTL, and should never be logged or shared. Store tokens securely on the client side (e.g., httpOnly cookies or secure storage). Never commit tokens to version control.
+
+**Rate Limiting & Security:**
+- **IP-based Rate Limiting**: Maximum 10 login attempts per IP address within a 5-minute window
+- **Account Lockout**: After 5 consecutive failed login attempts, the account is locked for 15 minutes
+- **Error Responses**:
+  - `429 Too Many Requests`: Rate limit exceeded
+  - `401 Unauthorized`: Invalid credentials or account locked
+- **Lockout Reset**: Successful login resets the failed attempt counter
 
 ### POST `/api/v1/auth/register`
 
@@ -84,11 +123,13 @@ Register new user account.
 ```json
 {
   "email": "newuser@example.com",
-  "password": "securePassword123",
+  "password": "[REDACTED - See password policy]",
   "full_name": "John Doe",
   "role": "engineer"
 }
 ```
+
+> **SECURITY NOTE**: Passwords must meet policy requirements. Never log, store in plaintext, or transmit passwords insecurely. The backend hashes passwords using bcrypt before storage.
 
 **Response (201 Created):**
 ```json
@@ -100,6 +141,40 @@ Register new user account.
   "created_at": "2026-01-16T10:00:00Z"
 }
 ```
+
+### POST `/api/v1/auth/refresh`
+
+Refresh access token using refresh token.
+
+**Request Body:**
+```json
+{
+  "refresh_token": "[REFRESH TOKEN - Rotates on use]"
+}
+```
+
+> **SECURITY NOTE**: Refresh tokens rotate on each use. If a refresh token is reused (replay attack), the entire session family is invalidated for security.
+
+**Response (200 OK):**
+```json
+{
+  "access_token": "[JWT TOKEN - Rotated]",
+  "refresh_token": "[JWT TOKEN - New rotation]",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "user": {
+    "id": "user123",
+    "email": "user@example.com",
+    "role": "engineer",
+    "stellar_wallet": "[Stellar Public Key - G...]"
+  }
+}
+```
+
+**Rate Limiting & Security:**
+- Same IP-based rate limiting as login (10 requests per 5-minute window)
+- Account lockout also applies to refresh attempts for locked accounts
+- Returns `429 Too Many Requests` when rate limit exceeded
 
 ---
 
@@ -506,17 +581,29 @@ Create a new Stellar wallet for a user.
 
 Get wallet details for a user.
 
+**Query Parameters:**
+- `refresh` (optional, default=false): Force a live re-fetch instead of returning cached data
+
 **Response (200 OK):**
 ```json
 {
   "user_id": "user123",
-  "public_key": "GXXX...",
+  "public_key": "[Stellar Public Key - G...]",
   "created_at": "2026-01-16T10:00:00Z",
   "last_updated": "2026-01-16T11:00:00Z",
   "funded": true,
-  "active": true
+  "active": true,
+  "trustline_ready": true,
+  "cached_at": "2026-01-16T11:00:00Z",
+  "cache_status": "fresh"
 }
 ```
+
+> **Cache Behavior (BE-033)**: Wallet endpoints return cache metadata to help frontend make informed polling decisions:
+> - `cache_status`: "fresh" (within TTL), "stale" (exceeded TTL), or "live" (just refreshed)
+> - `cached_at`: Timestamp when data was last cached
+> - Default TTL: 60 seconds (configurable via `WALLET_CACHE_TTL_SECONDS`)
+> - Use `refresh=true` to force a live re-fetch
 
 ### GET `/api/v1/wallets/{address}/balance`
 
@@ -525,7 +612,7 @@ Get balance for a Stellar address.
 **Response (200 OK):**
 ```json
 {
-  "address": "GXXX...",
+  "address": "[Stellar Public Key - G...]",
   "balances": {
     "XLM": {
       "balance": "1000.0000000",
@@ -535,16 +622,13 @@ Get balance for a Stellar address.
       "balance": "5000.0000000",
       "asset_type": "credit_alphanum4",
       "asset_code": "USDC",
-      "asset_issuer": "GBBD..."
-    },
-    "NOCIQ": {
-      "balance": "500.0000000",
-      "asset_type": "credit_alphanum12",
-      "asset_code": "NOCIQ",
-      "asset_issuer": "GNOC..."
+      "asset_issuer": "[USDC Issuer - G...]"
     }
   },
-  "last_updated": "2026-01-16T11:05:00Z"
+  "last_updated": "2026-01-16T11:05:00Z",
+  "cache_status": "fresh",
+  "cache_ttl_seconds": 45,
+  "cached_at": "2026-01-16T11:05:00Z"
 }
 ```
 
