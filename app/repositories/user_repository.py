@@ -25,6 +25,10 @@ class UserRepository:
     def get_by_id(self, user_id: str) -> Optional[UserORM]:
         return self.db.query(UserORM).filter(UserORM.id == user_id).first()
 
+    def get_by_stellar_wallet(self, stellar_wallet: str) -> Optional[UserORM]:
+        """Lookup user by Stellar wallet address using the indexed column."""
+        return self.db.query(UserORM).filter(UserORM.stellar_wallet == stellar_wallet).first()
+
     def create(self, user_id: str, email: str, hashed_password: str, full_name: str, role: Role) -> UserORM:
         user = UserORM(
             id=user_id,

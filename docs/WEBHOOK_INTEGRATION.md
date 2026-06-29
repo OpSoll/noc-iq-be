@@ -272,3 +272,39 @@ Track these metrics:
 - [RFC 5869: HMAC-based Key Derivation Function](https://tools.ietf.org/html/rfc5869)
 - [ISO 8601 DateTime Format](https://en.wikipedia.org/wiki/ISO_8601)
 - [OWASP: Timing Attack Prevention](https://owasp.org/www-community/attacks/Timing_attack)
+
+## Payload Schema Version Matrix (BE-W5-033)
+
+Each outbound webhook payload includes a `schema_version` field. Unknown versions are dead-lettered with an explicit reason before delivery is attempted.
+
+### Supported Versions
+
+| schema_version | Compatible event_types                          | Status  |
+|----------------|-------------------------------------------------|---------|
+| `"1"`          | `sla.violation`, `sla.warning`, `sla.resolved`  | Active  |
+
+### Dead-Letter Reasons
+
+| Reason                        | Description                                                      |
+|-------------------------------|------------------------------------------------------------------|
+| `unknown_schema_version`      | `schema_version` field is missing or not in the supported list   |
+| `incompatible_event_type`     | Event type is not allowed for the given `schema_version`         |
+
+### Consumer Upgrade Path
+
+When a new schema version is introduced:
+
+1. New payloads include `"schema_version": "2"` alongside the old version during transition.
+2. Consumers inspect `schema_version` and apply the matching parsing logic.
+3. Unknown versions should be logged and discarded gracefully on the consumer side.
+
+```python
+def process_webhook(payload: dict) -> None:
+    schema_version = payload.get("schema_version")
+    if schema_version == "1":
+        handle_v1(payload)
+    elif schema_version == "2":
+        handle_v2(payload)
+    else:
+        logger.warning("Unknown schema_version: %s — ignoring payload", schema_version)
+```

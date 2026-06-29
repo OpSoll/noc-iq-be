@@ -143,3 +143,12 @@ class CursorPage(BaseModel):
     items: List[PaymentTransaction]
     next_cursor: Optional[str] = None
     has_more: bool = False
+
+
+class ReconciliationReport(BaseModel):
+    """Summary of a payment reconciliation run."""
+    matched: int = 0
+    delayed: int = 0
+    missing: int = 0
+    divergent: int = 0
+    items: List[Dict[str, Any]] = Field(default_factory=list)

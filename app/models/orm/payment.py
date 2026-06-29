@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
 
 from app.db.base import Base
 
@@ -26,3 +26,8 @@ class PaymentTransactionORM(Base):
     idempotency_key = Column(String(255), nullable=True, unique=True, index=True)
     dead_letter_reason = Column(Text, nullable=True)
     dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_payment_transactions_from_address", "from_address"),
+        Index("ix_payment_transactions_to_address", "to_address"),
+    )
