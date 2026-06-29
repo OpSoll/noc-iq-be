@@ -1,0 +1,74 @@
+name: Ephemeral Smoke Tests
+
+on:
+  push:
+    branches: [main, "judithJn/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    name: Critical Route Smoke Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: nociq
+          POSTGRES_PASSWORD: nociq
+          POSTGRES_DB: nociq_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://nociq:nociq@localhost:5432/nociq_test
+      REDIS_URL: redis://localhost:6379
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/1
+      CELERY_TASK_ALWAYS_EAGER: "true"
+      JWT_SECRET_KEY: ci-test-secret-key-not-for-production
+      API_V1_PREFIX: /api/v1
+      STELLAR_NETWORK: testnet
+      CONTRACT_EXECUTION_MODE: local
+      ALLOWED_ORIGINS: '["http://localhost:3000"]'
+      ENVIRONMENT: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run migrations
+        run: alembic upgrade head
+
+      - name: Run smoke tests
+        run: |
+          python -m pytest tests/test_smoke_critical_routes.py \
+            -v \
+            --tb=short \
+            --timeout=30 \
+            -x

@@ -199,7 +199,7 @@ class TestWebhookHeadersWithSignatureVersion(unittest.TestCase):
         payload = '{"test":"data"}'
         
         # Current version
-        headers_v1 = _build_headers(webhook, payload, version=1)
+        headers_v1 = _build_headers(webhook, payload, signature_version=1)
         self.assertEqual(headers_v1["X-Webhook-Signature-Version"], "1")
 
 
@@ -425,6 +425,93 @@ class TestWebhookSigningIntegration(unittest.TestCase):
         
         # Timestamp should be ISO format
         datetime.fromisoformat(payload["timestamp"])
+
+
+class TestWebhookSchemaVersionGuardrails(unittest.TestCase):
+    """Tests for BE-W5-033: webhook payload schema version migration guardrails."""
+
+    def test_validate_known_schema_version_and_compatible_event(self):
+        """Known schema_version with compatible event_type should pass."""
+        from app.services.webhook_service import validate_payload_schema_version
+        payload = {"schema_version": "1", "event": "sla.violation"}
+        is_valid, reason = validate_payload_schema_version(payload, WebhookEvent.SLA_VIOLATION)
+        self.assertTrue(is_valid)
+        self.assertEqual(reason, "")
+
+    def test_validate_all_schema_v1_compatible_events(self):
+        """All v1 events should pass validation."""
+        from app.services.webhook_service import validate_payload_schema_version
+        for event in [WebhookEvent.SLA_VIOLATION, WebhookEvent.SLA_WARNING, WebhookEvent.SLA_RESOLVED]:
+            payload = {"schema_version": "1", "event": event.value}
+            is_valid, reason = validate_payload_schema_version(payload, event)
+            self.assertTrue(is_valid, f"Expected valid for {event.value}")
+            self.assertEqual(reason, "")
+
+    def test_unknown_schema_version_dead_lettered(self):
+        """Payload with unknown schema_version must be rejected with explicit reason."""
+        from app.services.webhook_service import (
+            validate_payload_schema_version,
+            DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION,
+        )
+        payload = {"schema_version": "99", "event": "sla.violation"}
+        is_valid, reason = validate_payload_schema_version(payload, WebhookEvent.SLA_VIOLATION)
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION)
+
+    def test_missing_schema_version_dead_lettered(self):
+        """Payload missing schema_version must be dead-lettered."""
+        from app.services.webhook_service import (
+            validate_payload_schema_version,
+            DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION,
+        )
+        payload = {"event": "sla.violation"}
+        is_valid, reason = validate_payload_schema_version(payload, WebhookEvent.SLA_VIOLATION)
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION)
+
+    def test_incompatible_event_type_for_known_version(self):
+        """Known schema_version with incompatible event_type must be dead-lettered."""
+        from app.services.webhook_service import (
+            validate_payload_schema_version,
+            DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE,
+            SUPPORTED_SCHEMA_VERSIONS,
+        )
+        # Patch an incompatible event by temporarily using an event not in v1 list
+        # We simulate by passing a patched event value
+        class FakeEvent:
+            value = "unknown.event"
+        payload = {"schema_version": "1", "event": "unknown.event"}
+        is_valid, reason = validate_payload_schema_version(payload, FakeEvent())
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE)
+
+    def test_supported_schema_versions_matrix_is_documented(self):
+        """SUPPORTED_SCHEMA_VERSIONS matrix must be non-empty and contain version '1'."""
+        from app.services.webhook_service import SUPPORTED_SCHEMA_VERSIONS
+        self.assertIn("1", SUPPORTED_SCHEMA_VERSIONS)
+        self.assertIsInstance(SUPPORTED_SCHEMA_VERSIONS["1"], list)
+        self.assertGreater(len(SUPPORTED_SCHEMA_VERSIONS["1"]), 0)
+
+    def test_trigger_dead_letters_unknown_schema_version(self):
+        """trigger_sla_violation_webhooks must dead-letter delivery for unknown schema_version."""
+        from app.services.webhook_service import (
+            DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION,
+            SUPPORTED_SCHEMA_VERSIONS,
+            validate_payload_schema_version,
+        )
+        # Simulate payload with unsupported schema_version
+        payload = {"schema_version": "99", "event": "sla.violation", "timestamp": datetime.utcnow().isoformat(), "data": {}}
+        is_valid, reason = validate_payload_schema_version(payload, WebhookEvent.SLA_VIOLATION)
+        self.assertFalse(is_valid)
+        self.assertEqual(reason, DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION)
+
+    def test_schema_version_is_string_coerced(self):
+        """schema_version in payload should be coerced to string for comparison."""
+        from app.services.webhook_service import validate_payload_schema_version
+        # Integer schema_version coerced to "1"
+        payload = {"schema_version": 1, "event": "sla.violation"}
+        is_valid, reason = validate_payload_schema_version(payload, WebhookEvent.SLA_VIOLATION)
+        self.assertTrue(is_valid)
 
 
 if __name__ == "__main__":

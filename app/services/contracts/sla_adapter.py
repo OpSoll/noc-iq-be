@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import hashlib
+import httpx
+import logging
 from dataclasses import dataclass
 from datetime import datetime, UTC
+from enum import Enum
 from typing import Any, Callable, Literal, Optional
 
 from app.core.config import settings
@@ -16,8 +19,11 @@ from app.models.payment import RetryClass
 from app.services.sla import SLACalculator
 from app.utils.cache import CacheResult, TTLCache
 
-from app.core.config import Settings, get_settings
-from app.services.contracts.translation import AssetValidationError, validate_asset_config
+from app.core.config import Settings, settings as _app_settings
+
+
+def get_settings() -> Settings:
+    return _app_settings
 
 def check_blockchain_payment_status(transaction_id: str) -> Optional[dict[str, Any]]:
     return None
