@@ -5,6 +5,20 @@ from typing import Any, Dict, FrozenSet, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class RetryClass(str, Enum):
+    network = "network"
+    rate_limit = "rate_limit"
+    semantic = "semantic"
+    unknown = "unknown"
+
+
+class ReconciliationCategory(str, Enum):
+    matched = "matched"
+    delayed = "delayed"
+    missing = "missing"
+    divergent = "divergent"
+
+
 class PaymentStatus(str, Enum):
     pending = "pending"
     confirmed = "confirmed"
@@ -99,6 +113,7 @@ class PaymentTransaction(BaseModel):
     confirmed_at: Optional[datetime] = None
     retry_count: int = 0
     last_retried_at: Optional[datetime] = None
+    failure_taxonomy: Optional[str] = None
     idempotency_key: Optional[str] = None
     dead_letter_reason: Optional[str] = None
     dead_lettered_at: Optional[datetime] = None

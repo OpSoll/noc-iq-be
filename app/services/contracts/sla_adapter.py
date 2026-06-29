@@ -5,16 +5,36 @@
 
 from __future__ import annotations
 
+from typing import Any, Optional
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from typing import Any, Callable, Literal, Optional
 
 from app.core.config import settings
+from app.models.payment import RetryClass
 from app.services.sla import SLACalculator
 from app.utils.cache import CacheResult, TTLCache
 
 from app.core.config import Settings, StellarNetwork, get_settings
 
+def check_blockchain_payment_status(transaction_id: str) -> Optional[dict[str, Any]]:
+    return None
+
+
+def classify_error(error: Exception) -> RetryClass:
+    error_str = str(error).lower()
+    if any(kw in error_str for kw in ("timeout", "connection", "dns", "reset")):
+        return RetryClass.network
+    if any(kw in error_str for kw in ("rate limit", "429", "too many")):
+        return RetryClass.rate_limit
+    if any(kw in error_str for kw in ("invalid", "bad request", "unauthorized", "forbidden", "not found")):
+        return RetryClass.semantic
+    return RetryClass.unknown
+
+
+class SLAContractAdapter:
+    """
+    Backend-facing contract adapter.
 logger = logging.getLogger(__name__)
 
 

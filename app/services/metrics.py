@@ -145,6 +145,8 @@ def record_histogram(name: str, value: float, tags: Dict[str, str] = None):
     metrics.record_histogram(name, value, tags)
 
 
+def record_retry_class_distribution(retry_class: str, tags: Dict[str, str] = None):
+    metrics.increment_counter("retry_class_distribution", tags={**(tags or {}), "retry_class": retry_class})
 def set_dead_letter_gauge(count: int):
     """Set the dead-letter payment queue gauge metric."""
     metrics.set_gauge("dead_letter_payments", float(count))

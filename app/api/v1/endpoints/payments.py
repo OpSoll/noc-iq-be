@@ -20,6 +20,7 @@ from app.models.payment import (
 )
 from app.utils.correlation import get_correlation_id
 from app.repositories.payment_repository import PaymentRepository
+from app.services.contracts.sla_adapter import check_blockchain_payment_status
 from app.services.audit_log import audit_log
 from app.core.security import get_current_user, require_admin, require_engineer
 
@@ -189,6 +190,25 @@ def get_payment(transaction_id: str, current_user=Depends(require_engineer), db:
 
 class ReconcileRequest(BaseModel):
     status: str
+
+
+@router.post("/reconcile")
+def reconcile_all_payments(
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    repo = PaymentRepository(db)
+    items, _ = repo.list(status="pending", page_size=1000)
+    expected_statuses = {}
+    for p in items:
+        bc_status = check_blockchain_payment_status(p.id)
+        if bc_status:
+            expected_statuses[p.id] = bc_status.get("status", "confirmed")
+        else:
+            expected_statuses[p.id] = "confirmed"
+    reports = repo.reconcile_all(expected_statuses)
+    audit_log.log("payments_reconciled", {"count": len(reports), "initiated_by": getattr(current_user, 'email', 'unknown')})
+    return reports
 
 
 @router.post("/{transaction_id}/reconcile", response_model=PaymentTransaction)
