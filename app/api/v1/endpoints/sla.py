@@ -40,9 +40,9 @@ _dashboard_cache: TTLCache = TTLCache(ttl_seconds=30)
 
 def _invalidate_analytics_cache() -> None:
     """Invalidate all analytics cache keys after a mutating write (#157)."""
-    _dashboard_cache.invalidate("dashboard_kpis")
-    # Invalidate all trend keys by clearing the entire store
+    _dashboard_cache.invalidate_prefix("dashboard_kpis_")
     _dashboard_cache.invalidate_prefix("trends_")
+    _dashboard_cache.invalidate_prefix("perf_agg_")
 
 
 @router.get("/status", response_model=SLAStatusResponse)
@@ -149,6 +149,7 @@ def update_sla_config(severity: str, payload: SLAConfigUpdateRequest, current_us
 
 @router.get("/analytics/dashboard", response_model=SLADashboardKPI)
 def get_sla_dashboard_kpis(
+    response: Response,
     severity: str | None = Query(default=None),
     site_id: str | None = Query(default=None),
     site: str | None = Query(default=None, description="Alias for site_id"),
@@ -157,17 +158,22 @@ def get_sla_dashboard_kpis(
 ):
     resolved_site = site_id or site
     cache_key = f"dashboard_kpis_{severity}_{resolved_site}"
-    cached = _dashboard_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    cached = _dashboard_cache.get_with_meta(cache_key)
+    if cached is not None and not cached.is_expired:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["X-Cache-Age"] = str(round(cached.age_seconds, 2))
+        return cached.value
     repo = SLARepository(db)
     result = repo.aggregate_dashboard_kpis(severity=severity, site_id=resolved_site)
     _dashboard_cache.set(cache_key, result)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Cache-Age"] = "0.0"
     return result
 
 
 @router.get("/analytics/trends", response_model=list[SLATrendPoint])
 def get_sla_trends(
+    response: Response,
     days: int = Query(default=7, ge=1, le=90),
     bucket: str = Query(default="day", description="Bucket interval: day, week, month"),
     tz: str = Query(default="UTC", description="IANA timezone name, e.g. America/New_York"),
@@ -182,9 +188,11 @@ def get_sla_trends(
 
     resolved_site = site_id or site
     cache_key = f"trends_{days}_{bucket}_{tz}_{severity}_{resolved_site}"
-    cached = _dashboard_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    cached = _dashboard_cache.get_with_meta(cache_key)
+    if cached is not None and not cached.is_expired:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["X-Cache-Age"] = str(round(cached.age_seconds, 2))
+        return cached.value
 
     repo = SLARepository(db)
     try:
@@ -193,11 +201,14 @@ def get_sla_trends(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _dashboard_cache.set(cache_key, result)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Cache-Age"] = "0.0"
     return result
 
 
 @router.get("/performance/aggregation", response_model=SLAPerformanceAggregation)
 def aggregate_sla_performance(
+    response: Response,
     start_date: datetime | None = Query(default=None),
     end_date: datetime | None = Query(default=None),
     severity: str | None = Query(default=None),
@@ -216,8 +227,19 @@ def aggregate_sla_performance(
     if start_date and end_date and start_date > end_date:
         raise HTTPException(status_code=400, detail="start_date cannot be after end_date")
 
+    cache_key = f"perf_agg_{start_date}_{end_date}_{severity}_{resolved_site}"
+    cached = _dashboard_cache.get_with_meta(cache_key)
+    if cached is not None and not cached.is_expired:
+        response.headers["X-Cache"] = "HIT"
+        response.headers["X-Cache-Age"] = str(round(cached.age_seconds, 2))
+        return cached.value
+
     repo = SLARepository(db)
-    return repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=resolved_site)
+    result = repo.aggregate_performance(start_date=start_date, end_date=end_date, severity=severity, site_id=resolved_site)
+    _dashboard_cache.set(cache_key, result)
+    response.headers["X-Cache"] = "MISS"
+    response.headers["X-Cache-Age"] = "0.0"
+    return result
 
 
 @router.post("/analytics/snapshot", response_model=SLAAnalyticsSnapshot, status_code=201)
