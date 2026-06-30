@@ -32,8 +32,46 @@ SUPPORTED_SCHEMA_VERSIONS: dict[str, list[str]] = {
     "1": ["sla.violation", "sla.warning", "sla.resolved"],
 }
 
+# HTTP status code classification for webhook delivery behavior
+# Terminal: delivery should not be retried (success or permanent failure)
+# Retryable: delivery should be retried with exponential backoff
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504}  # Server errors
+TERMINAL_STATUS_CODES = {
+    # 2xx: Success
+    200, 201, 202, 203, 204, 205, 206, 207, 208, 226,
+    # 3xx: Redirection (webhook endpoints should not redirect)
+    300, 301, 302, 303, 304, 305, 306, 307, 308,
+    # 4xx: Client errors (permanent, retrying won't help)
+    400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451,
+}
+
 DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION = "unknown_schema_version"
 DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE = "incompatible_event_type"
+
+
+def classify_http_status(status_code: int) -> str:
+    """Classify HTTP status code as 'terminal' or 'retryable'.
+    
+    Args:
+        status_code: HTTP status code from webhook response
+        
+    Returns:
+        'terminal' for 2xx/3xx/4xx (success or permanent failure)
+        'retryable' for 5xx (transient server errors)
+        
+    Raises:
+        ValueError: If status code is not in either classification set
+    """
+    if status_code in RETRYABLE_STATUS_CODES:
+        return "retryable"
+    elif status_code in TERMINAL_STATUS_CODES:
+        return "terminal"
+    else:
+        # Unknown status codes (e.g., 599, custom codes) are treated as retryable
+        # to avoid dead-lettering on non-standard responses
+        if 500 <= status_code < 600:
+            return "retryable"
+        return "terminal"
 
 
 def validate_payload_schema_version(
@@ -184,10 +222,20 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         delivery.response_status_code = response.status_code
         delivery.response_body = response.text[:4000]
 
-        if response.is_success:
-            return True
+        # Use explicit status code classification
+        classification = classify_http_status(response.status_code)
+        
+        if classification == "terminal":
+            if 200 <= response.status_code < 300:
+                # Success - no retry needed
+                return True
+            else:
+                # Permanent failure (3xx/4xx) - should not retry
+                delivery.error_message = f"Terminal failure: HTTP {response.status_code}"
+                return False
         else:
-            delivery.error_message = f"Non-success status: {response.status_code}"
+            # Retryable (5xx) - will be retried by dispatch_delivery
+            delivery.error_message = f"Retryable failure: HTTP {response.status_code}"
             return False
 
     except httpx.TimeoutException as exc:
@@ -223,6 +271,23 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
             delivery.id, delivery.attempt_count, webhook.id,
         )
     else:
+        # Check if failure is terminal (should not retry)
+        if delivery.response_status_code:
+            classification = classify_http_status(delivery.response_status_code)
+            if classification == "terminal":
+                # Terminal failure - dead-letter immediately
+                delivery.status = WebhookDeliveryStatus.DEAD_LETTER
+                delivery.dead_lettered_at = datetime.utcnow()
+                delivery.next_retry_at = None
+                logger.error(
+                    "Webhook delivery %s failed with terminal status %d. Dead-lettered immediately.",
+                    delivery.id, delivery.response_status_code,
+                )
+                delivery.updated_at = datetime.utcnow()
+                db.commit()
+                return
+        
+        # Retryable failure - schedule retry
         retry_index = delivery.attempt_count - 1
         max_retries = webhook.max_retries or 3
         retry_delays = _get_retry_delays()
