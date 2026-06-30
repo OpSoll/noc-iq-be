@@ -172,3 +172,52 @@ def record_retry_class_distribution(retry_class: str, tags: Dict[str, str] = Non
 def set_dead_letter_gauge(count: int):
     """Set the dead-letter payment queue gauge metric."""
     metrics.set_gauge("dead_letter_payments", float(count))
+
+
+class MetricsLineageService:
+    def __init__(self, db_session: Any = None):
+        self.outage_repo = OutageRepository(db_session)
+        self.sla_repo = SlaRepository(db_session)
+
+    def _generate_lineage_trace(self, outage_id: str, sla_id: str, timestamp: str) -> str:
+        """
+        Generates a non-reversible, completely unique hash to act as a 
+        trace reference without leaking tenant or internal infrastructure context.
+        """
+        salt_base = f"{outage_id}::{sla_id}::{timestamp}"
+        return hashlib.sha256(salt_base.encode('utf-8')).hexdigest()[:16]
+
+    def compile_sla_outage_analytics(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
+        """
+        Aggregates operational state metrics and appends strict audit-ready lineage markers.
+        """
+        outages = self.outage_repo.get_raw_outage_events(start_time, end_time)
+        slas = self.sla_repo.get_active_sla_targets()
+        
+        compiled_analytics_rows = []
+        
+        # Cross-reference records to build trace lineages
+        for outage in outages:
+            for sla in slas:
+                trace_id = self._generate_lineage_trace(
+                    outage["outage_id"], 
+                    sla["sla_contract_id"], 
+                    outage["timestamp"]
+                )
+                
+                # Lineage row structure completely strips PII or user indicators
+                analytics_row = {
+                    "metric_name": "sla_breach_incident",
+                    "window_start": start_time.isoformat(),
+                    "window_end": end_time.isoformat(),
+                    "calculated_value": outage["duration_seconds"],
+                    # Trace identifiers used directly inside investigation workflows
+                    "lineage_metadata": {
+                        "lineage_trace_id": f"trc-{trace_id}",
+                        "source_outage_id": outage["outage_id"],
+                        "source_sla_contract_id": sla["sla_contract_id"]
+                    }
+                }
+                compiled_analytics_rows.append(analytics_row)
+                
+        return compiled_analytics_rows

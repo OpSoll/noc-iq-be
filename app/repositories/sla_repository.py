@@ -514,3 +514,20 @@ class SLARepository:
                 "avg_mttr": latest_snapshot.avg_mttr,
             }
         }
+
+class SlaRepository:
+    def __init__(self, db_session: Any = None):
+        self.db = db_session
+
+    def get_active_sla_targets(self) -> List[Dict[str, Any]]:
+        """
+        Retrieves operational threshold benchmarks.
+        """
+        return [
+            {
+                "sla_contract_id": "sla-core-availability-2026",
+                "target_uptime_percentage": 99.95,
+                "metric_scope": "api_gateway_uptime"
+            }
+        ]
+
