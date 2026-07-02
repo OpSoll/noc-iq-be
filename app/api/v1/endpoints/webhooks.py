@@ -1,7 +1,7 @@
 import json
 import secrets
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -176,6 +176,14 @@ class WebhookReplayRequest(BaseModel):
 class WebhookReplayResponse(BaseModel):
     replayed_count: int
     message: str
+
+
+class WebhookMetadataResponse(BaseModel):
+    """Webhook delivery policy metadata."""
+    retryable_status_codes: List[int]
+    terminal_status_codes: List[int]
+    retry_policy: Dict[str, Any]
+    schema_version: str
 
 
 # --------------------------------------------------------------------------- #
@@ -515,4 +523,25 @@ def replay_deliveries_by_context(
     return WebhookReplayResponse(
         replayed_count=replayed_count,
         message=f"Replayed {replayed_count} deliveries for event {event.value}"
+    )
+
+
+@router.get("/metadata", response_model=WebhookMetadataResponse)
+def get_webhook_metadata():
+    """Get webhook delivery policy metadata including retryable/terminal status codes."""
+    from app.services.webhook_service import (
+        RETRYABLE_STATUS_CODES,
+        TERMINAL_STATUS_CODES,
+        _get_retry_delays,
+    )
+    
+    return WebhookMetadataResponse(
+        retryable_status_codes=sorted(RETRYABLE_STATUS_CODES),
+        terminal_status_codes=sorted(TERMINAL_STATUS_CODES),
+        retry_policy={
+            "max_retries": 3,
+            "base_delays_seconds": _get_retry_delays(),
+            "max_delay_seconds": settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS,
+        },
+        schema_version=WEBHOOK_SCHEMA_VERSION,
     )
