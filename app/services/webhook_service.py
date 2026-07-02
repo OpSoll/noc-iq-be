@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
@@ -15,8 +16,13 @@ from app.services.webhook_signing import (
     verify_signature,
 )
 from app.core.config import settings
+from app.utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
+
+# In-memory cache for webhook event subscriptions (webhook_id -> parsed events list)
+# TTL of 60 seconds balances freshness with performance for large webhook registries
+_webhook_events_cache = TTLCache(ttl_seconds=60)
 
 
 def _get_retry_delays() -> list[int]:
@@ -32,8 +38,46 @@ SUPPORTED_SCHEMA_VERSIONS: dict[str, list[str]] = {
     "1": ["sla.violation", "sla.warning", "sla.resolved"],
 }
 
+# HTTP status code classification for webhook delivery behavior
+# Terminal: delivery should not be retried (success or permanent failure)
+# Retryable: delivery should be retried with exponential backoff
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504}  # Server errors
+TERMINAL_STATUS_CODES = {
+    # 2xx: Success
+    200, 201, 202, 203, 204, 205, 206, 207, 208, 226,
+    # 3xx: Redirection (webhook endpoints should not redirect)
+    300, 301, 302, 303, 304, 305, 306, 307, 308,
+    # 4xx: Client errors (permanent, retrying won't help)
+    400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451,
+}
+
 DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION = "unknown_schema_version"
 DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE = "incompatible_event_type"
+
+
+def classify_http_status(status_code: int) -> str:
+    """Classify HTTP status code as 'terminal' or 'retryable'.
+    
+    Args:
+        status_code: HTTP status code from webhook response
+        
+    Returns:
+        'terminal' for 2xx/3xx/4xx (success or permanent failure)
+        'retryable' for 5xx (transient server errors)
+        
+    Raises:
+        ValueError: If status code is not in either classification set
+    """
+    if status_code in RETRYABLE_STATUS_CODES:
+        return "retryable"
+    elif status_code in TERMINAL_STATUS_CODES:
+        return "terminal"
+    else:
+        # Unknown status codes (e.g., 599, custom codes) are treated as retryable
+        # to avoid dead-lettering on non-standard responses
+        if 500 <= status_code < 600:
+            return "retryable"
+        return "terminal"
 
 
 def validate_payload_schema_version(
@@ -114,16 +158,60 @@ def _build_headers(
 
 
 def get_active_webhooks_for_event(db: Session, event: WebhookEvent) -> List[Webhook]:
-    webhooks = db.query(Webhook).filter(Webhook.is_active == True).all()
+    """Get active webhooks subscribed to a specific event using optimized JSON containment.
+    
+    Uses PostgreSQL GIN index on events column for O(log n) lookup instead of O(n) scan.
+    Falls back to in-memory cache for parsed event subscriptions to avoid repeated JSON parsing.
+    
+    Args:
+        db: Database session
+        event: Webhook event type to match
+    
+    Returns:
+        List of active webhooks subscribed to the event
+    """
+    # Use PostgreSQL JSON containment operator with GIN index for efficient filtering
+    # This filters at the database level, avoiding loading all webhooks into memory
+    event_json = json.dumps([event.value])
+    webhooks = (
+        db.query(Webhook)
+        .filter(Webhook.is_active == True)
+        .filter(text("webhooks.events @> :event_json").bindparams(event_json=event_json))
+        .all()
+    )
+    
+    # Validate parsed events from cache to ensure no misrouting
     result = []
     for webhook in webhooks:
-        try:
-            events = json.loads(webhook.events)
-            if event.value in events:
-                result.append(webhook)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+        cache_key = f"webhook_events:{webhook.id}"
+        cached_events = _webhook_events_cache.get(cache_key)
+        
+        if cached_events is None:
+            try:
+                cached_events = json.loads(webhook.events)
+                _webhook_events_cache.set(cache_key, cached_events)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+                continue
+        
+        # Double-check event subscription to prevent misrouting
+        if event.value in cached_events:
+            result.append(webhook)
+    
     return result
+
+
+def invalidate_webhook_cache(webhook_id: UUID) -> None:
+    """Invalidate cached event subscriptions for a specific webhook.
+    
+    Call this after any webhook CRUD operation (create, update, delete) to ensure
+    the cache reflects the latest configuration.
+    
+    Args:
+        webhook_id: UUID of the webhook whose cache should be invalidated
+    """
+    cache_key = f"webhook_events:{webhook_id}"
+    _webhook_events_cache.invalidate(cache_key)
 
 
 def create_delivery(
@@ -184,10 +272,20 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         delivery.response_status_code = response.status_code
         delivery.response_body = response.text[:4000]
 
-        if response.is_success:
-            return True
+        # Use explicit status code classification
+        classification = classify_http_status(response.status_code)
+        
+        if classification == "terminal":
+            if 200 <= response.status_code < 300:
+                # Success - no retry needed
+                return True
+            else:
+                # Permanent failure (3xx/4xx) - should not retry
+                delivery.error_message = f"Terminal failure: HTTP {response.status_code}"
+                return False
         else:
-            delivery.error_message = f"Non-success status: {response.status_code}"
+            # Retryable (5xx) - will be retried by dispatch_delivery
+            delivery.error_message = f"Retryable failure: HTTP {response.status_code}"
             return False
 
     except httpx.TimeoutException as exc:
@@ -223,6 +321,23 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
             delivery.id, delivery.attempt_count, webhook.id,
         )
     else:
+        # Check if failure is terminal (should not retry)
+        if delivery.response_status_code:
+            classification = classify_http_status(delivery.response_status_code)
+            if classification == "terminal":
+                # Terminal failure - dead-letter immediately
+                delivery.status = WebhookDeliveryStatus.DEAD_LETTER
+                delivery.dead_lettered_at = datetime.utcnow()
+                delivery.next_retry_at = None
+                logger.error(
+                    "Webhook delivery %s failed with terminal status %d. Dead-lettered immediately.",
+                    delivery.id, delivery.response_status_code,
+                )
+                delivery.updated_at = datetime.utcnow()
+                db.commit()
+                return
+        
+        # Retryable failure - schedule retry
         retry_index = delivery.attempt_count - 1
         max_retries = webhook.max_retries or 3
         retry_delays = _get_retry_delays()

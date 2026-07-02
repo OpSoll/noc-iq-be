@@ -174,50 +174,48 @@ def set_dead_letter_gauge(count: int):
     metrics.set_gauge("dead_letter_payments", float(count))
 
 
-class MetricsLineageService:
-    def __init__(self, db_session: Any = None):
-        self.outage_repo = OutageRepository(db_session)
-        self.sla_repo = SlaRepository(db_session)
+class ScorecardMetrics(BaseModel):
+    slo_success_rate: float = Field(..., ge=0.0, le=1.0, description="Percentage of SLO targets met (0.0 to 1.0)")
+    test_pass_rate: float = Field(..., ge=0.0, le=1.0, description="Unit/Integration test pass rate (0.0 to 1.0)")
+    open_security_vulns: int = Field(..., ge=0, description="Count of blocking security vulnerabilities")
+    incident_count: int = Field(..., ge=0, description="Number of active P1/P2 production incidents")
 
-    def _generate_lineage_trace(self, outage_id: str, sla_id: str, timestamp: str) -> str:
+class ReliabilityScorecardService:
+    @staticmethod
+    def calculate_reliability_index(metrics: ScorecardMetrics) -> Dict[str, Any]:
         """
-        Generates a non-reversible, completely unique hash to act as a 
-        trace reference without leaking tenant or internal infrastructure context.
+        Computes a consolidated reliability score normalized between 0 and 100.
+        Weight Distribution: SLO Health (40%), Test Pass Rate (30%), Security (20%), Incident Signals (10%)
         """
-        salt_base = f"{outage_id}::{sla_id}::{timestamp}"
-        return hashlib.sha256(salt_base.encode('utf-8')).hexdigest()[:16]
-
-    def compile_sla_outage_analytics(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        """
-        Aggregates operational state metrics and appends strict audit-ready lineage markers.
-        """
-        outages = self.outage_repo.get_raw_outage_events(start_time, end_time)
-        slas = self.sla_repo.get_active_sla_targets()
+        # 1. Base components calculations
+        slo_score = metrics.slo_success_rate * 100
+        test_score = metrics.test_pass_rate * 100
         
-        compiled_analytics_rows = []
+        # Deduct 25 points per open vulnerability, capped at 0
+        security_score = max(0, 100 - (metrics.open_security_vulns * 25))
         
-        # Cross-reference records to build trace lineages
-        for outage in outages:
-            for sla in slas:
-                trace_id = self._generate_lineage_trace(
-                    outage["outage_id"], 
-                    sla["sla_contract_id"], 
-                    outage["timestamp"]
-                )
-                
-                # Lineage row structure completely strips PII or user indicators
-                analytics_row = {
-                    "metric_name": "sla_breach_incident",
-                    "window_start": start_time.isoformat(),
-                    "window_end": end_time.isoformat(),
-                    "calculated_value": outage["duration_seconds"],
-                    # Trace identifiers used directly inside investigation workflows
-                    "lineage_metadata": {
-                        "lineage_trace_id": f"trc-{trace_id}",
-                        "source_outage_id": outage["outage_id"],
-                        "source_sla_contract_id": sla["sla_contract_id"]
-                    }
-                }
-                compiled_analytics_rows.append(analytics_row)
-                
-        return compiled_analytics_rows
+        # Deduct 50 points per active incident, capped at 0
+        incident_score = max(0, 100 - (metrics.incident_count * 50))
+        
+        # 2. Weighted Aggregation Formula
+        reliability_index = (
+            (slo_score * 0.40) +
+            (test_score * 0.30) +
+            (security_score * 0.20) +
+            (incident_score * 0.10)
+        )
+        
+        # 3. Governance Evaluation Rule (Threshold: 85.0 Index AND 0 open critical vulnerabilities)
+        decision = "GO" if reliability_index >= 85.0 and metrics.open_security_vulns == 0 else "NO-GO"
+        
+        return {
+            "reliability_index": round(reliability_index, 2),
+            "status": decision,
+            "breakdown": {
+                "slo_component": round(slo_score, 2),
+                "test_component": round(test_score, 2),
+                "security_component": security_score,
+                "incident_component": incident_score
+            },
+            "metrics_evaluated": metrics.dict()
+        }

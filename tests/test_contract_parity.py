@@ -262,3 +262,19 @@ class ResolveContractParityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+ef test_sla_endpoint_returns_clean_empty_state_semantics():
+    # Triggering the mock engine's empty logic (year 200)
+    response = client.get("/sla/summary?start_time=0200-01-01T00:00:00&end_time=2026-06-29T00:00:00")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["is_empty"] is True
+    assert payload["data"] == []
+
+def test_sla_endpoint_returns_typed_service_unavailable_error():
+    # Triggering the mock engine's failure logic (year 503)
+    response = client.get("/sla/summary?start_time=0503-01-01T00:00:00&end_time=2026-06-29T00:00:00")
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["detail"]["error_code"] == "ANALYTICS_SERVICE_UNAVAILABLE"

@@ -189,3 +189,28 @@ def export_analytics_summary(
         agg_writer.writerow(summary["aggregation"])
     
     return buffer.getvalue()
+
+
+    class AnalyticsExporter:
+    SCHEMA_VERSION = "1.2.0"
+    
+    # Task Requirement: Strict Field Dictionary Metadata
+    FIELD_METADATA = {
+        "export_timestamp": {"type": "ISO8601_DATETIME", "description": "UTC extraction timestamp"},
+        "status_scope": {"type": "STRING", "description": "The processing state category of the transaction"},
+        "transaction_count": {"type": "INTEGER", "description": "Total count of records processed within the window"},
+        "aggregate_volume": {"type": "DECIMAL", "description": "Summed financial volume of transactions"}
+    }
+
+    def generate_stabilized_export(self, payload_data: List[Dict[str, Any]]) -> str:
+        """
+        Wraps row-level records within a formalized, self-documenting export container schema.
+        """
+        export_envelope = {
+            "metadata": {
+                "schema_version": self.SCHEMA_VERSION,
+                "fields": self.FIELD_METADATA
+            },
+            "data": payload_data
+        }
+        return json.dumps(export_envelope, indent=2)

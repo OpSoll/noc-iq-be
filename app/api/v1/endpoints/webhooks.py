@@ -1,7 +1,7 @@
 import json
 import secrets
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION
+from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION, invalidate_webhook_cache
 from app.core.security import require_admin
 from app.core.config import settings
 
@@ -178,6 +178,14 @@ class WebhookReplayResponse(BaseModel):
     message: str
 
 
+class WebhookMetadataResponse(BaseModel):
+    """Webhook delivery policy metadata."""
+    retryable_status_codes: List[int]
+    terminal_status_codes: List[int]
+    retry_policy: Dict[str, Any]
+    schema_version: str
+
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
@@ -242,6 +250,7 @@ def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), 
     db.add(webhook)
     db.commit()
     db.refresh(webhook)
+    # Cache is pre-warmed on first access, no invalidation needed for create
     return _serialize_webhook(webhook)
 
 
@@ -288,12 +297,17 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depend
 
     db.commit()
     db.refresh(webhook)
+    # Invalidate cache when webhook events or active status changes
+    if payload.events is not None or payload.is_active is not None:
+        invalidate_webhook_cache(webhook_id)
     return _serialize_webhook(webhook)
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
+    # Invalidate cache before deletion
+    invalidate_webhook_cache(webhook_id)
     db.delete(webhook)
     db.commit()
 
@@ -509,4 +523,25 @@ def replay_deliveries_by_context(
     return WebhookReplayResponse(
         replayed_count=replayed_count,
         message=f"Replayed {replayed_count} deliveries for event {event.value}"
+    )
+
+
+@router.get("/metadata", response_model=WebhookMetadataResponse)
+def get_webhook_metadata():
+    """Get webhook delivery policy metadata including retryable/terminal status codes."""
+    from app.services.webhook_service import (
+        RETRYABLE_STATUS_CODES,
+        TERMINAL_STATUS_CODES,
+        _get_retry_delays,
+    )
+    
+    return WebhookMetadataResponse(
+        retryable_status_codes=sorted(RETRYABLE_STATUS_CODES),
+        terminal_status_codes=sorted(TERMINAL_STATUS_CODES),
+        retry_policy={
+            "max_retries": 3,
+            "base_delays_seconds": _get_retry_delays(),
+            "max_delay_seconds": settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS,
+        },
+        schema_version=WEBHOOK_SCHEMA_VERSION,
     )
