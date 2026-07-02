@@ -349,3 +349,48 @@ def enqueue_bulk_sla_computation(db, device_ids: List[str], period: str, correla
     db.commit()
     db.refresh(job)
     return job
+
+
+def reconcile_payment_analytics(db_session, analytics_client) -> Tuple[bool, List[Dict[str, Any]]]:
+    """
+    SLA task executing a sliding window audit checkpoint.
+    Applies a 15-minute cool-down buffer to clear transient ingestion lag.
+    """
+    # 1. Establish the consistency time bounds
+    end_window = datetime.utcnow() - timedelta(minutes=15)
+    start_window = end_window - timedelta(hours=1)
+    
+    tx_repo = PaymentRepository(db_session)
+    analytics_exporter = AnalyticsExporter(analytics_client)
+    
+    # 2. Extract statistics matrices
+    tx_data = {row["status"]: row for row in tx_repo.get_transactional_summary(start_window, end_window)}
+    analytics_data = {row["status"]: row for row in analytics_exporter.get_aggregated_analytics_summary(start_window, end_window)}
+    
+    mismatches = []
+    
+    # 3. Map comparison metrics
+    for status, tx_stats in tx_data.items():
+        an_stats = analytics_data.get(status, {"count": 0, "total_amount": 0.0})
+        
+        count_delta = abs(tx_stats["count"] - an_stats["count"])
+        amount_delta = abs(tx_stats["total_amount"] - an_stats["total_amount"])
+        
+        # Flag structural mismatches instantly
+        if count_delta > 0 or amount_delta > 0.01:
+            anomaly = {
+                "status": status,
+                "window": f"{start_window.isoformat()}Z -> {end_window.isoformat()}Z",
+                "transactional_truth": tx_stats,
+                "analytical_snapshot": an_stats,
+                "discrepancy": {"count_drift": count_delta, "amount_drift": amount_delta}
+            }
+            mismatches.append(anomaly)
+
+    if mismatches:
+        logger.critical(f"RECONCILIATION FAULT DETECTED: {mismatches}")
+        # trigger_incident_alert_webhook(mismatches)
+        return False, mismatches
+
+    logger.info("Reconciliation complete. Data sources are completely synced.")
+    return True, []
