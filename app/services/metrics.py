@@ -172,3 +172,50 @@ def record_retry_class_distribution(retry_class: str, tags: Dict[str, str] = Non
 def set_dead_letter_gauge(count: int):
     """Set the dead-letter payment queue gauge metric."""
     metrics.set_gauge("dead_letter_payments", float(count))
+
+
+class ScorecardMetrics(BaseModel):
+    slo_success_rate: float = Field(..., ge=0.0, le=1.0, description="Percentage of SLO targets met (0.0 to 1.0)")
+    test_pass_rate: float = Field(..., ge=0.0, le=1.0, description="Unit/Integration test pass rate (0.0 to 1.0)")
+    open_security_vulns: int = Field(..., ge=0, description="Count of blocking security vulnerabilities")
+    incident_count: int = Field(..., ge=0, description="Number of active P1/P2 production incidents")
+
+class ReliabilityScorecardService:
+    @staticmethod
+    def calculate_reliability_index(metrics: ScorecardMetrics) -> Dict[str, Any]:
+        """
+        Computes a consolidated reliability score normalized between 0 and 100.
+        Weight Distribution: SLO Health (40%), Test Pass Rate (30%), Security (20%), Incident Signals (10%)
+        """
+        # 1. Base components calculations
+        slo_score = metrics.slo_success_rate * 100
+        test_score = metrics.test_pass_rate * 100
+        
+        # Deduct 25 points per open vulnerability, capped at 0
+        security_score = max(0, 100 - (metrics.open_security_vulns * 25))
+        
+        # Deduct 50 points per active incident, capped at 0
+        incident_score = max(0, 100 - (metrics.incident_count * 50))
+        
+        # 2. Weighted Aggregation Formula
+        reliability_index = (
+            (slo_score * 0.40) +
+            (test_score * 0.30) +
+            (security_score * 0.20) +
+            (incident_score * 0.10)
+        )
+        
+        # 3. Governance Evaluation Rule (Threshold: 85.0 Index AND 0 open critical vulnerabilities)
+        decision = "GO" if reliability_index >= 85.0 and metrics.open_security_vulns == 0 else "NO-GO"
+        
+        return {
+            "reliability_index": round(reliability_index, 2),
+            "status": decision,
+            "breakdown": {
+                "slo_component": round(slo_score, 2),
+                "test_component": round(test_score, 2),
+                "security_component": security_score,
+                "incident_component": incident_score
+            },
+            "metrics_evaluated": metrics.dict()
+        }
