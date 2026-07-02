@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION
+from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION, invalidate_webhook_cache
 from app.core.security import require_admin
 from app.core.config import settings
 
@@ -242,6 +242,7 @@ def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), 
     db.add(webhook)
     db.commit()
     db.refresh(webhook)
+    # Cache is pre-warmed on first access, no invalidation needed for create
     return _serialize_webhook(webhook)
 
 
@@ -288,12 +289,17 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depend
 
     db.commit()
     db.refresh(webhook)
+    # Invalidate cache when webhook events or active status changes
+    if payload.events is not None or payload.is_active is not None:
+        invalidate_webhook_cache(webhook_id)
     return _serialize_webhook(webhook)
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
+    # Invalidate cache before deletion
+    invalidate_webhook_cache(webhook_id)
     db.delete(webhook)
     db.commit()
 

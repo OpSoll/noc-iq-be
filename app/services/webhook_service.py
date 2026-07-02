@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
@@ -15,8 +16,13 @@ from app.services.webhook_signing import (
     verify_signature,
 )
 from app.core.config import settings
+from app.utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
+
+# In-memory cache for webhook event subscriptions (webhook_id -> parsed events list)
+# TTL of 60 seconds balances freshness with performance for large webhook registries
+_webhook_events_cache = TTLCache(ttl_seconds=60)
 
 
 def _get_retry_delays() -> list[int]:
@@ -114,16 +120,60 @@ def _build_headers(
 
 
 def get_active_webhooks_for_event(db: Session, event: WebhookEvent) -> List[Webhook]:
-    webhooks = db.query(Webhook).filter(Webhook.is_active == True).all()
+    """Get active webhooks subscribed to a specific event using optimized JSON containment.
+    
+    Uses PostgreSQL GIN index on events column for O(log n) lookup instead of O(n) scan.
+    Falls back to in-memory cache for parsed event subscriptions to avoid repeated JSON parsing.
+    
+    Args:
+        db: Database session
+        event: Webhook event type to match
+    
+    Returns:
+        List of active webhooks subscribed to the event
+    """
+    # Use PostgreSQL JSON containment operator with GIN index for efficient filtering
+    # This filters at the database level, avoiding loading all webhooks into memory
+    event_json = json.dumps([event.value])
+    webhooks = (
+        db.query(Webhook)
+        .filter(Webhook.is_active == True)
+        .filter(text("webhooks.events @> :event_json").bindparams(event_json=event_json))
+        .all()
+    )
+    
+    # Validate parsed events from cache to ensure no misrouting
     result = []
     for webhook in webhooks:
-        try:
-            events = json.loads(webhook.events)
-            if event.value in events:
-                result.append(webhook)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+        cache_key = f"webhook_events:{webhook.id}"
+        cached_events = _webhook_events_cache.get(cache_key)
+        
+        if cached_events is None:
+            try:
+                cached_events = json.loads(webhook.events)
+                _webhook_events_cache.set(cache_key, cached_events)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+                continue
+        
+        # Double-check event subscription to prevent misrouting
+        if event.value in cached_events:
+            result.append(webhook)
+    
     return result
+
+
+def invalidate_webhook_cache(webhook_id: UUID) -> None:
+    """Invalidate cached event subscriptions for a specific webhook.
+    
+    Call this after any webhook CRUD operation (create, update, delete) to ensure
+    the cache reflects the latest configuration.
+    
+    Args:
+        webhook_id: UUID of the webhook whose cache should be invalidated
+    """
+    cache_key = f"webhook_events:{webhook_id}"
+    _webhook_events_cache.invalidate(cache_key)
 
 
 def create_delivery(
