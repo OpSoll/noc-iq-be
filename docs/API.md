@@ -860,3 +860,25 @@ https://github.com/OpSoll/noc-iq-be/blob/main/postman/NOCIQ-API.json
 ---
 
 For more information, visit our [GitHub repository](https://github.com/OpSoll/noc-iq-be)
+
+# Analytics & SLA Error Handling Semantics
+
+Downstream API consumer integrations must expect and handle the following explicit data availability scenarios when hitting `/api/v1/sla/summary`.
+
+## Response State Matrix
+
+| Scenario | HTTP Code | Payload Indicator / Error Structure | Client Action |
+| :--- | :--- | :--- | :--- |
+| **Healthy Data** | `200 OK` | `"data": [...], "is_empty": false` | Render charts and visualization blocks normally. |
+| **No Records Found** | `200 OK` | `"data": [], "is_empty": true` | Render empty-state illustrations. **Do not treat as a system breakdown.** |
+| **Backend Down** | `503 Service Unavailable` | `"error_code": "ANALYTICS_SERVICE_UNAVAILABLE"` | Display a "Service Interrupted" banner and invoke back-off retry logic. |
+
+### Example 503 Error Payload
+```json
+{
+  "detail": {
+    "error_code": "ANALYTICS_SERVICE_UNAVAILABLE",
+    "message": "The analytics calculation engine is temporarily offline. Please retry your request shortly.",
+    "retryable": true
+  }
+}
