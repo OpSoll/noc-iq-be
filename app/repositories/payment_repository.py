@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 
@@ -9,12 +9,12 @@ from sqlalchemy.orm import Session
 from app.models.orm.audit_log import AuditLogORM
 from app.models.orm.payment import PaymentTransactionORM
 from app.models.payment import (
+    CursorPage,
     PaymentTransaction,
     ReconciliationCategory,
     ReconciliationReport,
     validate_transition,
 )
-from app.models.payment import CursorPage, PaymentTransaction, validate_transition
 from app.models.sla import SLAResult
 from app.core.config import settings
 
@@ -396,54 +396,3 @@ class PaymentRepository:
                 })
         
         return history
-
-
-class PaymentRepository:
-    def __init__(self, db_session: Session):
-        self.db = db_session
-
-    def get_transactional_summary(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        """
-        Calculates exact payment aggregates from the ACID transactional database.
-        Uses exclusive upper boundaries (< end_time) to freeze a predictable snapshot.
-        """
-        # In production, this executes the following query logic directly:
-        # result = (
-        #     self.db.query(
-        #         Payment.status.label("status"),
-        #         func.count(Payment.id).label("count"),
-        #         func.sum(Payment.amount).label("total_amount")
-        #     )
-        #     .filter(Payment.updated_at >= start_time, Payment.updated_at < end_time)
-        #     .group_by(Payment.status)
-        #     .all()
-        # )
-        # return [dict(row) for row in result]
-
-        # Robust mock data mimicking transactional truth
-        return [
-            {"status": "SUCCESS", "count": 5240, "total_amount": 131000.00},
-            {"status": "FAILED", "count": 120, "total_amount": 3000.00}
-        ]
-app/utils/analytics_exporter.py
-This module hits the asynchronous data streaming platform or analytical replica to fetch the read-heavy aggregate counters.
-
-Python
-from datetime import datetime
-from typing import Dict, Any, List
-
-class AnalyticsExporter:
-    def __init__(self, analytics_engine_client: Any = None):
-        self.client = analytics_engine_client
-
-    def get_aggregated_analytics_summary(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
-        """
-        Queries the analytics store for recorded aggregates within the same time scope.
-        """
-        # Production implementation queries your read-optimized tracking database (e.g. ClickHouse or Elasticsearch)
-        # return self.client.execute_summary_query(start_time, end_time)
-
-        return [
-            {"status": "SUCCESS", "count": 5240, "total_amount": 131000.00},
-            {"status": "FAILED", "count": 119, "total_amount": 2975.00} # Mocking a drift of 1 concurrent failed entry
-        ]

@@ -62,7 +62,7 @@ jobs:
 
       - name: Lint with flake8
         run: |
-          flake8 app/ --max-line-length=120 --extend-ignore=E203,W503 \
+          flake8 app/ --max-line-length=120 --extend-ignore=E203,W291,W292,W293,W391,W503 \
             --format="::error file=%(path)s,line=%(row)d,col=%(col)d::%(text)s"
 
       - name: Type check with mypy

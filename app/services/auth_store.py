@@ -230,7 +230,7 @@ class AuthStore:
                 db, 
                 "refresh_failed_compromised", 
                 email=email,
-                actor_id=stored_user.user_id if stored_user else None,
+                actor_id=None,
                 details={"family_id": family_id, "reason": "compromised_family"}
             )
             raise ValueError("Session family has been compromised")
@@ -244,7 +244,7 @@ class AuthStore:
                 db,
                 "refresh_token_reuse",
                 email=email,
-                actor_id=stored_user.user_id if stored_user else None,
+                actor_id=None,
                 details={
                     "family_id": family_id, 
                     "sequence": old_session.sequence, 

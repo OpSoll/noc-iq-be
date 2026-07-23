@@ -203,51 +203,6 @@ class WalletRegistry:
                 except IntegrityError as e:
                     db.rollback()
                     raise ValueError(f"Failed to link wallet: {str(e)}")
-            if existing_by_user and existing_by_user.public_key != payload.public_key:
-                raise ValueError(
-                    f"User '{payload.user_id}' is already linked to wallet '{existing_by_user.public_key}'. "
-                    f"Cannot link to '{payload.public_key}'."
-                )
-
-            # Check 2: Address already linked to different user
-            existing_by_address = cls._wallets_by_address.get(payload.public_key)
-            if existing_by_address and existing_by_address.user_id != payload.user_id:
-                raise ValueError(
-                    f"Wallet address '{payload.public_key}' is already linked to user '{existing_by_address.user_id}'. "
-                    f"Cannot link to '{payload.user_id}'."
-                )
-
-            # Check 3: Idempotent - same user + same address
-            if existing_by_user and existing_by_user.public_key == payload.public_key:
-                # Update existing wallet with new metadata
-                wallet = existing_by_user.model_copy(
-                    update={
-                        "funded": payload.funded,
-                        "trustline_ready": payload.trustline_ready,
-                        "active": True,
-                        "last_updated": now,
-                        "cached_at": now,
-                    }
-                )
-                cls._wallets_by_user[payload.user_id] = wallet
-                cls._wallets_by_address[payload.public_key] = wallet
-                return wallet
-
-            # Check 4: No conflicts - create new link
-            created_at = now
-            wallet = Wallet(
-                user_id=payload.user_id,
-                public_key=payload.public_key,
-                created_at=created_at,
-                last_updated=now,
-                funded=payload.funded,
-                active=True,
-                trustline_ready=payload.trustline_ready,
-                cached_at=now,
-            )
-            cls._wallets_by_user[payload.user_id] = wallet
-            cls._wallets_by_address[payload.public_key] = wallet
-            return wallet
         finally:
             # Release lock
             cls._link_locks.pop(link_key, None)
