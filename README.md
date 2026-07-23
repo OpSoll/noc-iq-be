@@ -39,13 +39,13 @@ As of the current stabilized baseline, the backend is strongest in the outage an
 - Celery
 - HTTPX
 
-Dependencies are declared in [requirements.txt](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/requirements.txt).
+Dependencies are declared in [requirements.txt](requirements.txt).
 
 ## Active Runtime Surface
 
-The app entrypoint is [app/main.py](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/app/main.py).
+The app entrypoint is [app/main.py](app/main.py).
 
-Current active routes are wired through [app/api/v1/router.py](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/app/api/v1/router.py):
+Current active routes are wired through [app/api/v1/router.py](app/api/v1/router.py):
 
 - `/health`
 - `/api/v1/audit`

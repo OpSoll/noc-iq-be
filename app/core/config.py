@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     # BE-295: Grace window (seconds) during which the previous secret is still accepted.
     WEBHOOK_SECRET_GRACE_WINDOW_SECONDS: int = 3600
 
+    # Application secret keys
+    # SECURITY: Generate with: openssl rand -hex 32
+    # These must be set to non-empty values before deploying to production.
+    SECRET_KEY: str = ""
+    JWT_SECRET_KEY: str = ""
+
     @property
     def horizon_url(self) -> str:
         """Horizon base URL derived from STELLAR_NETWORK."""
@@ -175,6 +181,12 @@ def validate_critical_settings(config: Settings) -> None:
 
     if config.WEBHOOK_RETRY_MAX_DELAY_SECONDS <= 0:
         errors.append("WEBHOOK_RETRY_MAX_DELAY_SECONDS must be > 0.")
+
+    if not config.SECRET_KEY.strip():
+        errors.append("SECRET_KEY must not be empty.")
+
+    if not config.JWT_SECRET_KEY.strip():
+        errors.append("JWT_SECRET_KEY must not be empty.")
 
     if errors:
         raise ValueError("Invalid startup configuration:\n- " + "\n- ".join(errors))
