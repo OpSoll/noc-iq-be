@@ -1,7 +1,7 @@
 import json
 import logging
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from celery import Task
@@ -10,7 +10,9 @@ from app.tasks.celery_app import celery_app
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
 from app.models.webhook import WebhookEvent
+from app.repositories.payment_repository import PaymentRepository
 from app.services.audit_log import audit_log
+from app.utils.analytics_exporter import AnalyticsExporter
 from app.utils.correlation import set_correlation_id
 from app.utils.logging import get_structured_logger
 

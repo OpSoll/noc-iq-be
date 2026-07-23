@@ -1,6 +1,7 @@
 from datetime import datetime
 from fastapi import APIRouter, Response, Depends, HTTPException
-from app.services.metrics import metrics
+from fastapi import status
+from app.services.metrics import metrics, ScorecardMetrics, ReliabilityScorecardService
 from app.core.security import require_engineer
 from app.core.config import settings
 

@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 
+from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, Field
+
 
 @dataclass
 class MetricPoint:
