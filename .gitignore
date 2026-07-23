@@ -1,9 +1,47 @@
+# Environment files — NEVER commit secrets
 .env
-__pycache__/
-nociq.json
-/env/
-.venv/
-.pytest_cache/
-.DS_Store
+.env.local
+.env.production
 
-venv
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Test and coverage artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+.hypothesis/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Alembic local state
+nociq.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# mypy
+.mypy_cache/
