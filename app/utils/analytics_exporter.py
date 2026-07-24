@@ -3,7 +3,7 @@ import csv
 import io
 import json
 import time
-from typing import Any
+from typing import Any, Dict, List
 
 from app.models.sla import SLADashboardKPI, SLATrendPoint, SLAPerformanceAggregation
 
@@ -191,26 +191,54 @@ def export_analytics_summary(
     return buffer.getvalue()
 
 
-    class AnalyticsExporter:
+
+
+
+class AnalyticsExporter:
+    """Wraps row-level records in a self-documenting export container schema."""
+
     SCHEMA_VERSION = "1.2.0"
-    
-    # Task Requirement: Strict Field Dictionary Metadata
-    FIELD_METADATA = {
-        "export_timestamp": {"type": "ISO8601_DATETIME", "description": "UTC extraction timestamp"},
-        "status_scope": {"type": "STRING", "description": "The processing state category of the transaction"},
-        "transaction_count": {"type": "INTEGER", "description": "Total count of records processed within the window"},
-        "aggregate_volume": {"type": "DECIMAL", "description": "Summed financial volume of transactions"}
+
+    FIELD_METADATA: Dict[str, Dict[str, str]] = {
+        "export_timestamp": {
+            "type": "ISO8601_DATETIME",
+            "description": "UTC extraction timestamp",
+        },
+        "status_scope": {
+            "type": "STRING",
+            "description": "The processing state category of the transaction",
+        },
+        "transaction_count": {
+            "type": "INTEGER",
+            "description": "Total count of records processed within the window",
+        },
+        "aggregate_volume": {
+            "type": "DECIMAL",
+            "description": "Summed financial volume of transactions",
+        },
     }
 
+    def __init__(self, analytics_engine_client: Any = None) -> None:
+        self.client = analytics_engine_client
+
+    def get_aggregated_analytics_summary(
+        self,
+        start_time: Any,
+        end_time: Any,
+    ) -> List[Dict[str, Any]]:
+        """Query the analytics store for recorded aggregates within the given time scope."""
+        if self.client is not None:
+            return self.client.execute_summary_query(start_time, end_time)
+        # Fallback: return empty dataset when no client is configured
+        return []
+
     def generate_stabilized_export(self, payload_data: List[Dict[str, Any]]) -> str:
-        """
-        Wraps row-level records within a formalized, self-documenting export container schema.
-        """
-        export_envelope = {
+        """Wraps row-level records within a formalized, self-documenting export container schema."""
+        export_envelope: Dict[str, Any] = {
             "metadata": {
                 "schema_version": self.SCHEMA_VERSION,
-                "fields": self.FIELD_METADATA
+                "fields": self.FIELD_METADATA,
             },
-            "data": payload_data
+            "data": payload_data,
         }
         return json.dumps(export_envelope, indent=2)

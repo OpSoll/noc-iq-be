@@ -16,6 +16,7 @@ from typing import Any, Callable, Literal, Optional
 
 from app.core.config import settings
 from app.models.payment import RetryClass
+from app.services.contracts.translation import validate_asset_config
 from app.services.sla import SLACalculator
 from app.utils.cache import CacheResult, TTLCache
 
