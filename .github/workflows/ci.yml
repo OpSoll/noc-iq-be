@@ -105,7 +105,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-junit alembic celery
+          pip install pytest alembic celery
 
       - name: Run unit and integration tests
         run: |
@@ -154,7 +154,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-junit alembic
+          pip install pytest alembic
 
       - name: Run contract parity checks
         run: |
@@ -200,7 +200,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-junit alembic celery
+          pip install pytest alembic celery
 
       - name: Run Stellar Wave integration checks
         run: |
