@@ -84,6 +84,16 @@ class Settings(BaseSettings):
             return "https://horizon.stellar.org"
         return "https://horizon-testnet.stellar.org"
 
+    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
+
+    WALLET_CACHE_LOCK_TIMEOUT: int = 5
+    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
+    WALLET_CACHE_TTL: int = 300
+    REDIS_URL: str = "redis://localhost:6379/1"
+
+    class Config:
+        env_file = ".env"
+
 
 settings = Settings()
 

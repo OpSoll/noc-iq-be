@@ -8,6 +8,7 @@ celery_app = Celery(
     include=[
         "app.tasks.sla_tasks",
         "app.tasks.webhook_tasks",
+        "app.tasks.idempotency_tasks",
     ],
 )
 
@@ -31,6 +32,10 @@ celery_app.conf.update(
         "retry-pending-webhook-deliveries": {
             "task": "app.tasks.webhook_tasks.retry_pending_webhook_deliveries",
             "schedule": 60.0,  # every 60 seconds
+        },
+        "cleanup-expired-idempotency-keys": {
+            "task": "app.tasks.idempotency_tasks.cleanup_expired_idempotency_keys",
+            "schedule": 3600.0,  # every hour
         },
     },
 )
