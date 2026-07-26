@@ -16,6 +16,7 @@ from app.db.session import engine
 from app.middleware.body_size_limiter import BodySizeLimitMiddleware
 from app.middleware.correlation import CorrelationMiddleware
 from app.middleware.payload_size import PayloadSizeMiddleware
+from app.middleware.pool_saturation import PoolSaturationMiddleware
 from app.metrics.database_metrics import router as metrics_router, setup_db_metrics
 
 validate_critical_settings(settings)
@@ -57,10 +58,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Add correlation middleware first (before CORS to ensure it runs on all requests)
+app.add_middleware(PoolSaturationMiddleware)
+
 app.add_middleware(CorrelationMiddleware)
 
-# Add payload size middleware (after correlation, before CORS)
 app.add_middleware(PayloadSizeMiddleware)
 
 app.add_middleware(
@@ -108,6 +109,7 @@ async def readiness():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
 
 # Debug / dependency-injection routers (admin only)
 app.include_router(session_debug_router)
