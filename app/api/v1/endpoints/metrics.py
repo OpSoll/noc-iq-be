@@ -1,4 +1,6 @@
 from datetime import datetime
+from fastapi import APIRouter, Response, Depends, HTTPException
+from fastapi import status as http_status
 from typing import Optional
 from fastapi import APIRouter, Response, Depends, HTTPException, Query
 from fastapi import status
@@ -6,11 +8,35 @@ from app.services.metrics import metrics, ScorecardMetrics, ReliabilityScorecard
 from app.services.analytics.trend_aggregator import TrendAggregator
 from app.core.security import require_engineer
 from app.core.config import settings
+from app.tasks.webhook_autoscaler import autoscaler
+from app.db.session import pool_health
+from app.core.rate_limiter import rate_limiter
+from app.metrics.cardinality_guard import cardinality_guard
 
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
 
-@router.post("/scorecard/evaluate", status_code=status.HTTP_200_OK)
+@router.get("/webhook-workers")
+def webhook_worker_metrics():
+    return autoscaler.get_metrics()
+
+
+@router.get("/pool")
+def pool_health_stats():
+    return pool_health.get_stats()
+
+
+@router.get("/rate-limits")
+def rate_limit_metrics():
+    return rate_limiter.get_metrics()
+
+
+@router.get("/cardinality")
+def cardinality_metrics():
+    return cardinality_guard.get_cardinality()
+
+
+@router.post("/scorecard/evaluate", status_code=http_status.HTTP_200_OK)
 async def evaluate_release_governance(metrics: ScorecardMetrics):
     """
     Evaluates system logs and telemetry payloads against governance criteria to issue an auditable deployment decision.
@@ -23,7 +49,7 @@ async def evaluate_release_governance(metrics: ScorecardMetrics):
         }
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to compile reliability analytics: {str(e)}"
         )
 
