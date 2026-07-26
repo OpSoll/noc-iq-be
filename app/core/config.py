@@ -1,7 +1,18 @@
-from typing import List
+import logging
+from typing import List, Optional
 from urllib.parse import urlparse
 
-from pydantic_settings import BaseSettings
+from pydantic import BaseSettings, field_validator
+from pydantic_settings import BaseSettings as PydanticBaseSettings
+
+from app.core.env_validators import (
+    validate_postgres_url,
+    validate_redis_url,
+    validate_min_length,
+    validate_allowed_origins,
+)
+
+logger = logging.getLogger(__name__)
 
 
 VALID_STELLAR_NETWORKS = {"testnet", "mainnet", "futurenet", "standalone"}
@@ -11,9 +22,13 @@ VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
 class Settings(BaseSettings):
     PROJECT_NAME: str = "NOCIQ API"
     VERSION: str = "1.0.0"
+    REDIS_URL: str = "redis://localhost:6379"
+    OTEL_SERVICE_NAME: str = "nociq-api"
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
     DEBUG: bool = False
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/nociq"
     API_V1_PREFIX: str = "/api/v1"
+    API_V2_PREFIX: str = "/api/v2"
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
@@ -82,6 +97,18 @@ class Settings(BaseSettings):
 
     # Contract canonicalisation (#357)
     CONTRACT_CANONICAL_SALT: str = ""
+    # Contract idempotency (#362)
+    CONTRACT_IDEMPOTENCY_TTL_SECONDS: int = 3600
+
+    # Bridge fallback strategy (#363)
+    BRIDGE_FALLBACK_ENABLED: bool = True
+    BRIDGE_CIRCUIT_BREAKER_THRESHOLD: int = 3
+    BRIDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 30
+
+    # Zero-downtime migration (#411)
+    MIGRATION_BATCH_SIZE: int = 500
+    MIGRATION_SHADOW_SUFFIX: str = "_shadow"
+    model_config = {"env_prefix": "", "case_sensitive": True, "env_file": ".env"}
 
     @property
     def horizon_url(self) -> str:
@@ -90,11 +117,90 @@ class Settings(BaseSettings):
             return "https://horizon.stellar.org"
         return "https://horizon-testnet.stellar.org"
 
+    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
+
+    WALLET_CACHE_LOCK_TIMEOUT: int = 5
+    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
+    WALLET_CACHE_TTL: int = 300
+    REDIS_URL: str = "redis://localhost:6379/1"
+
     class Config:
         env_file = ".env"
 
 
+    DATABASE_URL: str = "postgresql://localhost:5432/nociq"
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    SECRET_KEY: str = "change-me-in-production-use-a-real-secret-key!!"
+    JWT_SECRET_KEY: str = "change-me-in-production-use-a-real-jwt-secret-key!!"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
+
+    MAX_AUTH_BODY_SIZE: int = 1024  # 1 KB
+    MAX_CRUD_BODY_SIZE: int = 10 * 1024  # 10 KB
+    MAX_BULK_BODY_SIZE: int = 10 * 1024 * 1024  # 10 MB
+    MAX_WEBHOOK_BODY_SIZE: int = 1 * 1024 * 1024  # 1 MB
+
+    @field_validator("DATABASE_URL")
+    @classmethod
+    def _validate_database_url(cls, v: str) -> str:
+        return validate_postgres_url(v)
+
+    @field_validator("CELERY_BROKER_URL")
+    @classmethod
+    def _validate_celery_broker_url(cls, v: str) -> str:
+        return validate_redis_url(v)
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def _validate_secret_key(cls, v: str) -> str:
+        return validate_min_length(v, 32, "SECRET_KEY")
+
+    @field_validator("JWT_SECRET_KEY")
+    @classmethod
+    def _validate_jwt_secret_key(cls, v: str) -> str:
+        return validate_min_length(v, 32, "JWT_SECRET_KEY")
+
+    class Config:
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+
+
 settings = Settings()
+
+
+def validate_env_schema() -> None:
+    errors: list[str] = []
+
+    try:
+        validate_postgres_url(settings.DATABASE_URL)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    try:
+        validate_redis_url(settings.CELERY_BROKER_URL)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    try:
+        validate_min_length(settings.SECRET_KEY, 32, "SECRET_KEY")
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    try:
+        validate_min_length(settings.JWT_SECRET_KEY, 32, "JWT_SECRET_KEY")
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    try:
+        validate_allowed_origins(settings.ALLOWED_ORIGINS)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    if errors:
+        for err in errors:
+            logger.error("Environment validation error: %s", err)
+        raise ValueError(f"Environment validation failed with {len(errors)} error(s): {'; '.join(errors)}")
+
+    logger.info("Environment schema validation passed.")
 
 
 def get_settings() -> Settings:
@@ -112,6 +218,9 @@ def validate_critical_settings(config: Settings) -> None:
 
     if not config.API_V1_PREFIX.startswith("/"):
         errors.append("API_V1_PREFIX must start with '/'.")
+
+    if not config.API_V2_PREFIX.startswith("/"):
+        errors.append("API_V2_PREFIX must start with '/'.")
 
     if len(config.API_V1_PREFIX) > 1 and config.API_V1_PREFIX.endswith("/"):
         errors.append("API_V1_PREFIX must not end with '/' unless it is the root path.")

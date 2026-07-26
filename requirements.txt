@@ -1,14 +1,19 @@
 # Core framework
 fastapi==0.115.14
 uvicorn[standard]==0.34.3
+prometheus_client
 
 # Database
 sqlalchemy==2.0.41
 psycopg2-binary==2.9.10
 alembic==1.16.4
 
+# Redis
+redis>=5.0
+
 # Settings & validation
 pydantic-settings==2.10.1
+pydantic[email]
 
 # Task queue
 celery==5.5.3
@@ -21,3 +26,9 @@ python-multipart==0.0.20
 
 # Password hashing
 passlib[bcrypt]==1.7.4
+
+# OpenTelemetry
+opentelemetry-api>=1.22
+opentelemetry-sdk>=1.22
+opentelemetry-exporter-otlp>=1.22
+opentelemetry-instrumentation-fastapi>=0.43b0
