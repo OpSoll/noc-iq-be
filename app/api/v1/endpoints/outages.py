@@ -1,5 +1,5 @@
 from typing import List
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from datetime import datetime
 
 from app.models.outage import (
@@ -21,10 +21,26 @@ def list_outages(
     status: OutageStatus | None = None,
     page: int = 1,
     page_size: int = 20,
+    include_deleted: bool = Query(False, description="Include soft-deleted outages"),
 ):
-    return outage_store.list(severity, status, page, page_size)
+    return outage_store.list(severity, status, page, page_size, include_deleted=include_deleted)
 
 
+@router.get("/deleted", response_model=PaginatedOutages)
+def list_deleted_outages(
+    page: int = 1,
+    page_size: int = 20,
+):
+    items = outage_store.list_deleted()
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{outage_id}", response_model=Outage)
@@ -41,6 +57,7 @@ def create_outage(payload: OutageCreate):
         **payload.model_dump(),
         resolved_at=None,
         sla_status=None,
+        deleted_at=None,
     )
     return outage_store.create(outage)
 
@@ -66,8 +83,22 @@ def delete_outage(outage_id: str):
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    outage_store.delete(outage_id)
-    return {"message": "Outage deleted successfully"}
+    result = outage_store.soft_delete(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    return {"message": "Outage soft-deleted successfully", "deleted_at": result.deleted_at}
+
+
+@router.post("/{outage_id}/restore")
+def restore_outage(outage_id: str):
+    existing = outage_store.get(outage_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    result = outage_store.restore(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    return {"message": "Outage restored successfully", "outage": result}
 
 
 @router.post("/{outage_id}/resolve")

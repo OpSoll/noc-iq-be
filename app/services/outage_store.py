@@ -1,12 +1,14 @@
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 from app.models import Outage
 from app.services.sla import SLACalculator
 from app.models.enums import OutageStatus, Severity
+from app.services.soft_delete import SoftDeleteMixin
 
 
-class OutageStore:
+class OutageStore(SoftDeleteMixin):
     """
-    Simple in-memory store for outages.
+    Simple in-memory store for outages with soft-delete support.
     Data is lost on server restart.
     """
 
@@ -19,8 +21,11 @@ class OutageStore:
         status: OutageStatus | None = None,
         page: int = 1,
         page_size: int = 20,
+        include_deleted: bool = False,
     ):
         items = list(self._data.values())
+
+        items = self._filter_deleted(items, include_deleted=include_deleted)
 
         if severity:
             items = [o for o in items if o.severity == severity]
@@ -67,6 +72,8 @@ class OutageStore:
         violations = []
 
         for outage in self._data.values():
+            if self._is_deleted(outage):
+                continue
             if outage.status != OutageStatus.resolved:
                 continue
 
