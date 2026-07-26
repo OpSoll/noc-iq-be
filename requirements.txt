@@ -1,6 +1,7 @@
 # Core framework
 fastapi==0.115.14
 uvicorn[standard]==0.34.3
+prometheus_client
 
 # Database
 sqlalchemy==2.0.41
@@ -12,6 +13,7 @@ redis>=5.0
 
 # Settings & validation
 pydantic-settings==2.10.1
+pydantic[email]
 
 # Task queue
 celery==5.5.3

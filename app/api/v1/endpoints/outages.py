@@ -1,3 +1,4 @@
+from typing import List
 import csv
 import io
 import json
@@ -85,6 +86,7 @@ def list_outages(
     end_date: datetime | None = None,
     page: int = 1,
     page_size: int = 20,
+    include_deleted: bool = Query(False, description="Include soft-deleted outages"),
     sort_by: OutageSortField = Query(
         default=OutageSortField.detected_at,
         description="Sort field (enum). Supported: detected_at, site_name, severity, status, id. Invalid values rejected with 422.",
@@ -126,6 +128,23 @@ def list_outages(
         sort_by=sort_by,
         sort_direction=sort_direction,
     )
+
+
+@router.get("/deleted", response_model=PaginatedOutages)
+def list_deleted_outages(
+    page: int = 1,
+    page_size: int = 20,
+):
+    items = outage_store.list_deleted()
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{outage_id}", response_model=Outage)
@@ -385,8 +404,23 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    result = outage_store.soft_delete(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
     repo.delete(outage_id)
-    return {"message": "Outage deleted successfully"}
+    return {"message": "Outage deleted successfully", "deleted_at": result.deleted_at}
+
+
+@router.post("/{outage_id}/restore")
+def restore_outage(outage_id: str):
+    existing = outage_store.get(outage_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    result = outage_store.restore(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    return {"message": "Outage restored successfully", "outage": result}
 
 
 @router.post("/{outage_id}/resolve")

@@ -4,6 +4,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 
+
 class Location(BaseModel):
     latitude: float
     longitude: float
@@ -31,6 +32,7 @@ class Outage(BaseModel):
     created_by: Optional[str] = None
     location: Optional[Location] = None
     sla_status: Optional[SLAStatus] = None
+    deleted_at: Optional[datetime] = None
 
     @field_validator("detected_at")
     @classmethod

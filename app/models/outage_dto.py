@@ -91,9 +91,9 @@ class OutageCreate(BaseModel):
         return v
 
 class OutageUpdate(BaseModel):
+    status: Optional[OutageStatus] = None
     site_name: Optional[str] = None
     severity: Optional[Severity] = None
-    status: Optional[OutageStatus] = None
     resolved_at: Optional[datetime] = None
     description: Optional[str] = None
     affected_services: Optional[List[str]] = None

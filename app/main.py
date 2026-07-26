@@ -1,3 +1,5 @@
+import logging
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI
 from datetime import datetime
@@ -5,13 +7,16 @@ from sqlalchemy import text
 from redis import Redis
 
 from app.api.v1.router import api_router
+from app.core.config import settings, validate_env_schema, validate_critical_settings
 from app.api.v2.router import api_v2_router
 from app.core.config import settings, validate_critical_settings
 from app.core.session_hygiene import debug_router as session_debug_router
 from app.core.dependencies import di_router
 from app.db.session import engine
+from app.middleware.body_size_limiter import BodySizeLimitMiddleware
 from app.middleware.correlation import CorrelationMiddleware
 from app.middleware.payload_size import PayloadSizeMiddleware
+from app.metrics.database_metrics import router as metrics_router, setup_db_metrics
 
 validate_critical_settings(settings)
 
@@ -31,6 +36,15 @@ async def check_celery() -> bool:
         return True
     except Exception:
         return False
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    validate_env_schema()
+    setup_db_metrics()
+    yield
 
 from app.api.v1.router import api_router
 from app.core.lifespan import lifespan
@@ -68,6 +82,8 @@ async def add_api_version_header(request, call_next):
     response = await call_next(request)
     response.headers["X-API-Version"] = settings.VERSION
     return response
+
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 # Health checks
@@ -112,3 +128,6 @@ app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 # API v2 routes
 app.include_router(api_v2_router, prefix=settings.API_V2_PREFIX)
 app.include_router(api_router, prefix="/api/v1")
+
+# Metrics routes
+app.include_router(metrics_router)
