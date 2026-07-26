@@ -1,11 +1,15 @@
 from fastapi import FastAPI
-from app.api.v1.router import api_router
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.v1.router import api_router
+from app.core.lifespan import lifespan
+from app.core.rate_limiter import RateLimiterMiddleware
 
 app = FastAPI(
     title="NOCIQ API",
     version="1.0.0",
-    description="NOCIQ Backend API"
+    description="NOCIQ Backend API",
+    lifespan=lifespan,
 )
 
 
@@ -16,12 +20,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimiterMiddleware)
 
 
-# Health check
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
-# API routes
 app.include_router(api_router, prefix="/api/v1")
