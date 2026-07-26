@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     # BE-295: Grace window (seconds) during which the previous secret is still accepted.
     WEBHOOK_SECRET_GRACE_WINDOW_SECONDS: int = 3600
 
+    # Bridge timeout configuration (#358)
+    BRIDGE_TIMEOUT_SLA_CHECK_MS: int = 5000
+    BRIDGE_TIMEOUT_PAYMENT_MS: int = 30000
+    BRIDGE_TIMEOUT_BALANCE_MS: int = 10000
+
+    # Contract execution guardrails (#360)
+    ALLOWED_CONTRACT_ADDRESSES: List[str] = []
+    MAX_CONTRACT_EXECUTION_AMOUNT: float = 0.0
+    CONTRACT_CALL_RATE_LIMIT: int = 10
+
+    # Bridge response versioning (#361)
+    BRIDGE_RESPONSE_VERSION: str = "v2"
+
     # Application secret keys
     # SECURITY: Generate with: openssl rand -hex 32
     # These must be set to non-empty values before deploying to production.
