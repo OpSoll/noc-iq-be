@@ -25,6 +25,7 @@ from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.outage_repository import OutageRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
+from app.core.outage_state_machine import OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
@@ -357,6 +358,14 @@ def update_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(re
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    if payload.status is not None:
+        try:
+            OutageStateMachine.transition(
+                outage_id, existing.status, payload.status.value
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         updated = repo.update(outage_id, payload)
     except ValueError as exc:
@@ -430,6 +439,16 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
     Also calculates SLA metrics and triggers webhook notifications.
     """
     repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    try:
+        OutageStateMachine.transition(
+            outage_id, outage.status, "resolved"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     # Acquire advisory lock to prevent concurrent resolutions
     try:
@@ -548,3 +567,17 @@ def get_outage_timeline(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/{outage_id}/transitions")
+def get_valid_transitions(outage_id: str, db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    valid = OutageStateMachine.get_valid_next_states(outage.status)
+    return {
+        "outage_id": outage_id,
+        "current_status": outage.status,
+        "valid_next_states": sorted(valid),
+    }

@@ -22,9 +22,13 @@ VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
 class Settings(BaseSettings):
     PROJECT_NAME: str = "NOCIQ API"
     VERSION: str = "1.0.0"
+    REDIS_URL: str = "redis://localhost:6379"
+    OTEL_SERVICE_NAME: str = "nociq-api"
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
     DEBUG: bool = False
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/nociq"
     API_V1_PREFIX: str = "/api/v1"
+    API_V2_PREFIX: str = "/api/v2"
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
@@ -82,12 +86,21 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     JWT_SECRET_KEY: str = ""
 
+    model_config = {"env_prefix": "", "case_sensitive": True, "env_file": ".env"}
+
     @property
     def horizon_url(self) -> str:
         """Horizon base URL derived from STELLAR_NETWORK."""
         if self.STELLAR_NETWORK == "mainnet":
             return "https://horizon.stellar.org"
         return "https://horizon-testnet.stellar.org"
+
+    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
+
+    WALLET_CACHE_LOCK_TIMEOUT: int = 5
+    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
+    WALLET_CACHE_TTL: int = 300
+    REDIS_URL: str = "redis://localhost:6379/1"
 
     class Config:
         env_file = ".env"
@@ -183,6 +196,9 @@ def validate_critical_settings(config: Settings) -> None:
 
     if not config.API_V1_PREFIX.startswith("/"):
         errors.append("API_V1_PREFIX must start with '/'.")
+
+    if not config.API_V2_PREFIX.startswith("/"):
+        errors.append("API_V2_PREFIX must start with '/'.")
 
     if len(config.API_V1_PREFIX) > 1 and config.API_V1_PREFIX.endswith("/"):
         errors.append("API_V1_PREFIX must not end with '/' unless it is the root path.")
