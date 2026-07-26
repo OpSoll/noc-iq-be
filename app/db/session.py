@@ -4,6 +4,7 @@ from typing import Optional
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
 
 from app.core.config import settings
@@ -21,6 +22,8 @@ engine: Engine = create_engine(
     pool_pre_ping=True,
     pool_timeout=30,
 )
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 class PoolHealthChecker:
@@ -60,11 +63,8 @@ pool_health = PoolHealthChecker(engine)
 
 
 def get_db():
-    db = None
+    db = SessionLocal()
     try:
-        from sqlalchemy.orm import Session
-        db = Session(engine)
         yield db
     finally:
-        if db is not None:
-            db.close()
+        db.close()

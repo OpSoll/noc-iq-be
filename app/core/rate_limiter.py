@@ -1,8 +1,8 @@
 import time
 import logging
 import threading
-from collections import OrderedDict
-from typing import Optional
+from collections import OrderedDict, defaultdict
+from typing import Dict, List, Optional
 
 from app.core.config import settings
 
@@ -113,3 +113,29 @@ class RateLimiter:
 
 
 rate_limiter = RateLimiter()
+
+
+class SimpleRateLimiter:
+    """Simple rate limiter for auth endpoints.
+    In production, this should be replaced with Redis-based rate limiting.
+    """
+
+    def __init__(self):
+        self.requests: Dict[str, List[float]] = defaultdict(list)
+
+    def is_allowed(self, key: str) -> bool:
+        """Check if the key is allowed based on rate limits."""
+        now = time()
+        window_start = now - settings.AUTH_RATE_LIMIT_WINDOW_SECONDS
+
+        # Clean old requests
+        self.requests[key] = [t for t in self.requests[key] if t > window_start]
+
+        if len(self.requests[key]) >= settings.AUTH_RATE_LIMIT_REQUESTS:
+            return False
+
+        self.requests[key].append(now)
+        return True
+
+
+auth_rate_limiter = SimpleRateLimiter()
