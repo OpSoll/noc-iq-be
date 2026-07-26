@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     JWT_SECRET_KEY: str = ""
 
+    # Cold-start optimisation (#355)
+    STARTUP_WARM_CACHE_ENABLED: bool = True
+    STARTUP_LAZY_LOAD_MODULES: List[str] = [
+        "app.services.contracts.sla_adapter",
+        "app.services.contracts.translation",
+        "app.services.outage_store",
+        "app.services.sla_metric_registry",
+    ]
+
+    # Contract canonicalisation (#357)
+    CONTRACT_CANONICAL_SALT: str = ""
     # Contract idempotency (#362)
     CONTRACT_IDEMPOTENCY_TTL_SECONDS: int = 3600
 

@@ -110,6 +110,20 @@ async def readiness():
 def health_check():
     return {"status": "ok"}
 
+# Startup optimisation (#355)
+from app.core.startup_optimizer import startup_router, run_startup_optimization
+
+# Queue analysis (#356)
+from app.tasks.queue_analyzer import queue_analysis_router
+
+# Run startup optimisation
+run_startup_optimization()
+
+# Health / metrics routers mounted at root (outside api_router prefix)
+app.include_router(startup_router)
+app.include_router(queue_analysis_router)
+
+# API routes
 
 # Debug / dependency-injection routers (admin only)
 app.include_router(session_debug_router)
