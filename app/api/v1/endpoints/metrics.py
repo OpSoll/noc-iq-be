@@ -1,14 +1,42 @@
 from datetime import datetime
 from fastapi import APIRouter, Response, Depends, HTTPException
+from fastapi import status as http_status
+from typing import Optional
+from fastapi import APIRouter, Response, Depends, HTTPException, Query
 from fastapi import status
 from app.services.metrics import metrics, ScorecardMetrics, ReliabilityScorecardService
+from app.services.analytics.trend_aggregator import TrendAggregator
 from app.core.security import require_engineer
 from app.core.config import settings
+from app.tasks.webhook_autoscaler import autoscaler
+from app.db.session import pool_health
+from app.core.rate_limiter import rate_limiter
+from app.metrics.cardinality_guard import cardinality_guard
 
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
 
-@router.post("/scorecard/evaluate", status_code=status.HTTP_200_OK)
+@router.get("/webhook-workers")
+def webhook_worker_metrics():
+    return autoscaler.get_metrics()
+
+
+@router.get("/pool")
+def pool_health_stats():
+    return pool_health.get_stats()
+
+
+@router.get("/rate-limits")
+def rate_limit_metrics():
+    return rate_limiter.get_metrics()
+
+
+@router.get("/cardinality")
+def cardinality_metrics():
+    return cardinality_guard.get_cardinality()
+
+
+@router.post("/scorecard/evaluate", status_code=http_status.HTTP_200_OK)
 async def evaluate_release_governance(metrics: ScorecardMetrics):
     """
     Evaluates system logs and telemetry payloads against governance criteria to issue an auditable deployment decision.
@@ -21,7 +49,7 @@ async def evaluate_release_governance(metrics: ScorecardMetrics):
         }
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to compile reliability analytics: {str(e)}"
         )
 
@@ -143,3 +171,27 @@ def get_prometheus_metrics(current_user=Depends(require_engineer)):
         content="\n".join(prometheus_lines) + "\n",
         media_type="text/plain; version=0.0.4; charset=utf-8"
     )
+
+
+@router.get("/trends", status_code=status.HTTP_200_OK)
+async def get_trends(
+    window: str = Query("daily", regex="^(hourly|daily|weekly)$"),
+    from_date: Optional[str] = Query(None, alias="from"),
+    to_date: Optional[str] = Query(None, alias="to"),
+):
+    """Aggregate outage/payment metrics into aligned time windows."""
+    from datetime import datetime as dt
+    from_dt = dt.fromisoformat(from_date) if from_date else None
+    to_dt = dt.fromisoformat(to_date) if to_date else None
+
+    sample_metrics = []
+    try:
+        buckets = TrendAggregator.aggregate(
+            sample_metrics, window_size=window, from_dt=from_dt, to_dt=to_dt
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid parameters: {str(e)}",
+        )
+    return {"success": True, "data": buckets}

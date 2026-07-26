@@ -1,11 +1,14 @@
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.models import Outage
 from app.models.enums import OutageStatus, Severity
+from app.services.soft_delete import SoftDeleteMixin
 
 
-class OutageStore:
+class OutageStore(SoftDeleteMixin):
     """
+    Simple in-memory store for outages with soft-delete support.
     Deprecated in-memory store retained only as a lightweight compatibility layer.
     The active runtime path uses the SQLAlchemy-backed repository.
     """
@@ -19,8 +22,11 @@ class OutageStore:
         status: OutageStatus | None = None,
         page: int = 1,
         page_size: int = 20,
+        include_deleted: bool = False,
     ) -> dict:
         items = list(self._data.values())
+
+        items = self._filter_deleted(items, include_deleted=include_deleted)
 
         if severity:
             items = [o for o in items if o.severity == severity.value]
@@ -62,4 +68,33 @@ class OutageStore:
         self._data.pop(outage_id, None)
 
 
+        outage.status = OutageStatus.resolved
+        outage.mttr_minutes = mttr_minutes
+        return outage
+
+    def list_violations(self):
+        violations = []
+
+        for outage in self._data.values():
+            if self._is_deleted(outage):
+                continue
+            if outage.status != OutageStatus.resolved:
+                continue
+
+            sla = SLACalculator.calculate(
+                outage_id=outage.id,
+                severity=outage.severity.value,
+                mttr_minutes=outage.mttr_minutes,
+            )
+
+            if sla["status"] == "violated":
+                violations.append({
+                    "outage": outage,
+                    "sla": sla,
+                })
+
+        return violations
+
+
+# Singleton instance
 outage_store = OutageStore()

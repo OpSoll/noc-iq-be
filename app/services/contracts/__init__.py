@@ -24,4 +24,16 @@ __all__ = [
     "detect_version",
     "normalize_response",
     "get_target_version",
+from .canonicalization import CanonicalRequestBuilder
+
+__all__ = ["SLAContractAdapter", "translate_contract_result", "CanonicalRequestBuilder"]
+from .idempotency import IdempotencyService, idempotency_service
+from .bridge_fallback import BridgeFallbackService
+
+__all__ = [
+    "SLAContractAdapter",
+    "translate_contract_result",
+    "IdempotencyService",
+    "idempotency_service",
+    "BridgeFallbackService",
 ]

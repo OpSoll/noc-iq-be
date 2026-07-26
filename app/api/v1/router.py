@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     transactions,
     webhooks,
     wallets,
+    metrics,
 )
 
 api_router = APIRouter()
@@ -27,3 +28,5 @@ api_router.include_router(payments.router, prefix="/payments", tags=["payments"]
 api_router.include_router(transactions.router, prefix="/transactions", tags=["transactions"])
 api_router.include_router(webhooks.router)
 api_router.include_router(wallets.router, prefix="/wallets", tags=["wallets"])
+api_router.include_router(metrics.router, prefix="/metrics", tags=["metrics"])
+api_router.include_router(metrics.router, prefix="/health", tags=["health"])
