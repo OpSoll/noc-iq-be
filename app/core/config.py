@@ -71,6 +71,18 @@ class Settings(BaseSettings):
     SECRET_KEY: str = ""
     JWT_SECRET_KEY: str = ""
 
+    # Contract idempotency (#362)
+    CONTRACT_IDEMPOTENCY_TTL_SECONDS: int = 3600
+
+    # Bridge fallback strategy (#363)
+    BRIDGE_FALLBACK_ENABLED: bool = True
+    BRIDGE_CIRCUIT_BREAKER_THRESHOLD: int = 3
+    BRIDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 30
+
+    # Zero-downtime migration (#411)
+    MIGRATION_BATCH_SIZE: int = 500
+    MIGRATION_SHADOW_SUFFIX: str = "_shadow"
+
     @property
     def horizon_url(self) -> str:
         """Horizon base URL derived from STELLAR_NETWORK."""
