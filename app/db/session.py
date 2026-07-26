@@ -7,14 +7,15 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = "sqlite:///./nociq.db"
-
-engine: Engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
+engine = create_engine(
+    settings.DATABASE_URL,
     pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
 )
 
 
