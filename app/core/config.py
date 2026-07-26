@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
 
+    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
+
+    WALLET_CACHE_LOCK_TIMEOUT: int = 5
+    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
+    WALLET_CACHE_TTL: int = 300
+    REDIS_URL: str = "redis://localhost:6379/1"
+
     class Config:
         env_file = ".env"
 

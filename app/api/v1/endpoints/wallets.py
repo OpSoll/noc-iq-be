@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 
 from app.models.wallet import (
     Wallet,
@@ -28,6 +28,11 @@ def wallets_ping():
     return {"message": "wallets ok"}
 
 
+@router.get("/metrics")
+def wallet_cache_metrics():
+    return WalletRegistry.get_cache_metrics()
+
+
 @router.get("/{user_id}", response_model=Wallet)
 def get_wallet(user_id: str):
     wallet = WalletRegistry.get_wallet(user_id)
@@ -45,8 +50,9 @@ def get_wallet_status(user_id: str):
 
 
 @router.get("/{address}/balance", response_model=WalletBalanceResponse)
-def get_wallet_balance(address: str):
-    balance = WalletRegistry.get_balance(address)
+def get_wallet_balance(address: str, response: Response):
+    balance, cache_status = WalletRegistry.get_balance(address)
     if not balance:
         raise HTTPException(status_code=404, detail="Wallet not found")
+    response.headers["X-Cache-Status"] = cache_status
     return balance

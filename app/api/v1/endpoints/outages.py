@@ -8,6 +8,7 @@ from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.repositories.outage_repository import OutageRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
+from app.core.outage_state_machine import OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
@@ -84,6 +85,14 @@ def update_outage(outage_id: str, payload: OutageUpdate, db: Session = Depends(g
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    if payload.status is not None:
+        try:
+            OutageStateMachine.transition(
+                outage_id, existing.status, payload.status.value
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     updated = repo.update(outage_id, payload)
     return updated
 
@@ -102,6 +111,17 @@ def delete_outage(outage_id: str, db: Session = Depends(get_db)):
 @router.post("/{outage_id}/resolve")
 def resolve_outage(outage_id: str, payload: ResolveOutageRequest, db: Session = Depends(get_db)):
     repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    try:
+        OutageStateMachine.transition(
+            outage_id, outage.status, "resolved"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     outage = repo.resolve(outage_id, payload.mttr_minutes)
     if not outage:
         raise HTTPException(status_code=404, detail="Outage not found")
@@ -164,3 +184,17 @@ def recompute_sla(outage_id: str, db: Session = Depends(get_db)):
 
     audit_log.log("sla_recomputed", {"id": outage.id})
     return {"sla": stored_sla, "payment": payment}
+
+
+@router.get("/{outage_id}/transitions")
+def get_valid_transitions(outage_id: str, db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    valid = OutageStateMachine.get_valid_next_states(outage.status)
+    return {
+        "outage_id": outage_id,
+        "current_status": outage.status,
+        "valid_next_states": sorted(valid),
+    }
