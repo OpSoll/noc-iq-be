@@ -13,6 +13,7 @@ from app.models.wallet import (
 from app.services.wallet_registry import WalletRegistry
 from app.services.audit_log import audit_log, WalletAuditEvents
 from app.core.security import require_engineer
+from app.core.dependencies import get_wallet_registry
 
 router = APIRouter()
 

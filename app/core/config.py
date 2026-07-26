@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/nociq"
     API_V1_PREFIX: str = "/api/v1"
+    API_V2_PREFIX: str = "/api/v2"
     ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
@@ -100,6 +101,9 @@ def validate_critical_settings(config: Settings) -> None:
 
     if not config.API_V1_PREFIX.startswith("/"):
         errors.append("API_V1_PREFIX must start with '/'.")
+
+    if not config.API_V2_PREFIX.startswith("/"):
+        errors.append("API_V2_PREFIX must start with '/'.")
 
     if len(config.API_V1_PREFIX) > 1 and config.API_V1_PREFIX.endswith("/"):
         errors.append("API_V1_PREFIX must not end with '/' unless it is the root path.")
