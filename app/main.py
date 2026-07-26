@@ -29,10 +29,15 @@ async def check_celery() -> bool:
     except Exception:
         return False
 
+from app.api.v1.router import api_router
+from app.core.lifespan import lifespan
+from app.core.rate_limiter import RateLimiterMiddleware
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="NOCIQ Backend API"
+    description="NOCIQ Backend API",
+    lifespan=lifespan,
 )
 
 # Add correlation middleware first (before CORS to ensure it runs on all requests)
@@ -48,6 +53,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RateLimiterMiddleware)
 
 
 # Health checks
@@ -69,10 +75,8 @@ async def readiness():
         }
     }
 
-# Legacy health check (now liveness)
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
-# API routes
 app.include_router(api_router, prefix="/api/v1")
