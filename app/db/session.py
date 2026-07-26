@@ -6,6 +6,14 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import QueuePool
+from __future__ import annotations
+
+import logging
+from typing import Generator
+
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
@@ -19,9 +27,20 @@ engine: Engine = create_engine(
     poolclass=QueuePool,
     pool_size=settings.DB_POOL_SIZE,
     max_overflow=settings.DB_POOL_MAX_OVERFLOW,
+engine = create_engine(
+    settings.DATABASE_URL,
     pool_pre_ping=True,
     pool_timeout=30,
 )
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
@@ -63,8 +82,25 @@ pool_health = PoolHealthChecker(engine)
 
 
 def get_db():
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def warmup_db_pool() -> None:
+    """Eagerly create a connection to fail fast on misconfiguration."""
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("Database pool warmed up successfully")
+    except Exception:
+        logger.exception("Failed to warm up database pool")
+
+
+def shutdown_db_pool() -> None:
+    """Dispose of all pooled connections."""
+    engine.dispose()
+    logger.info("Database pool disposed")

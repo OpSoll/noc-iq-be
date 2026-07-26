@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -20,6 +20,7 @@ from app.models.payment import (
 )
 from app.utils.correlation import get_correlation_id
 from app.repositories.payment_repository import PaymentRepository
+from app.services.idempotency_service import IdempotencyService
 from app.services.contracts.sla_adapter import check_blockchain_payment_status
 from app.services.audit_log import audit_log
 from app.core.security import get_current_user, require_admin, require_engineer
@@ -28,6 +29,11 @@ router = APIRouter()
 
 _SEEN_NONCES: dict[str, float] = {}
 CALLBACK_NONCE_TTL_SECONDS = 300  
+
+@router.get("/idempotency/metrics")
+def idempotency_metrics(db: Session = Depends(get_db)):
+    service = IdempotencyService(db)
+    return service.get_metrics()
 
 
 def _evict_stale_nonces() -> None:
@@ -186,6 +192,49 @@ def get_payment(transaction_id: str, current_user=Depends(require_engineer), db:
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
     return payment
+
+
+@router.post("/{outage_id}/create", response_model=PaymentTransaction)
+def create_payment_for_outage(
+    outage_id: str,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    idempotency_key = request.headers.get("X-Idempotency-Key")
+    service = IdempotencyService(db)
+
+    if idempotency_key:
+        cached = service.lookup(idempotency_key)
+        if cached is not None:
+            response.status_code = cached["status_code"]
+            return cached["response_json"]
+
+    repo = PaymentRepository(db)
+    from app.models.sla import SLAResult
+    from datetime import datetime
+
+    payment = PaymentTransaction(
+        id=f"pay_{outage_id[:12]}",
+        transaction_hash=f"outage-{outage_id}",
+        type="sla_settlement",
+        amount=0.0,
+        asset_code="USDC",
+        from_address="SYSTEM_POOL",
+        to_address="OUTAGE_SETTLEMENT",
+        status="pending",
+        outage_id=outage_id,
+        sla_result_id=None,
+        created_at=datetime.utcnow(),
+        confirmed_at=None,
+    )
+    created = repo.create(payment)
+
+    if idempotency_key:
+        service.store(idempotency_key, created.model_dump(mode="json"), 201)
+
+    response.status_code = 201
+    return created
 
 
 class ReconcileRequest(BaseModel):

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query, status, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from app.models.wallet import (
     Wallet,
@@ -13,6 +13,7 @@ from app.models.wallet import (
 from app.services.wallet_registry import WalletRegistry
 from app.services.audit_log import audit_log, WalletAuditEvents
 from app.core.security import require_engineer
+from app.core.dependencies import get_wallet_registry
 
 router = APIRouter()
 
@@ -60,6 +61,11 @@ def link_wallet(payload: WalletLinkRequest, current_user=Depends(require_enginee
 @router.get("/ping")
 def wallets_ping():
     return {"message": "wallets ok"}
+
+
+@router.get("/metrics")
+def wallet_cache_metrics():
+    return WalletRegistry.get_cache_metrics()
 
 
 @router.get("/{user_id}", response_model=Wallet)
