@@ -1,4 +1,25 @@
-fastapi
-uvicorn[standard]
+# Core framework
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
 prometheus_client
+
+# Database
+sqlalchemy==2.0.41
+psycopg2-binary==2.9.10
+alembic==1.16.4
+
+# Settings & validation
+pydantic-settings==2.10.1
 pydantic[email]
+
+# Task queue
+celery==5.5.3
+
+# HTTP client
+httpx==0.28.1
+
+# Multipart form parsing (file uploads)
+python-multipart==0.0.20
+
+# Password hashing
+passlib[bcrypt]==1.7.4
