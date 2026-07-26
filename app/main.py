@@ -5,7 +5,10 @@ from sqlalchemy import text
 from redis import Redis
 
 from app.api.v1.router import api_router
+from app.api.v2.router import api_v2_router
 from app.core.config import settings, validate_critical_settings
+from app.core.session_hygiene import debug_router as session_debug_router
+from app.core.dependencies import di_router
 from app.db.session import engine
 from app.middleware.correlation import CorrelationMiddleware
 from app.middleware.payload_size import PayloadSizeMiddleware
@@ -56,6 +59,17 @@ app.add_middleware(
 app.add_middleware(RateLimiterMiddleware)
 
 
+# ---------------------------------------------------------------------------
+# API version header middleware (#414)
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def add_api_version_header(request, call_next):
+    response = await call_next(request)
+    response.headers["X-API-Version"] = settings.VERSION
+    return response
+
+
 # Health checks
 @app.get("/health/liveness")
 def liveness():
@@ -79,4 +93,22 @@ async def readiness():
 def health_check():
     return {"status": "ok"}
 
+# Debug / dependency-injection routers (admin only)
+app.include_router(session_debug_router)
+app.include_router(di_router)
+
+# Deprecation header for v1 endpoints (#414)
+@app.middleware("http")
+async def add_v1_deprecation_header(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(settings.API_V1_PREFIX):
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = "2027-01-01T00:00:00Z"
+    return response
+
+# API v1 routes
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+# API v2 routes
+app.include_router(api_v2_router, prefix=settings.API_V2_PREFIX)
 app.include_router(api_router, prefix="/api/v1")
