@@ -26,7 +26,7 @@ Important rule:
 - exposing aggregation and audit endpoints
 - acting as the future bridge to Soroban contracts
 
-As of the current stabilized baseline, the backend is strongest in the outage and SLA domains. Some other domains exist in the codebase but are still placeholder or partially wired.
+As of the current stabilized baseline, the backend is strongest in the outage and SLA domains. Other domains are now routed, but not all of them are equally production-ready.
 
 ## Current Stack
 
@@ -39,26 +39,36 @@ As of the current stabilized baseline, the backend is strongest in the outage an
 - Celery
 - HTTPX
 
-Dependencies are declared in [requirements.txt](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/requirements.txt).
+Dependencies are declared in [requirements.txt](requirements.txt).
 
 ## Active Runtime Surface
 
-The app entrypoint is [app/main.py](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/app/main.py).
+The app entrypoint is [app/main.py](app/main.py).
 
-Current active routes are wired through [app/api/v1/router.py](/Users/m-ibinola/Documents/personal/semilore/noc-iq-be/app/api/v1/router.py):
+Current active routes are wired through [app/api/v1/router.py](app/api/v1/router.py):
 
 - `/health`
 - `/api/v1/audit`
+- `/api/v1/jobs`
 - `/api/v1/outages`
 - `/api/v1/sla`
+- `/api/v1/sla/disputes`
 - `/api/v1/auth`
 - `/api/v1/payments`
+- `/api/v1/webhooks`
 - `/api/v1/wallets`
 
-Important nuance:
+Module maturity on the routed runtime:
 
-- `outages` and `sla` are the most implemented domains
-- `payments`, `wallets`, and `auth` currently expose minimal placeholder endpoints
+- strongest and most integration-focused: `outages`, `sla`, `audit`
+- active and functional with lighter implementations: `auth`, `payments`, `wallets`
+- active but operationally dependent on database or worker infrastructure: `jobs`, `webhooks`, `sla disputes`
+
+Dormant or contributor-only paths:
+
+- `app/services/outage_store.py` is a legacy helper and not part of the routed runtime
+- local task and webhook support still depend on optional infrastructure like Redis and Celery for full behavior
+- the backend contains both a local SLA execution path and a contract adapter path; `CONTRACT_EXECUTION_MODE` determines which bridge is active at runtime
 
 ## Outage And SLA Flow
 
@@ -79,7 +89,7 @@ Key files:
 - `app/services/sla/sla_calculator.py`
 - `app/services/sla/config.py`
 
-Right now, SLA execution is still local backend logic. The repo is prepared to be the contract bridge, but a full contract-backed adapter is not yet the primary runtime path.
+The backend now includes both a local SLA calculator and a contract adapter surface. By default it uses the local adapter mode, but the runtime is structured so contract-backed execution can be enabled through configuration.
 
 ## Project Structure
 
@@ -119,19 +129,22 @@ pip install -r requirements.txt
 
 ### Configure Environment
 
-Create a `.env` file in the repo root.
+Create a `.env` file in the repo root using `.env.example` as a template.
 
-Common settings used by the app:
-
-```env
-PROJECT_NAME=NOCIQ API
-VERSION=1.0.0
-DEBUG=true
-DATABASE_URL=postgresql://postgres:password@localhost:5432/nociq
-ALLOWED_ORIGINS=["http://localhost:3000","http://localhost:3001"]
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```bash
+cp .env.example .env
+# Edit .env with your actual configuration values
 ```
+
+**SECURITY WARNING**: Never commit `.env` files to version control. The `.env.example` file shows the required variables with placeholder values.
+
+Startup validation fails fast if critical settings are malformed. In particular:
+
+- `API_V1_PREFIX` must start with `/`
+- `DATABASE_URL` must include a URL scheme
+- `ALLOWED_ORIGINS` must be valid `http` or `https` origins
+- `STELLAR_NETWORK` and `CONTRACT_EXECUTION_MODE` must be supported values
+- when `CELERY_TASK_ALWAYS_EAGER=false`, both Celery URLs must be present
 
 ### Run Migrations
 
@@ -149,7 +162,9 @@ The backend will be available at:
 
 - `http://localhost:8000`
 - Swagger docs: `http://localhost:8000/docs`
-- Health check: `http://localhost:8000/health`
+- Liveness check: `http://localhost:8000/health/liveness`
+- Readiness check: `http://localhost:8000/health/readiness`
+- Legacy compatibility: `http://localhost:8000/health`
 
 ## Verification Notes
 
@@ -161,19 +176,67 @@ As of the latest stabilization pass:
 
 To exercise outage and SLA routes meaningfully, you still need a reachable PostgreSQL instance because those routes depend on the database layer.
 
+A new migration verification helper is available in `tests/test_verify_migrations.py` to validate the Alembic chain and ensure the current database state matches the head revision.
+
 ## Current Limitations
 
 This backend is stabilized, but not feature-complete.
 
 Examples:
 
-- `payments` is still a placeholder surface
-- `wallets` is still a placeholder surface
-- `auth` is still a placeholder surface
-- some operational modules such as jobs, webhooks, and disputes exist in the repo but are not part of the main routed runtime path
-- the live SLA path is currently backend-local logic rather than a full Soroban invocation path
+- `auth` and `wallets` are active but currently backed by lightweight in-memory stores rather than durable identity infrastructure
+- `jobs` and `webhooks` are routed, but they rely on optional worker infrastructure to be fully operational outside eager or local modes
+- the contract path exists, but the default runtime still favors the local adapter mode
+- documentation and contributor expectations should follow the routed API surface, not every helper or legacy module under `app/services`
 
-## Related Repositories
+## Security Guidelines
 
-- `noc-iq-fe` -> frontend application
-- `noc-iq-contracts` -> Soroban smart contracts
+### For Contributors
+
+**NEVER commit sensitive information**:
+- API keys, secret keys, or passwords
+- Private keys for any blockchain network
+- Database connection strings with credentials
+- JWT secrets or encryption keys
+- Personal access tokens
+
+**ALWAYS use environment variables** for:
+- Database credentials
+- API keys and secrets
+- Blockchain private keys
+- JWT signing secrets
+- External service credentials
+
+**Documentation examples** should:
+- Use placeholder values clearly marked as examples
+- Never include real credentials or keys
+- Include security warnings where sensitive operations are discussed
+- Show secure patterns (environment variables, secure key management)
+
+### Environment Variables
+
+The application uses the following sensitive environment variables:
+
+```env
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/nociq
+
+# Authentication
+JWT_SECRET_KEY=your-jwt-secret-here
+
+# Stellar Blockchain (if enabled)
+STELLAR_POOL_SECRET_KEY=your-stellar-secret-key-here
+
+# External Services
+REDIS_URL=redis://user:password@localhost:6379
+CELERY_BROKER_URL=redis://user:password@localhost:6379/0
+```
+
+**Never commit `.env` files** to version control. Use `.env.example` for documentation.
+
+### Reporting Security Issues
+
+If you discover a security vulnerability:
+1. Do not create a public issue
+2. Email security@noc-iq.com with details
+3. Allow time for the issue to be addressed before public disclosure
