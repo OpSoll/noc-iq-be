@@ -1,3 +1,4 @@
+from typing import List
 import csv
 import io
 import json
@@ -24,6 +25,7 @@ from app.repositories.outage_event_repository import OutageEventRepository
 from app.repositories.outage_repository import OutageRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
+from app.core.outage_state_machine import OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
@@ -84,6 +86,7 @@ def list_outages(
     end_date: datetime | None = None,
     page: int = 1,
     page_size: int = 20,
+    include_deleted: bool = Query(False, description="Include soft-deleted outages"),
     sort_by: OutageSortField = Query(
         default=OutageSortField.detected_at,
         description="Sort field (enum). Supported: detected_at, site_name, severity, status, id. Invalid values rejected with 422.",
@@ -125,6 +128,23 @@ def list_outages(
         sort_by=sort_by,
         sort_direction=sort_direction,
     )
+
+
+@router.get("/deleted", response_model=PaginatedOutages)
+def list_deleted_outages(
+    page: int = 1,
+    page_size: int = 20,
+):
+    items = outage_store.list_deleted()
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @router.get("/{outage_id}", response_model=Outage)
@@ -338,6 +358,14 @@ def update_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(re
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    if payload.status is not None:
+        try:
+            OutageStateMachine.transition(
+                outage_id, existing.status, payload.status.value
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         updated = repo.update(outage_id, payload)
     except ValueError as exc:
@@ -376,8 +404,23 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    result = outage_store.soft_delete(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
     repo.delete(outage_id)
-    return {"message": "Outage deleted successfully"}
+    return {"message": "Outage deleted successfully", "deleted_at": result.deleted_at}
+
+
+@router.post("/{outage_id}/restore")
+def restore_outage(outage_id: str):
+    existing = outage_store.get(outage_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    result = outage_store.restore(outage_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    return {"message": "Outage restored successfully", "outage": result}
 
 
 @router.post("/{outage_id}/resolve")
@@ -396,6 +439,16 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
     Also calculates SLA metrics and triggers webhook notifications.
     """
     repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+
+    try:
+        OutageStateMachine.transition(
+            outage_id, outage.status, "resolved"
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     # Acquire advisory lock to prevent concurrent resolutions
     try:
@@ -514,3 +567,17 @@ def get_outage_timeline(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/{outage_id}/transitions")
+def get_valid_transitions(outage_id: str, db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    outage = repo.get(outage_id)
+    if not outage:
+        raise HTTPException(status_code=404, detail="Outage not found")
+    valid = OutageStateMachine.get_valid_next_states(outage.status)
+    return {
+        "outage_id": outage_id,
+        "current_status": outage.status,
+        "valid_next_states": sorted(valid),
+    }

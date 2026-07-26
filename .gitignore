@@ -45,3 +45,6 @@ Thumbs.db
 
 # mypy
 .mypy_cache/
+
+# Docker
+docker-compose.override.yml
