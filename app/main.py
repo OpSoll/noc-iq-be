@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.api.v1.router import api_router
 from fastapi.middleware.cors import CORSMiddleware
+from app.middleware.pool_saturation import PoolSaturationMiddleware
 
 app = FastAPI(
     title="NOCIQ API",
@@ -8,6 +9,7 @@ app = FastAPI(
     description="NOCIQ Backend API"
 )
 
+app.add_middleware(PoolSaturationMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,10 +20,9 @@ app.add_middleware(
 )
 
 
-# Health check
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
-# API routes
+
 app.include_router(api_router, prefix="/api/v1")
