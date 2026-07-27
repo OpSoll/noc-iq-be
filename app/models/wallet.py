@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Literal, Optional
 import re
 
 from pydantic import BaseModel, Field, field_validator
@@ -17,6 +17,8 @@ class Wallet(BaseModel):
     active: bool = True
     trustline_ready: bool = False
     cached_at: Optional[datetime] = None  # when data was last cached; None means never refreshed
+    # BE-033: Cache freshness indicator
+    cache_status: str = "fresh"  # "fresh", "stale", or "live"
 
 
 class WalletCreateRequest(BaseModel):
@@ -54,6 +56,14 @@ class WalletBalanceResponse(BaseModel):
     address: str
     balances: Dict[str, AssetBalance]
     last_updated: datetime
+    # BE-033: Cache metadata
+    cache_status: str = "fresh"
+    cache_ttl_seconds: int | None = None
+    cached_at: datetime | None = None
+    # #283: source distinguishes cache hit from live read or stale fallback
+    source: Literal["cache", "live", "stale_fallback"] = "live"
+    error_code: str | None = None
+    error_detail: str | None = None
 
 
 class WalletStatusResponse(BaseModel):
@@ -64,6 +74,10 @@ class WalletStatusResponse(BaseModel):
     usable: bool
     active: bool
     last_updated: datetime
+    # BE-033: Cache metadata for frontend polling decisions
+    cache_status: str = "fresh"  # "fresh", "stale", or "live"
+    cache_ttl_seconds: int | None = None  # seconds until cache expires
+    cached_at: datetime | None = None  # when this data was cached
 
 
 class WalletTrustlineResponse(BaseModel):
@@ -71,6 +85,9 @@ class WalletTrustlineResponse(BaseModel):
     public_key: str
     trustline_ready: bool
     trustline_error: Optional[str] = None
+    # BE-033: Cache metadata
+    cache_status: str = "fresh"
+    cached_at: datetime | None = None
 
 
 class WalletFundingStateResponse(BaseModel):
@@ -78,3 +95,6 @@ class WalletFundingStateResponse(BaseModel):
     public_key: str
     funded: bool
     funding_error: Optional[str] = None
+    # BE-033: Cache metadata
+    cache_status: str = "fresh"
+    cached_at: datetime | None = None

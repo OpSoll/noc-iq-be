@@ -72,5 +72,6 @@ class OutageEventResponse(BaseModel):
     id: str
     outage_id: str
     event_type: str
+    schema_version: str
     detail: Optional[Dict[str, Any]] = None
     occurred_at: datetime

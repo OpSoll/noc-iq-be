@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Literal, Mapping, Optional
+from typing import Any, Dict, List, Literal, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import case, func, select, update
@@ -24,6 +24,10 @@ def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
         amount=orm.amount,
         payment_type=orm.payment_type,
         rating=orm.rating,
+        policy_version=orm.policy_version,
+        threshold_source=orm.threshold_source,
+        reason_code=orm.reason_code,
+        decision_trace=orm.decision_trace,
     )
 
 
@@ -37,13 +41,23 @@ class SLARepository:
         else:
             payload = dict(sla_data)
 
-        # Demote any existing latest record for this outage (#154)
-        self.db.execute(
-            update(SLAResultORM)
-            .where(SLAResultORM.outage_id == payload["outage_id"])
-            .where(SLAResultORM.is_latest.is_(True))
-            .values(is_latest=False)
+        # Use row-level locking to prevent race conditions when updating latest flag
+        # First, lock any existing latest row for this outage
+        existing_latest = (
+            self.db.query(SLAResultORM)
+            .filter(SLAResultORM.outage_id == payload["outage_id"], SLAResultORM.is_latest.is_(True))
+            .with_for_update(nowait=False)
+            .first()
         )
+
+        # Demote any existing latest record for this outage (#154, #219)
+        if existing_latest:
+            self.db.execute(
+                update(SLAResultORM)
+                .where(SLAResultORM.outage_id == payload["outage_id"])
+                .where(SLAResultORM.is_latest.is_(True))
+                .values(is_latest=False)
+            )
 
         orm = SLAResultORM(
             outage_id=payload["outage_id"],
@@ -53,7 +67,11 @@ class SLARepository:
             amount=payload["amount"],
             payment_type=payload["payment_type"],
             rating=payload["rating"],
+            policy_version=payload.get("policy_version", "1.0"),
+            threshold_source=payload.get("threshold_source", "config"),
             is_latest=True,
+            reason_code=payload.get("reason_code"),
+            decision_trace=payload.get("decision_trace"),
         )
         self.db.add(orm)
         self.db.commit()
@@ -280,7 +298,9 @@ class SLARepository:
             net_payout=kpis.net_payout,
             avg_mttr=perf.avg_mttr,
             created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            checksum="",  # Temporary value, will be computed
         )
+        orm.checksum = orm.compute_checksum()
         self.db.add(orm)
         self.db.commit()
         self.db.refresh(orm)
@@ -293,6 +313,7 @@ class SLARepository:
             total_penalties=orm.total_penalties,
             net_payout=orm.net_payout,
             avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
             created_at=str(orm.created_at),
         )
 
@@ -315,5 +336,198 @@ class SLARepository:
             total_penalties=orm.total_penalties,
             net_payout=orm.net_payout,
             avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
             created_at=str(orm.created_at),
         )
+
+    def rebuild_snapshot(self, snapshot_key: str = "global") -> SLAAnalyticsSnapshot:
+        """Rebuild a snapshot from current live data. Idempotent operation.
+        
+        This method:
+        1. Aggregates current SLA data from scratch
+        2. Creates a new snapshot row (doesn't delete old ones)
+        3. Returns the new snapshot
+        
+        Safe for reconciliation after migrations or data drift.
+        """
+        # Aggregate fresh data
+        kpis = self.aggregate_dashboard_kpis()
+        perf = self.aggregate_performance()
+        
+        # Create new snapshot with current data
+        orm = SLAAnalyticsSnapshotORM(
+            snapshot_key=snapshot_key,
+            total_outages=kpis.total_outages,
+            total_violations=kpis.total_violations,
+            total_rewards=kpis.total_rewards,
+            total_penalties=kpis.total_penalties,
+            net_payout=kpis.net_payout,
+            avg_mttr=perf.avg_mttr,
+            created_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            checksum="",
+        )
+        orm.checksum = orm.compute_checksum()
+        self.db.add(orm)
+        self.db.commit()
+        self.db.refresh(orm)
+        
+        return SLAAnalyticsSnapshot(
+            id=orm.id,
+            snapshot_key=orm.snapshot_key,
+            total_outages=orm.total_outages,
+            total_violations=orm.total_violations,
+            total_rewards=orm.total_rewards,
+            total_penalties=orm.total_penalties,
+            net_payout=orm.net_payout,
+            avg_mttr=orm.avg_mttr,
+            checksum=orm.checksum,
+            created_at=str(orm.created_at),
+        )
+
+    def verify_snapshot_integrity(self, snapshot_key: str = "global") -> dict:
+        """Verify integrity of the latest snapshot.
+        
+        Returns a dict with:
+        - "valid": bool indicating if the snapshot is intact
+        - "snapshot_id": int if snapshot exists
+        - "error": str if invalid or snapshot missing
+        """
+        orm = (
+            self.db.query(SLAAnalyticsSnapshotORM)
+            .filter(SLAAnalyticsSnapshotORM.snapshot_key == snapshot_key)
+            .order_by(SLAAnalyticsSnapshotORM.created_at.desc())
+            .first()
+        )
+        if not orm:
+            return {"valid": False, "error": "No snapshot found"}
+        computed_checksum = orm.compute_checksum()
+        is_valid = computed_checksum == orm.checksum
+        result = {"valid": is_valid, "snapshot_id": orm.id}
+        if not is_valid:
+            result["error"] = "Checksum mismatch - snapshot may have been tampered with"
+        return result
+
+    def reconcile_snapshots(self, snapshot_key: str = "global") -> dict:
+        """Reconcile snapshots by comparing latest snapshot with live data.
+        
+        Returns reconciliation report showing:
+        - Whether the latest snapshot matches current live aggregates
+        - Differences if any exist
+        - Recommendation to rebuild if drifted
+        
+        This is a read-only operation that helps identify data drift.
+        """
+        # Get latest snapshot
+        latest_snapshot = self.get_latest_snapshot(snapshot_key)
+        
+        # Calculate current live aggregates
+        current_kpis = self.aggregate_dashboard_kpis()
+        current_perf = self.aggregate_performance()
+        
+        if not latest_snapshot:
+            return {
+                "snapshot_key": snapshot_key,
+                "has_snapshot": False,
+                "recommendation": "rebuild",
+                "message": "No snapshot exists. Rebuild recommended.",
+                "current_live_data": {
+                    "total_outages": current_kpis.total_outages,
+                    "total_violations": current_kpis.total_violations,
+                    "total_rewards": current_kpis.total_rewards,
+                    "total_penalties": current_kpis.total_penalties,
+                    "net_payout": current_kpis.net_payout,
+                    "avg_mttr": current_perf.avg_mttr,
+                }
+            }
+        
+        # Compare snapshot with live data
+        drift_detected = (
+            latest_snapshot.total_outages != current_kpis.total_outages or
+            latest_snapshot.total_violations != current_kpis.total_violations or
+            latest_snapshot.total_rewards != current_kpis.total_rewards or
+            latest_snapshot.total_penalties != current_kpis.total_penalties or
+            abs(latest_snapshot.net_payout - current_kpis.net_payout) > 0.01 or
+            abs(latest_snapshot.avg_mttr - current_perf.avg_mttr) > 0.01
+        )
+        
+        differences = {}
+        if drift_detected:
+            if latest_snapshot.total_outages != current_kpis.total_outages:
+                differences["total_outages"] = {
+                    "snapshot": latest_snapshot.total_outages,
+                    "live": current_kpis.total_outages,
+                    "diff": current_kpis.total_outages - latest_snapshot.total_outages,
+                }
+            if latest_snapshot.total_violations != current_kpis.total_violations:
+                differences["total_violations"] = {
+                    "snapshot": latest_snapshot.total_violations,
+                    "live": current_kpis.total_violations,
+                    "diff": current_kpis.total_violations - latest_snapshot.total_violations,
+                }
+            if latest_snapshot.total_rewards != current_kpis.total_rewards:
+                differences["total_rewards"] = {
+                    "snapshot": latest_snapshot.total_rewards,
+                    "live": current_kpis.total_rewards,
+                    "diff": round(current_kpis.total_rewards - latest_snapshot.total_rewards, 2),
+                }
+            if latest_snapshot.total_penalties != current_kpis.total_penalties:
+                differences["total_penalties"] = {
+                    "snapshot": latest_snapshot.total_penalties,
+                    "live": current_kpis.total_penalties,
+                    "diff": round(current_kpis.total_penalties - latest_snapshot.total_penalties, 2),
+                }
+            if abs(latest_snapshot.net_payout - current_kpis.net_payout) > 0.01:
+                differences["net_payout"] = {
+                    "snapshot": latest_snapshot.net_payout,
+                    "live": current_kpis.net_payout,
+                    "diff": round(current_kpis.net_payout - latest_snapshot.net_payout, 2),
+                }
+            if abs(latest_snapshot.avg_mttr - current_perf.avg_mttr) > 0.01:
+                differences["avg_mttr"] = {
+                    "snapshot": latest_snapshot.avg_mttr,
+                    "live": current_perf.avg_mttr,
+                    "diff": round(current_perf.avg_mttr - latest_snapshot.avg_mttr, 2),
+                }
+        
+        return {
+            "snapshot_key": snapshot_key,
+            "has_snapshot": True,
+            "snapshot_id": latest_snapshot.id,
+            "snapshot_created_at": latest_snapshot.created_at,
+            "drift_detected": drift_detected,
+            "recommendation": "rebuild" if drift_detected else "ok",
+            "differences": differences if drift_detected else None,
+            "current_live_data": {
+                "total_outages": current_kpis.total_outages,
+                "total_violations": current_kpis.total_violations,
+                "total_rewards": current_kpis.total_rewards,
+                "total_penalties": current_kpis.total_penalties,
+                "net_payout": current_kpis.net_payout,
+                "avg_mttr": current_perf.avg_mttr,
+            },
+            "snapshot_data": {
+                "total_outages": latest_snapshot.total_outages,
+                "total_violations": latest_snapshot.total_violations,
+                "total_rewards": latest_snapshot.total_rewards,
+                "total_penalties": latest_snapshot.total_penalties,
+                "net_payout": latest_snapshot.net_payout,
+                "avg_mttr": latest_snapshot.avg_mttr,
+            }
+        }
+
+class SlaRepository:
+    def __init__(self, db_session: Any = None):
+        self.db = db_session
+
+    def get_active_sla_targets(self) -> List[Dict[str, Any]]:
+        """
+        Retrieves operational threshold benchmarks.
+        """
+        return [
+            {
+                "sla_contract_id": "sla-core-availability-2026",
+                "target_uptime_percentage": 99.95,
+                "metric_scope": "api_gateway_uptime"
+            }
+        ]
+

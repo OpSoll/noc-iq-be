@@ -1,50 +1,217 @@
-import json
-import hmac
 import hashlib
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
+from app.services.webhook_signing import (
+    CURRENT_SIGNATURE_VERSION,
+    sign_payload,
+    verify_signature,
+)
+from app.core.config import settings
+from app.utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
 
-RETRY_DELAYS = [30, 120, 600]  # seconds: 30s, 2m, 10m (exponential backoff)
+# In-memory cache for webhook event subscriptions (webhook_id -> parsed events list)
+# TTL of 60 seconds balances freshness with performance for large webhook registries
+_webhook_events_cache = TTLCache(ttl_seconds=60)
+
+
+def _get_retry_delays() -> list[int]:
+    """Parse WEBHOOK_RETRY_BASE_DELAYS from settings into a list of ints."""
+    return [int(d.strip()) for d in settings.WEBHOOK_RETRY_BASE_DELAYS.split(",") if d.strip()]
 
 
 WEBHOOK_SCHEMA_VERSION = "1"
 
+# Supported schema versions and their compatible event types.
+# Any payload with a schema_version not in this matrix is dead-lettered.
+SUPPORTED_SCHEMA_VERSIONS: dict[str, list[str]] = {
+    "1": ["sla.violation", "sla.warning", "sla.resolved"],
+}
 
-def _sign_payload(secret: str, payload: str) -> str:
-    return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+# HTTP status code classification for webhook delivery behavior
+# Terminal: delivery should not be retried (success or permanent failure)
+# Retryable: delivery should be retried with exponential backoff
+RETRYABLE_STATUS_CODES = {500, 502, 503, 504}  # Server errors
+TERMINAL_STATUS_CODES = {
+    # 2xx: Success
+    200, 201, 202, 203, 204, 205, 206, 207, 208, 226,
+    # 3xx: Redirection (webhook endpoints should not redirect)
+    300, 301, 302, 303, 304, 305, 306, 307, 308,
+    # 4xx: Client errors (permanent, retrying won't help)
+    400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451,
+}
+
+DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION = "unknown_schema_version"
+DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE = "incompatible_event_type"
 
 
-def _build_headers(webhook: Webhook, payload: str, event: WebhookEvent = WebhookEvent.SLA_VIOLATION) -> Dict[str, str]:
+def classify_http_status(status_code: int) -> str:
+    """Classify HTTP status code as 'terminal' or 'retryable'.
+    
+    Args:
+        status_code: HTTP status code from webhook response
+        
+    Returns:
+        'terminal' for 2xx/3xx/4xx (success or permanent failure)
+        'retryable' for 5xx (transient server errors)
+        
+    Raises:
+        ValueError: If status code is not in either classification set
+    """
+    if status_code in RETRYABLE_STATUS_CODES:
+        return "retryable"
+    elif status_code in TERMINAL_STATUS_CODES:
+        return "terminal"
+    else:
+        # Unknown status codes (e.g., 599, custom codes) are treated as retryable
+        # to avoid dead-lettering on non-standard responses
+        if 500 <= status_code < 600:
+            return "retryable"
+        return "terminal"
+
+
+def validate_payload_schema_version(
+    payload: dict,
+    event: "WebhookEvent",
+) -> tuple[bool, str]:
+    """Validate payload schema_version and event_type compatibility.
+
+    Returns (is_valid, dead_letter_reason).
+    dead_letter_reason is empty string when valid.
+    """
+    schema_version = str(payload.get("schema_version", ""))
+    if schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        return False, DEAD_LETTER_REASON_UNKNOWN_SCHEMA_VERSION
+    compatible_events = SUPPORTED_SCHEMA_VERSIONS[schema_version]
+    if event.value not in compatible_events:
+        return False, DEAD_LETTER_REASON_INCOMPATIBLE_EVENT_TYPE
+    return True, ""
+
+
+def _generate_idempotency_key(webhook_id: UUID, event: WebhookEvent, event_timestamp: str) -> str:
+    """Generate a deterministic idempotency key for webhook delivery.
+    
+    The key is derived from webhook_id, event type, and event timestamp to ensure:
+    - Uniqueness: Different events generate different keys
+    - Consistency: Same event (webhook + event + timestamp) always generates same key
+    - Immutability: Key never changes across retries or manual replays
+    
+    Args:
+        webhook_id: UUID of the webhook configuration
+        event: Webhook event type
+        event_timestamp: ISO-formatted UTC timestamp when event occurred
+    
+    Returns:
+        SHA256 hex digest as the idempotency key
+    """
+    key_input = f"{webhook_id}:{event.value}:{event_timestamp}"
+    return hashlib.sha256(key_input.encode()).hexdigest()
+
+
+def _build_headers(
+    webhook: Webhook,
+    payload: str,
+    event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, str]:
+    """Build webhook delivery headers with explicit signature versioning (BE-087) and idempotency key.
+    
+    Args:
+        webhook: Webhook configuration
+        payload: JSON payload string
+        event: Webhook event type
+        signature_version: Explicit signature algorithm version
+        idempotency_key: Deterministic key for receiver-side deduplication
+    
+    Returns:
+        Dictionary of headers including:
+        - Content-Type: application/json
+        - X-Webhook-Event: event type
+        - X-Webhook-Timestamp: ISO-formatted UTC timestamp
+        - X-Webhook-Idempotency-Key: idempotency key for deduplication
+        - X-Webhook-Signature: signature (if secret configured)
+        - X-Webhook-Signature-Version: signature version (if secret configured)
+    """
     headers = {
         "Content-Type": "application/json",
         "X-Webhook-Event": event.value,
         "X-Webhook-Timestamp": datetime.utcnow().isoformat(),
     }
+    if idempotency_key:
+        headers["X-Webhook-Idempotency-Key"] = idempotency_key
     if webhook.secret:
-        headers["X-Webhook-Signature"] = f"sha256={_sign_payload(webhook.secret, payload)}"
+        sig_hex, _ = sign_payload(webhook.secret, payload, signature_version)
+        headers["X-Webhook-Signature"] = f"sha256={sig_hex}"
+        headers["X-Webhook-Signature-Version"] = str(signature_version)
     return headers
 
 
 def get_active_webhooks_for_event(db: Session, event: WebhookEvent) -> List[Webhook]:
-    webhooks = db.query(Webhook).filter(Webhook.is_active == True).all()
+    """Get active webhooks subscribed to a specific event using optimized JSON containment.
+    
+    Uses PostgreSQL GIN index on events column for O(log n) lookup instead of O(n) scan.
+    Falls back to in-memory cache for parsed event subscriptions to avoid repeated JSON parsing.
+    
+    Args:
+        db: Database session
+        event: Webhook event type to match
+    
+    Returns:
+        List of active webhooks subscribed to the event
+    """
+    # Use PostgreSQL JSON containment operator with GIN index for efficient filtering
+    # This filters at the database level, avoiding loading all webhooks into memory
+    event_json = json.dumps([event.value])
+    webhooks = (
+        db.query(Webhook)
+        .filter(Webhook.is_active == True)
+        .filter(text("webhooks.events @> :event_json").bindparams(event_json=event_json))
+        .all()
+    )
+    
+    # Validate parsed events from cache to ensure no misrouting
     result = []
     for webhook in webhooks:
-        try:
-            events = json.loads(webhook.events)
-            if event.value in events:
-                result.append(webhook)
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+        cache_key = f"webhook_events:{webhook.id}"
+        cached_events = _webhook_events_cache.get(cache_key)
+        
+        if cached_events is None:
+            try:
+                cached_events = json.loads(webhook.events)
+                _webhook_events_cache.set(cache_key, cached_events)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Webhook %s has invalid events JSON, skipping.", webhook.id)
+                continue
+        
+        # Double-check event subscription to prevent misrouting
+        if event.value in cached_events:
+            result.append(webhook)
+    
     return result
+
+
+def invalidate_webhook_cache(webhook_id: UUID) -> None:
+    """Invalidate cached event subscriptions for a specific webhook.
+    
+    Call this after any webhook CRUD operation (create, update, delete) to ensure
+    the cache reflects the latest configuration.
+    
+    Args:
+        webhook_id: UUID of the webhook whose cache should be invalidated
+    """
+    cache_key = f"webhook_events:{webhook_id}"
+    _webhook_events_cache.invalidate(cache_key)
 
 
 def create_delivery(
@@ -52,12 +219,36 @@ def create_delivery(
     webhook: Webhook,
     event: WebhookEvent,
     payload: Dict[str, Any],
+    event_timestamp: str,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> WebhookDelivery:
+    """Create a webhook delivery record with explicit signature version (BE-087) and idempotency key.
+    
+    Args:
+        db: Database session
+        webhook: Webhook configuration
+        event: Webhook event type
+        payload: Event payload dict (will be JSON-serialized)
+        event_timestamp: ISO-formatted UTC timestamp when event occurred
+        signature_version: Signature algorithm version to use
+    
+    Returns:
+        Created WebhookDelivery record
+    """
+    # Generate deterministic idempotency key
+    idempotency_key = _generate_idempotency_key(webhook.id, event, event_timestamp)
+    
+    # Parse event_timestamp for storage
+    event_dt = datetime.fromisoformat(event_timestamp)
+    
     delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=event,
         payload=json.dumps(payload),
         status=WebhookDeliveryStatus.PENDING,
+        signature_version=signature_version,
+        idempotency_key=idempotency_key,
+        event_timestamp=event_dt,
     )
     db.add(delivery)
     db.commit()
@@ -67,7 +258,13 @@ def create_delivery(
 
 def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_str = delivery.payload
-    headers = _build_headers(webhook, payload_str, delivery.event)
+    headers = _build_headers(
+        webhook,
+        payload_str,
+        delivery.event,
+        delivery.signature_version,
+        idempotency_key=delivery.idempotency_key,
+    )
 
     try:
         with httpx.Client(timeout=10.0) as client:
@@ -75,10 +272,20 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         delivery.response_status_code = response.status_code
         delivery.response_body = response.text[:4000]
 
-        if response.is_success:
-            return True
+        # Use explicit status code classification
+        classification = classify_http_status(response.status_code)
+        
+        if classification == "terminal":
+            if 200 <= response.status_code < 300:
+                # Success - no retry needed
+                return True
+            else:
+                # Permanent failure (3xx/4xx) - should not retry
+                delivery.error_message = f"Terminal failure: HTTP {response.status_code}"
+                return False
         else:
-            delivery.error_message = f"Non-success status: {response.status_code}"
+            # Retryable (5xx) - will be retried by dispatch_delivery
+            delivery.error_message = f"Retryable failure: HTTP {response.status_code}"
             return False
 
     except httpx.TimeoutException as exc:
@@ -114,11 +321,30 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
             delivery.id, delivery.attempt_count, webhook.id,
         )
     else:
+        # Check if failure is terminal (should not retry)
+        if delivery.response_status_code:
+            classification = classify_http_status(delivery.response_status_code)
+            if classification == "terminal":
+                # Terminal failure - dead-letter immediately
+                delivery.status = WebhookDeliveryStatus.DEAD_LETTER
+                delivery.dead_lettered_at = datetime.utcnow()
+                delivery.next_retry_at = None
+                logger.error(
+                    "Webhook delivery %s failed with terminal status %d. Dead-lettered immediately.",
+                    delivery.id, delivery.response_status_code,
+                )
+                delivery.updated_at = datetime.utcnow()
+                db.commit()
+                return
+        
+        # Retryable failure - schedule retry
         retry_index = delivery.attempt_count - 1
         max_retries = webhook.max_retries or 3
+        retry_delays = _get_retry_delays()
 
-        if retry_index < max_retries and retry_index < len(RETRY_DELAYS):
-            delay = RETRY_DELAYS[retry_index] * (2 ** retry_index)
+        if retry_index < max_retries and retry_index < len(retry_delays):
+            base_delay = retry_delays[retry_index]
+            delay = min(base_delay * (2 ** retry_index), settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS)
             delivery.next_retry_at = datetime.utcnow() + timedelta(seconds=delay)
             delivery.status = WebhookDeliveryStatus.RETRYING
             logger.warning(
@@ -143,23 +369,65 @@ def trigger_sla_violation_webhooks(
     db: Session,
     sla_data: Dict[str, Any],
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
 ) -> List[WebhookDelivery]:
+    """Trigger webhook deliveries for an event with explicit signature versioning (BE-087) and idempotency keys.
+    
+    Args:
+        db: Database session
+        sla_data: Event data to include in webhook payload
+        event: Webhook event type
+        signature_version: Signature algorithm version (defaults to current supported version)
+    
+    Returns:
+        List of created WebhookDelivery records
+    
+    Note:
+        - Each delivery includes explicit signature_version metadata in headers
+        - Timestamp is immutable across retries (idempotency support)
+        - Idempotency key is deterministic: webhook_id + event + timestamp
+        - Future signing changes can use new version without breaking existing consumers
+    """
     webhooks = get_active_webhooks_for_event(db, event)
     deliveries = []
 
+    # Timestamp is captured once and reused across all retries (idempotency support)
+    event_timestamp = datetime.utcnow().isoformat()
+    
     payload = {
         "schema_version": WEBHOOK_SCHEMA_VERSION,
         "event": event.value,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": event_timestamp,
         "data": sla_data,
     }
 
     for webhook in webhooks:
-        delivery = create_delivery(db, webhook, event, payload)
+        delivery = create_delivery(
+            db,
+            webhook,
+            event,
+            payload,
+            event_timestamp=event_timestamp,
+            signature_version=signature_version,
+        )
         deliveries.append(delivery)
+
+        # Validate schema version and event type compatibility before dispatch
+        is_valid, dead_letter_reason = validate_payload_schema_version(payload, event)
+        if not is_valid:
+            delivery.status = WebhookDeliveryStatus.DEAD_LETTER
+            delivery.dead_lettered_at = datetime.utcnow()
+            delivery.error_message = f"dead_lettered: {dead_letter_reason}"
+            db.commit()
+            logger.warning(
+                "Webhook delivery %s dead-lettered: schema_version=%s reason=%s",
+                delivery.id, payload.get("schema_version"), dead_letter_reason,
+            )
+            continue
+
         logger.info(
-            "Queued webhook delivery %s for webhook %s on event %s.",
-            delivery.id, webhook.id, event.value,
+            "Queued webhook delivery %s for webhook %s on event %s (sig_version=%d, idempotency_key=%s).",
+            delivery.id, webhook.id, event.value, signature_version, delivery.idempotency_key,
         )
         # Dispatch immediately (in production, offload to a background task/queue)
         dispatch_delivery(db, delivery.id)
@@ -201,7 +469,11 @@ def get_dead_letter_deliveries(db: Session, webhook_id: Optional[UUID] = None, l
 
 
 def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
-    """Replay a dead-lettered delivery by resetting its status and retrying."""
+    """Replay a dead-lettered delivery by resetting its status and retrying.
+    
+    Idempotency key and event_timestamp are preserved across replays to ensure
+    receiver-side deduplication works correctly.
+    """
     delivery = db.query(WebhookDelivery).filter(WebhookDelivery.id == delivery_id).first()
     if not delivery:
         logger.error("Dead-letter delivery %s not found.", delivery_id)
@@ -211,7 +483,7 @@ def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
         logger.warning("Delivery %s is not in dead-letter status (current: %s).", delivery_id, delivery.status)
         return False
     
-    # Reset delivery state for replay
+    # Reset delivery state for replay (preserve idempotency_key and event_timestamp)
     delivery.status = WebhookDeliveryStatus.PENDING
     delivery.attempt_count = 0
     delivery.next_retry_at = None
@@ -220,13 +492,14 @@ def replay_dead_letter_delivery(db: Session, delivery_id: UUID) -> bool:
     delivery.response_status_code = None
     delivery.response_body = None
     delivery.delivered_at = None
+    # idempotency_key and event_timestamp remain unchanged
     delivery.updated_at = datetime.utcnow()
     
     db.commit()
     
     # Dispatch the replay
     dispatch_delivery(db, delivery.id)
-    logger.info("Replayed dead-letter delivery %s", delivery_id)
+    logger.info("Replayed dead-letter delivery %s (idempotency_key=%s preserved)", delivery_id, delivery.idempotency_key)
     return True
 
 

@@ -1,15 +1,19 @@
 import json
 import secrets
-from typing import List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
+from sqlalchemy import JSON, String, cast, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION
+from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION, invalidate_webhook_cache
+from app.core.security import require_admin
+from app.core.config import settings
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
@@ -19,6 +23,19 @@ router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 # --------------------------------------------------------------------------- #
 
 class WebhookCreate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "outage-webhook",
+                "url": "https://example.com/webhook",
+                "secret": "supersecret",
+                "events": ["sla.violation"],
+                "max_retries": 3,
+                "is_active": True,
+            }
+        }
+    )
+
     name: str
     url: HttpUrl
     secret: Optional[str] = None
@@ -26,11 +43,28 @@ class WebhookCreate(BaseModel):
     max_retries: int = 3
     is_active: bool = True
 
+    @field_validator("name")
+    @classmethod
+    def validate_name_length(cls, v: str) -> str:
+        if len(v) > settings.MAX_WEBHOOK_NAME_LENGTH:
+            raise ValueError(f"name too long. Maximum length is {settings.MAX_WEBHOOK_NAME_LENGTH} characters.")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+        url_str = str(v)
+        if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
+            raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        return v
+
     @field_validator("events")
     @classmethod
-    def events_not_empty(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
+    def validate_events_count(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
         if not v:
             raise ValueError("At least one event must be specified.")
+        if len(v) > settings.MAX_WEBHOOK_EVENTS_COUNT:
+            raise ValueError(f"too many events. Maximum allowed is {settings.MAX_WEBHOOK_EVENTS_COUNT}.")
         return v
 
 
@@ -42,8 +76,49 @@ class WebhookUpdate(BaseModel):
     max_retries: Optional[int] = None
     is_active: Optional[bool] = None
 
+    @field_validator("name")
+    @classmethod
+    def validate_name_length(cls, v: str) -> str:
+        if v is not None and len(v) > settings.MAX_WEBHOOK_NAME_LENGTH:
+            raise ValueError(f"name too long. Maximum length is {settings.MAX_WEBHOOK_NAME_LENGTH} characters.")
+        return v
+
+    @field_validator("url")
+    @classmethod
+    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+        if v is not None:
+            url_str = str(v)
+            if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
+                raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        return v
+
+    @field_validator("events")
+    @classmethod
+    def validate_events_count(cls, v: List[WebhookEvent]) -> List[WebhookEvent]:
+        if v is not None:
+            if not v:
+                raise ValueError("At least one event must be specified.")
+            if len(v) > settings.MAX_WEBHOOK_EVENTS_COUNT:
+                raise ValueError(f"too many events. Maximum allowed is {settings.MAX_WEBHOOK_EVENTS_COUNT}.")
+        return v
+
 
 class WebhookResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "name": "outage-webhook",
+                "url": "https://example.com/webhook",
+                "is_active": True,
+                "events": ["sla.violation"],
+                "max_retries": 3,
+                "schema_version": "1",
+            }
+        },
+        from_attributes=True,
+    )
+
     id: UUID
     name: str
     url: str
@@ -51,8 +126,11 @@ class WebhookResponse(BaseModel):
     events: List[str]
     max_retries: int
     schema_version: str = WEBHOOK_SCHEMA_VERSION  # BE-082: explicit schema version
-
-    model_config = {"from_attributes": True}
+    # BE-034: Secret lifecycle metadata (without exposing the secret)
+    secret_version: int = 1
+    last_secret_rotation_at: Optional[str] = None
+    # BE-295: Grace-window metadata
+    rotation_grace_expires_at: Optional[str] = None
 
 
 class WebhookDeliveryResponse(BaseModel):
@@ -65,14 +143,27 @@ class WebhookDeliveryResponse(BaseModel):
     error_message: Optional[str]
     delivered_at: Optional[str]
     dead_lettered_at: Optional[str]  # BE-086: Include dead-letter timestamp
+    signature_version: int  # BE-087: Explicit signature algorithm version
+    idempotency_key: str  # Deterministic key for receiver-side deduplication
+    event_timestamp: str  # Immutable: when the event occurred (UTC)
     created_at: str
 
     model_config = {"from_attributes": True}
 
 
+class PaginatedWebhookDeliveries(BaseModel):
+    items: List[WebhookDeliveryResponse]
+    total: int
+    offset: int
+    limit: int
+    returned: int
+    has_more: bool
+
+
 class WebhookSecretRotateResponse(BaseModel):
     webhook_id: UUID
     new_secret: str
+    grace_expires_at: Optional[str]
     message: str
 
 
@@ -85,6 +176,14 @@ class WebhookReplayRequest(BaseModel):
 class WebhookReplayResponse(BaseModel):
     replayed_count: int
     message: str
+
+
+class WebhookMetadataResponse(BaseModel):
+    """Webhook delivery policy metadata."""
+    retryable_status_codes: List[int]
+    terminal_status_codes: List[int]
+    retry_policy: Dict[str, Any]
+    schema_version: str
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +209,9 @@ def _serialize_webhook(webhook: Webhook) -> WebhookResponse:
         is_active=webhook.is_active,
         events=events,
         max_retries=webhook.max_retries,
+        secret_version=webhook.secret_version,
+        last_secret_rotation_at=webhook.last_secret_rotation_at.isoformat() if webhook.last_secret_rotation_at else None,
+        rotation_grace_expires_at=webhook.rotation_grace_expires_at.isoformat() if webhook.rotation_grace_expires_at else None,
     )
 
 
@@ -124,6 +226,9 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
         error_message=delivery.error_message,
         delivered_at=delivery.delivered_at.isoformat() if delivery.delivered_at else None,
         dead_lettered_at=delivery.dead_lettered_at.isoformat() if delivery.dead_lettered_at else None,
+        signature_version=delivery.signature_version,
+        idempotency_key=delivery.idempotency_key,
+        event_timestamp=delivery.event_timestamp.isoformat() if delivery.event_timestamp else None,
         created_at=delivery.created_at.isoformat(),
     )
 
@@ -133,7 +238,7 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
 # --------------------------------------------------------------------------- #
 
 @router.post("", response_model=WebhookResponse, status_code=status.HTTP_201_CREATED)
-def create_webhook(payload: WebhookCreate, db: Session = Depends(get_db)):
+def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = Webhook(
         name=payload.name,
         url=str(payload.url),
@@ -145,6 +250,7 @@ def create_webhook(payload: WebhookCreate, db: Session = Depends(get_db)):
     db.add(webhook)
     db.commit()
     db.refresh(webhook)
+    # Cache is pre-warmed on first access, no invalidation needed for create
     return _serialize_webhook(webhook)
 
 
@@ -154,6 +260,7 @@ def list_webhooks(
     name: Optional[str] = Query(None, description="Filter by name (case-insensitive substring match)"),  # BE-083
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),  # BE-083
     page_size: int = Query(20, ge=1, le=100, description="Items per page"),  # BE-083
+    current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     query = db.query(Webhook)
@@ -166,13 +273,13 @@ def list_webhooks(
 
 
 @router.get("/{webhook_id}", response_model=WebhookResponse)
-def get_webhook(webhook_id: UUID, db: Session = Depends(get_db)):
+def get_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
     return _serialize_webhook(webhook)
 
 
 @router.patch("/{webhook_id}", response_model=WebhookResponse)
-def update_webhook(webhook_id: UUID, payload: WebhookUpdate, db: Session = Depends(get_db)):
+def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
 
     if payload.name is not None:
@@ -190,47 +297,136 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, db: Session = Depen
 
     db.commit()
     db.refresh(webhook)
+    # Invalidate cache when webhook events or active status changes
+    if payload.events is not None or payload.is_active is not None:
+        invalidate_webhook_cache(webhook_id)
     return _serialize_webhook(webhook)
 
 
 @router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_webhook(webhook_id: UUID, db: Session = Depends(get_db)):
+def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
+    # Invalidate cache before deletion
+    invalidate_webhook_cache(webhook_id)
     db.delete(webhook)
     db.commit()
 
 
-@router.get("/{webhook_id}/deliveries", response_model=List[WebhookDeliveryResponse])
+@router.get("/{webhook_id}/deliveries", response_model=PaginatedWebhookDeliveries)
 def list_webhook_deliveries(
     webhook_id: UUID,
-    status_filter: Optional[WebhookDeliveryStatus] = Query(None, alias="status"),
+    status: Optional[WebhookDeliveryStatus] = Query(None, description="Filter by delivery status."),
+    event: Optional[WebhookEvent] = Query(None, description="Filter by delivery event type."),
+    search: Optional[str] = Query(None, description="Search delivery id, error message, or response status code."),
+    created_after: Optional[datetime] = Query(None, description="Return deliveries created after this timestamp."),
+    created_before: Optional[datetime] = Query(None, description="Return deliveries created before this timestamp."),
+    delivered_after: Optional[datetime] = Query(None, description="Return deliveries delivered after this timestamp."),
+    delivered_before: Optional[datetime] = Query(None, description="Return deliveries delivered before this timestamp."),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, description="Number of records to skip"),  # BE-083
     db: Session = Depends(get_db),
 ):
     _get_webhook_or_404(db, webhook_id)
-    query = (
-        db.query(WebhookDelivery)
-        .filter(WebhookDelivery.webhook_id == webhook_id)
-        .order_by(WebhookDelivery.created_at.desc())
+    query = db.query(WebhookDelivery).filter(WebhookDelivery.webhook_id == webhook_id)
+
+    if status is not None:
+        query = query.filter(WebhookDelivery.status == status)
+    if event is not None:
+        query = query.filter(WebhookDelivery.event == event)
+    if created_after is not None:
+        query = query.filter(WebhookDelivery.created_at >= created_after)
+    if created_before is not None:
+        query = query.filter(WebhookDelivery.created_at <= created_before)
+    if delivered_after is not None:
+        query = query.filter(WebhookDelivery.delivered_at >= delivered_after)
+    if delivered_before is not None:
+        query = query.filter(WebhookDelivery.delivered_at <= delivered_before)
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                cast(WebhookDelivery.id, String).ilike(search_term),
+                WebhookDelivery.error_message.ilike(search_term),
+                cast(WebhookDelivery.response_status_code, String).ilike(search_term),
+            )
+        )
+
+    total = query.order_by(None).count()
+    deliveries = (
+        query.order_by(WebhookDelivery.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
     )
-    if status_filter is not None:
-        query = query.filter(WebhookDelivery.status == status_filter)
-    return [_serialize_delivery(d) for d in query.offset(offset).limit(limit).all()]
+    items = [_serialize_delivery(d) for d in deliveries]
+    return PaginatedWebhookDeliveries(
+        items=items,
+        total=total,
+        offset=offset,
+        limit=limit,
+        returned=len(items),
+        has_more=offset + len(items) < total,
+    )
 
 
 @router.post("/{webhook_id}/rotate-secret", response_model=WebhookSecretRotateResponse)  # BE-084
-def rotate_webhook_secret(webhook_id: UUID, db: Session = Depends(get_db)):
-    """Rotate the webhook signing secret. The old secret is immediately invalidated;
-    all subsequent deliveries will be signed with the new secret."""
+def rotate_webhook_secret(
+    webhook_id: UUID,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """Rotate the webhook signing secret.
+
+    The previous secret remains valid for a configurable grace window
+    (WEBHOOK_SECRET_GRACE_WINDOW_SECONDS, default 1 h) so that consumers
+    that have not yet picked up the new secret are not immediately rejected.
+
+    BE-295: Dual-validation grace window.
+    BE-034: Audit-logged with actor and version metadata.
+    """
+    from datetime import timedelta
+    from app.services.audit_log import audit_log
+
     webhook = _get_webhook_or_404(db, webhook_id)
+
+    old_secret_version = webhook.secret_version
+    old_rotation_time = webhook.last_secret_rotation_at
+    grace_seconds = settings.WEBHOOK_SECRET_GRACE_WINDOW_SECONDS
+
+    # Preserve current secret as previous_secret for the grace window
+    now = datetime.utcnow()
+    webhook.previous_secret = webhook.secret
+    webhook.rotation_grace_expires_at = now + timedelta(seconds=grace_seconds)
+
+    # Install new secret
     new_secret = secrets.token_hex(32)
     webhook.secret = new_secret
+    webhook.secret_version = old_secret_version + 1
+    webhook.last_secret_rotation_at = now
+
     db.commit()
+
+    audit_log.log(
+        "webhook_secret_rotated",
+        {
+            "webhook_id": str(webhook_id),
+            "webhook_name": webhook.name,
+            "old_secret_version": old_secret_version,
+            "new_secret_version": webhook.secret_version,
+            "previous_rotation_at": old_rotation_time.isoformat() if old_rotation_time else None,
+            "grace_expires_at": webhook.rotation_grace_expires_at.isoformat(),
+            "rotated_by": getattr(current_user, "email", "unknown"),
+        },
+    )
+
     return WebhookSecretRotateResponse(
         webhook_id=webhook.id,
         new_secret=new_secret,
-        message="Secret rotated. Update your consumer to use the new secret immediately.",
+        grace_expires_at=webhook.rotation_grace_expires_at.isoformat(),
+        message=(
+            f"Secret rotated. Previous secret valid for {grace_seconds}s grace window. "
+            "Update your consumer before the grace window expires."
+        ),
     )
 
 
@@ -327,4 +523,25 @@ def replay_deliveries_by_context(
     return WebhookReplayResponse(
         replayed_count=replayed_count,
         message=f"Replayed {replayed_count} deliveries for event {event.value}"
+    )
+
+
+@router.get("/metadata", response_model=WebhookMetadataResponse)
+def get_webhook_metadata():
+    """Get webhook delivery policy metadata including retryable/terminal status codes."""
+    from app.services.webhook_service import (
+        RETRYABLE_STATUS_CODES,
+        TERMINAL_STATUS_CODES,
+        _get_retry_delays,
+    )
+    
+    return WebhookMetadataResponse(
+        retryable_status_codes=sorted(RETRYABLE_STATUS_CODES),
+        terminal_status_codes=sorted(TERMINAL_STATUS_CODES),
+        retry_policy={
+            "max_retries": 3,
+            "base_delays_seconds": _get_retry_delays(),
+            "max_delay_seconds": settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS,
+        },
+        schema_version=WEBHOOK_SCHEMA_VERSION,
     )
