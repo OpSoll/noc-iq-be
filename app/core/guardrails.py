@@ -1,5 +1,6 @@
 from fastapi import Request, HTTPException
 
+MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024 # 10MB
 
 async def check_payload_size(request: Request):
