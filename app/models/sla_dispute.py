@@ -20,6 +20,8 @@ class SLADispute(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=False, index=True)
+    baseline_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
+    proposed_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
 
     # Dispute metadata
     flagged_by = Column(String(255), nullable=False)
@@ -32,7 +34,9 @@ class SLADispute(Base):
     resolution_notes = Column(Text, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
 
-    sla_result = relationship("SLAResultORM", back_populates="disputes")
+    sla_result = relationship("SLAResultORM", foreign_keys=[sla_result_id], back_populates="disputes")
+    baseline_sla_result = relationship("SLAResultORM", foreign_keys=[baseline_sla_result_id])
+    proposed_sla_result = relationship("SLAResultORM", foreign_keys=[proposed_sla_result_id])
     audit_logs = relationship("DisputeAuditLog", back_populates="dispute", order_by="DisputeAuditLog.recorded_at")
 
 

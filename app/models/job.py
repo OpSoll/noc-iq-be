@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, Enum as SAEnum, Float, JSON
+from sqlalchemy import Column, DateTime, Enum, Enum as SAEnum, Float, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 import enum
 
@@ -35,6 +35,10 @@ class Job(Base):
     progress_details = Column(JSON, nullable=True)  # Structured progress information
     partial_results = Column(JSON, nullable=True)   # Partial results for bulk operations
     per_item_errors = Column(JSON, nullable=True)   # Per-item error tracking
+    # BE-041: Retry tracking
+    retry_count = Column(Integer, default=0, nullable=False)  # Number of times job has been retried
+    max_retries = Column(Integer, default=3, nullable=False)  # Maximum allowed retries for this job
+    last_retried_at = Column(DateTime, nullable=True)  # When the job was last retried
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

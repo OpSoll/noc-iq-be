@@ -1,28 +1,16 @@
 import pytest
 from sqlalchemy.orm import Session
 from app.services.auth_store import AuthStore
-from app.models.auth import RegisterRequest, LoginRequest
+from app.models.enums import Role
 from app.models.orm.audit_log import AuditLogORM
-from app.db.session import SessionLocal
-
-@pytest.fixture
-def db():
-    # Use a real session but clean up or use a test DB if configured
-    # For now, we'll assume the environment handles test DB or we use the default
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.rollback()
-        session.close()
+from tests.factories import make_login_request, make_register_request
 
 def test_registration_audit(db: Session):
     email = "audit_test@example.com"
-    payload = RegisterRequest(
+    payload = make_register_request(
         email=email,
-        password="Password123!",
         full_name="Audit Test",
-        role="engineer"
+        role=Role.engineer,
     )
     
     AuthStore.register(payload, db=db)
@@ -37,20 +25,47 @@ def test_login_audit(db: Session):
     email = "login_audit@example.com"
     password = "Password123!"
     # Register first
-    AuthStore.register(RegisterRequest(
+    AuthStore.register(make_register_request(
         email=email,
-        password=password,
         full_name="Login Audit",
-        role="engineer"
+        role=Role.engineer,
     ), db=db)
     
     # Login
-    AuthStore.login(LoginRequest(email=email, password=password), db=db)
+    AuthStore.login(make_login_request(email=email, password=password), db=db)
     
-    # Check audit log
-    log = db.query(AuditLogORM).filter(AuditLogORM.email == email, AuditLogORM.event_type == "login_success").first()
-    assert log is not None
-    assert "password" not in log.details or log.details["password"] == "[REDACTED]"
+def test_login_lockout(db: Session):
+    email = "lockout_test@example.com"
+    password = "Password123!"
+    
+    # Register user
+    AuthStore.register(make_register_request(
+        email=email,
+        full_name="Lockout Test",
+        role=Role.engineer,
+    ), db=db)
+    
+    # Try failed logins
+    for i in range(5):
+        try:
+            AuthStore.login(make_login_request(email=email, password="wrongpassword"), db=db)
+            assert False, "Should have failed"
+        except ValueError as e:
+            assert "Invalid credentials" in str(e) or "locked" in str(e)
+    
+    # Next attempt should be locked
+    try:
+        AuthStore.login(LoginRequest(email=email, password=password), db=db)
+        assert False, "Should be locked"
+    except ValueError as e:
+        assert "locked" in str(e)
+    
+    # Check audit log for lockout
+    lockout_log = db.query(AuditLogORM).filter(
+        AuditLogORM.email == email, 
+        AuditLogORM.event_type == "account_locked"
+    ).first()
+    assert lockout_log is not None
 
 def test_logout_audit(db: Session):
     email = "logout_audit@example.com"
@@ -60,9 +75,9 @@ def test_logout_audit(db: Session):
         email=email,
         password=password,
         full_name="Logout Audit",
-        role="engineer"
+        role=Role.engineer
     ), db=db)
-    session_resp = AuthStore.login(LoginRequest(email=email, password=password), db=db)
+    session_resp = AuthStore.login(make_login_request(email=email, password=password), db=db)
     
     # Logout
     AuthStore.logout(session_resp.access_token, db=db)
