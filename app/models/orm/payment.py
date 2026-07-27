@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, String
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
 
 from app.db.base import Base
 
@@ -17,5 +17,17 @@ class PaymentTransactionORM(Base):
     to_address = Column(String(255), nullable=False)
     status = Column(String(50), nullable=False, default="pending", index=True)
     outage_id = Column(String, ForeignKey("outages.id", ondelete="SET NULL"), nullable=True, index=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    confirmed_at = Column(DateTime, nullable=True)
+    sla_result_id = Column(Integer, ForeignKey("sla_results.id", ondelete="SET NULL"), nullable=True, index=True, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    confirmed_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, nullable=False, default=0)
+    last_retried_at = Column(DateTime(timezone=True), nullable=True)
+    failure_taxonomy = Column(String(50), nullable=True)
+    idempotency_key = Column(String(255), nullable=True, unique=True, index=True)
+    dead_letter_reason = Column(Text, nullable=True)
+    dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_payment_transactions_from_address", "from_address"),
+        Index("ix_payment_transactions_to_address", "to_address"),
+    )
