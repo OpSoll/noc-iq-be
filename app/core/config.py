@@ -132,6 +132,27 @@ class Settings(BaseSettings):
     CELERY_STRICT_QUEUE_BINDINGS: bool = True
     # Timeout in seconds for the startup queue-binding probe.
     CELERY_QUEUE_PROBE_TIMEOUT_SECONDS: float = 5.0
+
+    # BE-W5-055: Worker concurrency tuning profile & safeguards
+    # Logical environment name; selects the per-env profile from
+    # concurrency_guardrails.PROFILES. Operators may also override any
+    # concrete value below (concurrency, max tasks per child, broker cap,
+    # broker alert threshold).
+    APP_ENV: str = "dev"
+    # Optional overrides for the per-env profile. ``None`` means "use profile".
+    CELERY_WORKER_CONCURRENCY: Optional[int] = None
+    CELERY_MAX_TASKS_PER_CHILD: Optional[int] = None
+    # Safe upper bound on simultaneous broker (Redis) connections.
+    BROKER_MAX_CONNECTIONS: int = 100
+    # Fraction (0 < x < 1) of BROKER_MAX_CONNECTIONS at which the periodic
+    # guardrail emits an alert and flips the gauge to 1.0.
+    BROKER_SATURATION_THRESHOLD: float = 0.8
+    # Fraction (0 < x < DB_POOL_SATURATION_THRESHOLD) at which the periodic
+    # guardrail **alerts** — strictly below the saturation threshold that
+    # PoolSaturationMiddleware uses to start rejecting requests (530/503).
+    # This is what "guardrail alerts fire before saturation failures" means
+    # in BE-W5-055 acceptance criteria #3.
+    DB_GUARDRAIL_THRESHOLD: float = 0.75
     model_config = {"env_prefix": "", "case_sensitive": True, "env_file": ".env"}
 
     @property

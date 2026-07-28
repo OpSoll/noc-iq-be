@@ -49,6 +49,14 @@ celery_app.conf.update(
             "task": "app.tasks.idempotency_tasks.cleanup_expired_idempotency_keys",
             "schedule": 3600.0,  # every hour
         },
+        # BE-W5-055: periodic DB pool + broker connection guardrail check.
+        # Runs every 60s alongside the existing beats; emits a WARNING log
+        # line and flips ``guardrail.alert.*`` gauges when saturation
+        # thresholds are crossed.
+        "concurrency-guardrail-check": {
+            "task": "app.tasks.celery_app.guardrail_check_task",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -178,3 +186,17 @@ def _on_worker_ready(sender=None, **kwargs) -> None:  # noqa: ANN001
         logger.critical("BE-W5-051: worker bootstrap aborted — %s", exc)
         # Fail fast so the orchestrator sees the worker crash and intervenes.
         sys.exit(1)
+
+
+@celery_app.task(name="app.tasks.celery_app.guardrail_check_task")
+def guardrail_check_task() -> Dict[str, object]:
+    """Periodic DB + broker saturation guardrail evaluation.
+
+    BE-W5-055: returns the live readings; emits WARNING log lines and sets
+    ``guardrail.alert.*`` gauges via ``evaluate_guardrails``. Runs from a
+    beat schedule every 60 s.
+    """
+    # Local import avoids a circular dep at module-import time
+    # (concurrency_guardrails imports ... → celery_app imports).
+    from app.services.concurrency_guardrails import evaluate_guardrails
+    return evaluate_guardrails(celery_app)
