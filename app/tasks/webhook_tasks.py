@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Dict
 from uuid import UUID
@@ -19,7 +20,11 @@ logger = logging.getLogger(__name__)
     default_retry_delay=30,
 )
 def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
-    """Deliver a single WebhookDelivery record asynchronously."""
+    """Deliver a single WebhookDelivery record asynchronously.
+
+    Issue #302: Delivery is dispatched with partition awareness.
+    Backpressure is checked at the service layer before each attempt.
+    """
     db = SessionLocal()
     try:
         from app.services.webhook_service import dispatch_delivery
@@ -29,7 +34,7 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, error_msg)
-        
+
         # Log retry attempt if we have retries left
         if self.request.retries < self.max_retries:
             audit_log.log_event(
@@ -38,10 +43,10 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
                 details={
                     "delivery_id": delivery_id,
                     "retry_count": self.request.retries + 1,
-                    "error": error_msg
+                    "error": error_msg,
                 }
             )
-        
+
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -61,6 +66,61 @@ def retry_pending_webhook_deliveries() -> Dict[str, Any]:
         count = retry_pending_deliveries(db)
         logger.info("Retried %d pending webhook deliveries.", count)
         return {"retried": count}
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.webhook_tasks.dispatch_partitioned_delivery",
+    autoretry_for=(Exception,),
+    max_retries=3,
+    default_retry_delay=60,
+)
+def dispatch_partitioned_delivery(delivery_id: str, partition_id: int) -> Dict[str, Any]:
+    """Partition-aware webhook dispatch.
+
+    Issue #302: Dispatches a delivery within a specific partition.
+    Checks backpressure before attempting and defers to a retry loop
+    if the partition is saturated.
+
+    SLA/payment-critical partitions (priority partitions) bypass
+    backpressure checks so they are never starved.
+    """
+    from app.core.config import settings as cfg
+    from app.services.webhook_service import (
+        dispatch_delivery,
+        is_backpressured,
+        _get_partition_pending_count,
+    )
+
+    # Check backpressure (except for priority SLA partition)
+    if partition_id != cfg.WEBHOOK_SLA_PRIORITY_PARTITION:
+        if is_backpressured(partition_id):
+            pending = _get_partition_pending_count(partition_id)
+            logger.warning(
+                "Partition %d backpressured (%d pending). Deferring delivery %s.",
+                partition_id, pending, delivery_id,
+            )
+            raise Exception(f"Partition {partition_id} backpressured ({pending} pending)")
+
+    db = SessionLocal()
+    try:
+        dispatch_delivery(db, UUID(delivery_id))
+        logger.info(
+            "Partitioned delivery %s dispatched on partition %d.",
+            delivery_id, partition_id,
+        )
+        return {
+            "delivery_id": delivery_id,
+            "partition_id": partition_id,
+            "dispatched": True,
+        }
+    except Exception as exc:
+        logger.exception(
+            "Failed to dispatch partitioned delivery %s on partition %d: %s",
+            delivery_id, partition_id, exc,
+        )
+        raise
     finally:
         db.close()
 
@@ -91,7 +151,7 @@ def trigger_sla_violation_async(
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("trigger_sla_violation_async failed: %s", error_msg)
-        
+
         # Log retry attempt if we have retries left
         if self.request.retries < self.max_retries:
             audit_log.log_event(
@@ -101,10 +161,10 @@ def trigger_sla_violation_async(
                     "sla_data": sla_data,
                     "event": event,
                     "retry_count": self.request.retries + 1,
-                    "error": error_msg
+                    "error": error_msg,
                 }
             )
-        
+
         raise self.retry(exc=exc)
     finally:
         db.close()
