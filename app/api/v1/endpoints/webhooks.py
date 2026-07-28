@@ -186,6 +186,38 @@ class WebhookMetadataResponse(BaseModel):
     schema_version: str
 
 
+# BE-W5-045: Disaster-recovery replay models
+class WebhookDRReplayRequest(BaseModel):
+    """Bounded time window request for disaster-recovery replay."""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "start_time": "2026-06-01T00:00:00",
+                "end_time": "2026-06-01T23:59:59",
+            }
+        }
+    )
+
+    start_time: datetime
+    end_time: datetime
+
+    @field_validator("end_time")
+    @classmethod
+    def _validate_window(cls, v: datetime, info) -> datetime:
+        start = info.data.get("start_time") if hasattr(info, "data") else None
+        if start is not None and v < start:
+            raise ValueError("end_time must be >= start_time")
+        return v
+
+
+class WebhookDRReplayResponse(BaseModel):
+    job_id: UUID
+    celery_task_id: Optional[str] = None
+    start_time: datetime
+    end_time: datetime
+    message: str
+
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
@@ -534,7 +566,7 @@ def get_webhook_metadata():
         TERMINAL_STATUS_CODES,
         _get_retry_delays,
     )
-    
+
     return WebhookMetadataResponse(
         retryable_status_codes=sorted(RETRYABLE_STATUS_CODES),
         terminal_status_codes=sorted(TERMINAL_STATUS_CODES),
@@ -544,4 +576,37 @@ def get_webhook_metadata():
             "max_delay_seconds": settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS,
         },
         schema_version=WEBHOOK_SCHEMA_VERSION,
+    )
+
+
+# BE-W5-045: Webhook disaster-recovery replay endpoint
+@router.post(
+    "/disaster-recovery/replay",
+    response_model=WebhookDRReplayResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def disaster_recovery_replay(
+    payload: WebhookDRReplayRequest,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Replay webhook deliveries whose ``event_timestamp`` falls in the supplied
+    bounded time window. Idempotent and resumable — runbook docs cover safe
+    operation and rollback.
+    """
+    from app.services.webhook_service import enqueue_webhook_dr_replay
+
+    job = enqueue_webhook_dr_replay(
+        db,
+        start_time=payload.start_time,
+        end_time=payload.end_time,
+    )
+    return WebhookDRReplayResponse(
+        job_id=job.id,
+        celery_task_id=job.celery_task_id,
+        start_time=payload.start_time,
+        end_time=payload.end_time,
+        message=(
+            "DR replay enqueued. Poll GET /jobs/{job_id} to monitor progress."
+        ),
     )

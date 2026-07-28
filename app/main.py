@@ -38,6 +38,31 @@ async def check_celery() -> bool:
     except Exception:
         return False
 
+
+async def check_worker_queue_bindings() -> dict:
+    """Probe Celery queue bindings for orchestration readiness gates.
+
+    BE-W5-051: Health signals are exposed for orchestration readiness gates.
+    Returns a non-strict probe result suitable for liveness/readiness checks.
+    Never raises — failures are reported in the response payload.
+    """
+    try:
+        from app.tasks.celery_app import verify_queue_bindings
+        probe = verify_queue_bindings(strict=False)
+        return probe
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "error": str(exc),
+            "required": [],
+            "observed": [],
+            "missing": [],
+            "workers_seen": 0,
+            "timeout_seconds": getattr(
+                settings, "CELERY_QUEUE_PROBE_TIMEOUT_SECONDS", 5.0
+            ),
+        }
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,15 +121,43 @@ def liveness():
 async def readiness():
     db_ok = await check_database()
     celery_ok = await check_celery()
-    status = "ok" if db_ok and celery_ok else "degraded"
-    return {
+    queue_probe = await check_worker_queue_bindings()
+    overall_ok = db_ok and celery_ok and bool(queue_probe.get("ok"))
+    status = "ok" if overall_ok else "degraded"
+    payload = {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
         "dependencies": {
             "database": "ok" if db_ok else "down",
             "celery": "ok" if celery_ok else "down",
-        }
+            "queue_bindings": "ok" if queue_probe.get("ok") else "missing",
+        },
+        "queue_bindings": queue_probe,
     }
+    # Return 503 when degraded so orchestrators can fail readiness gates.
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=200 if overall_ok else 503, content=payload)
+
+
+@app.get("/health/worker")
+async def worker_health():
+    """Celery worker queue-bindings health probe.
+
+    BE-W5-051: Health signals are exposed for orchestration readiness gates.
+    Returns 200 when all required queues are bound to active workers, else
+    503 with a breakdown of missing/observed queue names.
+    """
+    queue_probe = await check_worker_queue_bindings()
+    from fastapi.responses import JSONResponse
+    status_code = 200 if queue_probe.get("ok") else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if queue_probe.get("ok") else "missing_queues",
+            "timestamp": datetime.utcnow().isoformat(),
+            **queue_probe,
+        },
+    )
 
 @app.get("/health")
 def health_check():

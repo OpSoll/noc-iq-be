@@ -122,6 +122,16 @@ class Settings(BaseSettings):
     # Zero-downtime migration (#411)
     MIGRATION_BATCH_SIZE: int = 500
     MIGRATION_SHADOW_SUFFIX: str = "_shadow"
+
+    # BE-W5-051: Worker startup health probes and queue binding verification
+    # Comma-separated list of queue/exchange names that must be present at
+    # Celery worker startup. Workers fail fast (exit 1) if any of these
+    # bindings are not reachable on the broker at boot.
+    CELERY_REQUIRED_QUEUES: str = "celery"
+    # When True, boot fails fast on missing queue bindings (default true).
+    CELERY_STRICT_QUEUE_BINDINGS: bool = True
+    # Timeout in seconds for the startup queue-binding probe.
+    CELERY_QUEUE_PROBE_TIMEOUT_SECONDS: float = 5.0
     model_config = {"env_prefix": "", "case_sensitive": True, "env_file": ".env"}
 
     @property

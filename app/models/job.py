@@ -13,12 +13,14 @@ class JobStatus(str, enum.Enum):
     SUCCESS = "success"
     FAILURE = "failure"
     REVOKED = "revoked"
+    QUARANTINED = "quarantined"  # BE-W5-054: poison-message quarantine
 
 
 class JobType(str, enum.Enum):
     SLA_COMPUTATION = "sla_computation"
     WEBHOOK_DISPATCH = "webhook_dispatch"
     BULK_SLA_COMPUTATION = "bulk_sla_computation"
+    WEBHOOK_DR_REPLAY = "webhook_dr_replay"  # BE-W5-045: disaster-recovery replay
 
 
 class Job(Base):
@@ -43,3 +45,7 @@ class Job(Base):
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    # BE-W5-054: poison-message quarantine columns
+    payload_hash = Column(String(64), nullable=True, index=True)
+    quarantine_reason = Column(Text, nullable=True)
+    quarantined_at = Column(DateTime, nullable=True)

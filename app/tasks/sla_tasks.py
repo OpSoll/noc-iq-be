@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
@@ -18,6 +19,23 @@ from app.utils.logging import get_structured_logger
 
 logger = logging.getLogger(__name__)
 task_logger = get_structured_logger("sla_tasks")
+
+
+def _hash_job_payload(job: Job) -> str:
+    """Deterministic SHA256 over the canonicalised job payload.
+
+    BE-W5-054: payload hash used to identify poison messages whose input
+    keeps crashing workers across retries. The hash is computed over a
+    sorted, whitespace-stripped JSON serialisation so trivial formatting
+    differences do not produce different fingerprints.
+    """
+    raw = job.payload or ""
+    try:
+        obj = json.loads(raw)
+        canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError):
+        canonical = raw.strip()
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class DatabaseTask(Task):
@@ -50,11 +68,50 @@ class DatabaseTask(Task):
 
     def _mark_failure(self, db, celery_task_id: str, error: str):
         job = self._get_job(db, celery_task_id)
-        if job:
-            job.status = JobStatus.FAILURE
-            job.error = error
+        if not job:
+            return
+        # BE-W5-054: bucket retry_count so the QUARANTINED boundary is invariant.
+        # We compare 'attempts' (this attempt) against max_retries so the
+        # transition into QUARANTINED occurs after the final allowed attempt
+        # fails — never one attempt early or late.
+        attempts = (job.retry_count or 0) + 1
+        # BE-W5-054: poison-message quarantine. If this attempt exhausts the
+        # per-job ``max_retries`` cap, quarantine it instead of letting
+        # subsequent periodic retry sweeps keep bouncing it through the worker.
+        if attempts >= max(job.max_retries, 0):
+            payload_hash = _hash_job_payload(job)
+            job.payload_hash = payload_hash
+            job.quarantine_reason = error
+            job.quarantined_at = datetime.utcnow()
+            job.status = JobStatus.QUARANTINED
+            job.retry_count = attempts
             job.finished_at = datetime.utcnow()
+            logger.error(
+                "BE-W5-054: quarantining job %s type=%s payload_hash=%s after "
+                "%d attempts: %s",
+                job.id, job.job_type.value, payload_hash, attempts, error,
+            )
+            audit_log.log_event(
+                db,
+                event_type="job_quarantined",
+                details={
+                    "job_id": str(job.id),
+                    "celery_task_id": celery_task_id,
+                    "job_type": job.job_type.value,
+                    "retry_count": attempts,
+                    "max_retries": job.max_retries,
+                    "payload_hash": payload_hash,
+                    "error": error,
+                },
+            )
             db.commit()
+            return
+
+        job.retry_count = attempts
+        job.status = JobStatus.FAILURE
+        job.error = error
+        job.finished_at = datetime.utcnow()
+        db.commit()
 
     def _update_progress(self, db, celery_task_id: str, progress: float, details: Optional[Dict[str, Any]] = None):
         job = self._get_job(db, celery_task_id)

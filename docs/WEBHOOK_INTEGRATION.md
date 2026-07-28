@@ -411,3 +411,72 @@ def process_webhook(payload: dict) -> None:
     else:
         logger.warning("Unknown schema_version: %s — ignoring payload", schema_version)
 ```
+
+## Disaster Recovery Runbook (BE-W5-045)
+
+After a worker outage, broker partition, or data-plane incident, the
+delivery journal (`webhook_deliveries` table) is the source of truth for
+missed or failed deliveries. The bounded time-window replay tooling lets
+operators re-run every delivery whose `event_timestamp` falls inside a
+chosen window — safely and idempotently.
+
+### Recovery Procedure
+
+1. **Identify the window.** Use broker logs / dashboards to find the
+   `start_time` (when the incident began) and `end_time` (when service
+   resumed). Keep the window small to minimise downstream load.
+2. **Trigger a DR replay** via the API:
+
+   ```bash
+   curl -X POST https://api.example.com/api/v1/webhooks/disaster-recovery/replay \
+        -H "Authorization: Bearer $ADMIN_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{
+              "start_time": "2026-06-01T00:00:00",
+              "end_time":   "2026-06-01T23:59:59"
+            }'
+   ```
+
+   The endpoint returns a `Job` id immediately; replay runs asynchronously
+   and the response is `202 Accepted`.
+3. **Monitor progress** with the returned `job_id`:
+
+   ```bash
+   curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+        https://api.example.com/api/v1/jobs/$JOB_ID/progress
+   ```
+
+   `progress_details.replayed` / `.total` reflect the count of deliveries
+   the runbook has processed.
+4. **Audit the run** — each replay preserves the deterministic
+   `idempotency_key` and `event_timestamp` so receivers deduplicate as
+   if the original delivery had succeeded. Already-`success` deliveries
+   inside the window are skipped automatically.
+5. **Rollback (if needed).** Recovered deliveries are *not* marked
+   automatically as `success`; if you discover a replay caused harm,
+   re-dead-letter the affected rows via the existing
+   `POST /webhooks/{id}/deliveries/{delivery_id}/replay` reset path (the
+   replay endpoint resets state, so use this only after taking receivers
+   off the endpoint list to stop them from receiving new traffic).
+
+### Safety Properties
+
+| Property             | Mechanism                                                                 |
+|----------------------|----------------------------------------------------------------------------|
+| Bounded window       | API requires both `start_time` and `end_time`; `end_time >= start_time`.  |
+| Idempotent replay    | `replay_dead_letter_delivery` preserves the SHA256 `idempotency_key`.     |
+| Resumable            | Progress written to `Job.progress_details`; the underlying Celery task is self-contained per delivery. |
+| Auditable            | `audit_log` entries record each DR replay kickoff with actor & window.    |
+| Skips success rows   | `recover_deliveries_in_window` leaves `SUCCESS` deliveries untouched.     |
+
+### Worker Readiness Gate (BE-W5-051)
+
+Before a planned DR replay, check the worker queue bindings:
+
+```bash
+curl https://api.example.com/health/worker  # 200 OK if all required queues bound
+```
+
+> A `503` response indicates one or more queues declared in
+> `CELERY_REQUIRED_QUEUES` are not bound to any running worker — remedy
+> the worker fleet before triggering a DR replay.
