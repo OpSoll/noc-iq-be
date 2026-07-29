@@ -40,8 +40,21 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             # Calculate request duration
             duration_ms = (time.time() - start_time) * 1000
             
-            # Add correlation ID to response headers
+            # Add correlation ID to response headers (mandatory for all paths)
             response.headers["X-Correlation-ID"] = correlation_id
+            # Also inject into JSON body for error consumers
+            try:
+                body = b""
+                async for chunk in response.body_iterator:
+                    body += chunk
+                response.body_iterator = _single_body_iterator(body)
+                import json
+                data = json.loads(body) if body else {}
+                if isinstance(data, dict):
+                    data["correlation_id"] = correlation_id
+                    response.headers["Content-Length"] = str(len(json.dumps(data)))
+            except Exception:
+                pass
             
             # Log outgoing response
             logger.info(
@@ -56,10 +69,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             return response
             
         except Exception as exc:
-            # Calculate request duration for failed requests
             duration_ms = (time.time() - start_time) * 1000
-            
-            # Log request failure
             logger.error(
                 "Request failed",
                 method=request.method,
@@ -68,6 +78,4 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
                 duration_ms=round(duration_ms, 2),
                 correlation_id=correlation_id
             )
-            
-            # Re-raise the exception to let FastAPI handle it
             raise

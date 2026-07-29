@@ -41,6 +41,10 @@ class Job(Base):
     retry_count = Column(Integer, default=0, nullable=False)  # Number of times job has been retried
     max_retries = Column(Integer, default=3, nullable=False)  # Maximum allowed retries for this job
     last_retried_at = Column(DateTime, nullable=True)  # When the job was last retried
+    # BE-W5-049: Job correlation propagation
+    correlation_id = Column(String(36), nullable=True, index=True)  # Originating correlation_id
+    # BE-W5-046: Deduplication key
+    dedupe_key = Column(String(64), nullable=True, index=True)
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
