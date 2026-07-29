@@ -1,13 +1,14 @@
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from celery import Task
 
 from app.tasks.celery_app import celery_app
+from app.core.config import settings as cfg
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
 from app.services.audit_log import audit_log
@@ -16,11 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class WebhookDatabaseTask(Task):
-    """Task base for webhook Celery tasks — tracks progress & supports quarantine.
+    """Task base for webhook Celery tasks — tracks progress, supports quarantine,
+    and manages lease heartbeats (BE-W5-047).
 
     BE-W5-054: Tasks inherit this base so retries can be quarantined after the
-    per-delivery retry budget is exhausted, and so progress reporting mirrors
-    the existing SLA task tracking.
+    per-delivery retry budget is exhausted.
+    BE-W5-047: Lease heartbeats are recorded for long-running DR replay tasks.
     """
 
     abstract = True
@@ -33,6 +35,34 @@ class WebhookDatabaseTask(Task):
 
     def _get_job_by_id(self, db, job_id: str) -> Optional[Job]:
         return db.query(Job).filter(Job.id == job_id).first()
+
+    def _heartbeat(self, db, celery_task_id: str):
+        """BE-W5-047: Extend the lease on a running job."""
+        job = self._get_job(db, celery_task_id)
+        if job and job.status == JobStatus.STARTED:
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(
+                seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
+    def _mark_started(self, db, celery_task_id: str):
+        """BE-W5-047: Initialise lease on task start."""
+        job = self._get_job(db, celery_task_id)
+        if job:
+            job.status = JobStatus.STARTED
+            job.started_at = datetime.utcnow()
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(
+                seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
 
     def _update_progress(
         self,
@@ -73,6 +103,37 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, error_msg)
+
+        # BE-W5-048: Check if retries are exhausted before raising to Celery
+        if self.request.retries >= self.max_retries:
+            # Retries exhausted — route to dead-letter terminal status
+            job = db.query(Job).filter(Job.celery_task_id == self.request.id).first()
+            if job:
+                job.status = JobStatus.DEAD_LETTER
+                job.dead_letter_reason = (
+                    f"Max retries exhausted ({self.max_retries}). Last error: {error_msg}"
+                )
+                job.dead_letter_at = datetime.utcnow()
+                job.finished_at = datetime.utcnow()
+                job.error = error_msg
+                job.error_code = "WEBHOOK_RETRIES_EXHAUSTED"
+                job.error_retryable = False
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                audit_log.log_event(
+                    db,
+                    event_type="job_dead_lettered",
+                    details={
+                        "delivery_id": delivery_id,
+                        "job_type": JobType.WEBHOOK_DISPATCH.value,
+                        "retry_count": self.request.retries + 1,
+                        "max_retries": self.max_retries,
+                        "error": error_msg,
+                    },
+                )
+            return {"delivery_id": delivery_id, "dispatched": False, "dead_lettered": True}
 
         # Log retry attempt if we have retries left
         if self.request.retries < self.max_retries:

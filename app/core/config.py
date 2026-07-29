@@ -186,6 +186,38 @@ class Settings(BaseSettings):
     WEBHOOK_QUEUE_SCALE_UP_THRESHOLD: int = 100
     WEBHOOK_QUEUE_SCALE_DOWN_THRESHOLD: int = 10
 
+    # ── BE-W5-047: Job lease heartbeat ────────────────────────────────────
+    JOB_LEASE_HEARTBEAT_INTERVAL_SECONDS: int = 30
+    JOB_LEASE_TIMEOUT_SECONDS: int = 120
+    JOB_LEASE_RECLAMATION_ENABLED: bool = True
+    JOB_LEASE_RECLAMATION_BATCH_SIZE: int = 50
+
+    # ── BE-W5-048: Retry taxonomy governance ──────────────────────────────
+    JOB_RETRY_CLASS_DEFAULTS: str = (
+        "sla_computation:exponential_backoff:3:30,"
+        "bulk_sla_computation:exponential_backoff:2:60,"
+        "webhook_dispatch:at_least_once:5:30,"
+        "webhook_dr_replay:at_most_once:1:60"
+    )
+    # Format per entry: "job_type:retry_class:max_retries:base_delay_seconds"
+    JOB_RETRY_DEAD_LETTER_ENABLED: bool = True
+    JOB_RETRY_BACKOFF_MAX_DELAY_SECONDS: int = 3600
+    JOB_RETRY_BACKOFF_MULTIPLIER: float = 2.0
+    JOB_RETRY_JITTER_SECONDS: int = 5
+
+    # ── BE-W5-052: Retention tiering ──────────────────────────────────────
+    JOB_RETENTION_SUCCESS_DAYS: int = 30
+    JOB_RETENTION_FAILURE_DAYS: int = 90
+    JOB_RETENTION_REVOKED_DAYS: int = 30
+    JOB_RETENTION_QUARANTINED_DAYS: int = 180
+    JOB_RETENTION_DEAD_LETTER_DAYS: int = 180
+    JOB_RETENTION_AUDIT_CRITICAL_DAYS: int = 365
+    JOB_RETENTION_INVESTIGATION_PROTECTED: bool = True
+    JOB_RETENTION_DISPUTE_PROTECTED: bool = True
+    JOB_RETENTION_DRY_RUN_DEFAULT: bool = False
+    JOB_RETENTION_CLEANUP_BATCH_SIZE: int = 1000
+    JOB_RETENTION_CLEANUP_METRICS_ENABLED: bool = True
+
     # ── DB pool ───────────────────────────────────────────────────────────
     DB_POOL_SATURATION_THRESHOLD: float = 0.9
     DB_POOL_REJECT_AFTER_SECONDS: int = 30
