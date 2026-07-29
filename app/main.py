@@ -159,6 +159,36 @@ async def worker_health():
         },
     )
 
+
+@app.get("/health/concurrency")
+async def concurrency_health():
+    """Per-environment concurrency profile + live DB/broker saturation.
+
+    BE-W5-055: Worker concurrency settings are profiled and documented per
+    environment; DB pool and broker connections stay within safe limits;
+    guardrail alerts fire before saturation failures.
+    """
+    concurrency_guardrails_payload: dict = {}
+    try:
+        from app.services.concurrency_guardrails import guardrails_dict
+        from app.tasks.celery_app import celery_app as _celery_app
+        concurrency_guardrails_payload = guardrails_dict(_celery_app)
+    except Exception as exc:  # pragma: no cover - defensive
+        # Never let this endpoint 500 — degrade gracefully.
+        concurrency_guardrails_payload = {"error": str(exc)}
+
+    live = concurrency_guardrails_payload.get("live_metrics", {}) or {}
+    alerts_active = bool(live.get("alerts_active"))
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok" if not alerts_active else "guardrail_alert",
+            "timestamp": datetime.utcnow().isoformat(),
+            **concurrency_guardrails_payload,
+        },
+    )
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
