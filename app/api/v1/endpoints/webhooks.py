@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION, invalidate_webhook_cache
+from app.services.webhook_service import (
+    WEBHOOK_SCHEMA_VERSION,
+    invalidate_webhook_cache,
+    validate_webhook_url,
+    get_partition_metrics,
+    get_slo_metrics,
+)
 from app.core.security import require_admin
 from app.core.config import settings
 
@@ -52,10 +58,21 @@ class WebhookCreate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+    def validate_url_and_ssrf(cls, v: HttpUrl) -> HttpUrl:
+        """Validate URL length and SSRF safety (#303).
+
+        Uses a fast pre-check (hostname pattern matching, no DNS resolution)
+        in the validator. Full DNS-resolution-based SSRF checks happen
+        at dispatch time in trigger_sla_violation_webhooks.
+        """
         url_str = str(v)
         if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
             raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        # Issue #303: Fast SSRF pre-check (no DNS resolution)
+        from app.services.webhook_service import validate_webhook_url_fast
+        is_valid, reason = validate_webhook_url_fast(url_str)
+        if not is_valid:
+            raise ValueError(f"URL rejected by SSRF policy: {reason}")
         return v
 
     @field_validator("events")
@@ -85,11 +102,22 @@ class WebhookUpdate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+    def validate_url_and_ssrf(cls, v: HttpUrl) -> HttpUrl:
+        """Validate URL length and SSRF safety (#303).
+
+        Uses a fast pre-check (hostname pattern matching, no DNS resolution)
+        in the validator. Full DNS-resolution-based SSRF checks happen
+        at dispatch time in trigger_sla_violation_webhooks.
+        """
         if v is not None:
             url_str = str(v)
             if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
                 raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+            # Issue #303: Fast SSRF pre-check (no DNS resolution)
+            from app.services.webhook_service import validate_webhook_url_fast
+            is_valid, reason = validate_webhook_url_fast(url_str)
+            if not is_valid:
+                raise ValueError(f"URL rejected by SSRF policy: {reason}")
         return v
 
     @field_validator("events")
@@ -184,6 +212,26 @@ class WebhookMetadataResponse(BaseModel):
     terminal_status_codes: List[int]
     retry_policy: Dict[str, Any]
     schema_version: str
+
+
+# Issue #302: Partition metrics schema
+class WebhookPartitionMetricsResponse(BaseModel):
+    partition_count: int
+    priority_partition: int
+    partitions: Dict[str, dict]
+    global_pending: int
+    global_throughput: float
+
+
+# Issue #305: SLO metrics schema
+class WebhookSLOMetricsResponse(BaseModel):
+    status: str
+    window_seconds: int
+    slo_target: float
+    overall: Dict[str, Any]
+    burn_indicators: Dict[str, Any]
+    per_event: Dict[str, Any]
+    per_endpoint: Dict[str, Any]
 
 
 # --------------------------------------------------------------------------- #
@@ -472,8 +520,8 @@ def list_dead_letter_deliveries(
 
 @router.post("/{webhook_id}/deliveries/{delivery_id}/replay", response_model=WebhookDeliveryResponse)
 def replay_dead_letter_delivery(
-    webhook_id: UUID, 
-    delivery_id: UUID, 
+    webhook_id: UUID,
+    delivery_id: UUID,
     db: Session = Depends(get_db)
 ):
     """Replay a dead-lettered delivery."""
@@ -488,7 +536,7 @@ def replay_dead_letter_delivery(
     )
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found.")
-    
+
     from app.services.webhook_service import replay_dead_letter_delivery
     success = replay_dead_letter_delivery(db, delivery_id)
     if not success:
@@ -496,7 +544,7 @@ def replay_dead_letter_delivery(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to replay delivery. It may not be in dead-letter status."
         )
-    
+
     db.refresh(delivery)
     return _serialize_delivery(delivery)
 
@@ -511,7 +559,7 @@ def replay_deliveries_by_context(
 ):
     """Replay deliveries by event and context (device or outage)."""
     from app.services.webhook_service import replay_deliveries_by_event_context
-    
+
     replayed_count = replay_deliveries_by_event_context(
         db,
         event=event,
@@ -519,7 +567,7 @@ def replay_deliveries_by_context(
         outage_id=payload.outage_id,
         limit=payload.limit
     )
-    
+
     return WebhookReplayResponse(
         replayed_count=replayed_count,
         message=f"Replayed {replayed_count} deliveries for event {event.value}"
@@ -534,7 +582,7 @@ def get_webhook_metadata():
         TERMINAL_STATUS_CODES,
         _get_retry_delays,
     )
-    
+
     return WebhookMetadataResponse(
         retryable_status_codes=sorted(RETRYABLE_STATUS_CODES),
         terminal_status_codes=sorted(TERMINAL_STATUS_CODES),
@@ -545,3 +593,30 @@ def get_webhook_metadata():
         },
         schema_version=WEBHOOK_SCHEMA_VERSION,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Issue #302: Partition metrics endpoint
+# --------------------------------------------------------------------------- #
+
+@router.get("/partitions", response_model=WebhookPartitionMetricsResponse)
+def get_webhook_partition_metrics():
+    """Get webhook partition metrics for operational visibility.
+
+    Exposes per-partition pending count, throughput, and backpressure status.
+    """
+    return get_partition_metrics()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #305: SLO metrics endpoint
+# --------------------------------------------------------------------------- #
+
+@router.get("/slo-metrics", response_model=WebhookSLOMetricsResponse)
+def get_webhook_slo_metrics():
+    """Get webhook delivery SLO metrics.
+
+    Returns per-event and per-endpoint success rates, latency percentiles,
+    and burn indicators for the current SLO window.
+    """
+    return get_slo_metrics()

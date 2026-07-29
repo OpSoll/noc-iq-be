@@ -34,14 +34,14 @@ def verify_webhook(request_body: str, signature_header: str, secret: str) -> boo
     """Verify webhook signature using HMAC-SHA256."""
     # Extract hex digest (remove 'sha256=' prefix)
     provided_signature = signature_header.replace('sha256=', '')
-    
+
     # Compute expected signature
     expected_signature = hmac.new(
         secret.encode(),
         request_body.encode(),
         hashlib.sha256
     ).hexdigest()
-    
+
     # Compare using constant-time comparison
     return hmac.compare_digest(expected_signature, provided_signature)
 ```
@@ -54,13 +54,13 @@ const crypto = require('crypto');
 function verifyWebhook(requestBody, signatureHeader, secret) {
   // Extract hex digest
   const providedSignature = signatureHeader.replace('sha256=', '');
-  
+
   // Compute expected signature
   const expectedSignature = crypto
     .createHmac('sha256', secret)
     .update(requestBody)
     .digest('hex');
-  
+
   // Compare using constant-time comparison
   return crypto.timingSafeEqual(
     Buffer.from(expectedSignature),
@@ -102,11 +102,11 @@ from sqlalchemy.dialects.postgresql import UUID
 
 class ProcessedWebhook(Base):
     __tablename__ = "processed_webhooks"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True)
     idempotency_key = Column(String(64), nullable=False, unique=True, index=True)
     processed_at = Column(DateTime, default=datetime.utcnow)
-    
+
     __table_args__ = (
         UniqueConstraint('idempotency_key', name='uq_processed_webhooks_idempotency'),
     )
@@ -116,14 +116,14 @@ def process_webhook(idempotency_key: str, payload: dict):
     existing = db.query(ProcessedWebhook).filter(
         ProcessedWebhook.idempotency_key == idempotency_key
     ).first()
-    
+
     if existing:
         logger.info(f"Webhook {idempotency_key} already processed, skipping")
         return
-    
+
     # Process the webhook
     # ... your processing logic ...
-    
+
     # Record as processed
     record = ProcessedWebhook(idempotency_key=idempotency_key)
     db.add(record)
@@ -195,14 +195,14 @@ def validate_webhook_freshness(
     event_time = datetime.fromisoformat(webhook_timestamp)
     current_time = datetime.utcnow()
     age = (current_time - event_time).total_seconds()
-    
+
     if age > max_age_seconds:
         # Log and reject as suspicious/stale
         return False
     if age < 0:
         # Clock skew or future event
         return False
-    
+
     return True
 ```
 
@@ -220,10 +220,10 @@ def audit_webhook_delivery(delivery_record):
     event_occurred = parse_iso8601(delivery_record['timestamp'])
     delivery_attempted = delivery_record['created_at']
     delivery_succeeded = delivery_record['delivered_at']
-    
+
     latency_seconds = (delivery_attempted - event_occurred).total_seconds()
     processing_time = (delivery_succeeded - delivery_attempted).total_seconds()
-    
+
     audit_log({
         'event_type': delivery_record['event'],
         'event_occurred': event_occurred,
@@ -411,3 +411,275 @@ def process_webhook(payload: dict) -> None:
     else:
         logger.warning("Unknown schema_version: %s — ignoring payload", schema_version)
 ```
+
+---
+
+## BE-W5-041: Webhook Batch Dispatch Backpressure and Queue Partitioning (Issue #302)
+
+### Overview
+
+Webhook dispatch workloads are partitioned to prevent slow tenants from blocking global delivery. SLA-critical events are routed to dedicated priority partitions to prevent starvation.
+
+### Partition Strategy
+
+| Partition ID | Purpose | Backpressure Threshold | Max Pending |
+|-------------|---------|------------------------|-------------|
+| 0 (Priority) | SLA events (violation, warning, resolved) | None (bypasses backpressure) | N/A |
+| 1-N | General / tenant-specific traffic | Configurable via `WEBHOOK_PARTITION_BACKPRESSURE_THRESHOLD` | `WEBHOOK_PARTITION_MAX_PENDING` |
+
+### Backpressure Behavior
+
+When a non-priority partition exceeds the backpressure threshold:
+- Non-SLA deliveries to that partition are deferred
+- The priority partition continues uninterrupted
+- Operational metrics expose partition lag and throughput
+
+### Configuration
+
+```
+WEBHOOK_PARTITION_COUNT=4
+WEBHOOK_PARTITION_BACKPRESSURE_THRESHOLD=500
+WEBHOOK_PARTITION_MAX_PENDING=2000
+WEBHOOK_ENDPOINT_PARTITION_ENABLED=True
+WEBHOOK_SLA_PRIORITY_PARTITION=0
+WEBHOOK_PAYMENT_PRIORITY_PARTITION=1
+```
+
+### Operational Metrics
+
+Monitor partition health via `GET /webhooks/partitions`:
+
+```json
+{
+  "partition_count": 4,
+  "priority_partition": 0,
+  "partitions": {
+    "0": { "pending": 12, "throughput": 145.2 },
+    "1": { "pending": 3, "throughput": 89.1 },
+    "2": { "pending": 450, "throughput": 23.4 },
+    "3": { "pending": 8, "throughput": 102.7 }
+  },
+  "global_pending": 473,
+  "global_throughput": 360.4
+}
+```
+
+### Autoscaling
+
+The autoscaler (`WebhookAutoscaler`) monitors per-partition queue depth and adjusts worker counts:
+
+- **Scale Up**: Triggered when any partition exceeds `WEBHOOK_QUEUE_SCALE_UP_THRESHOLD`
+- **Scale Down**: Triggered when total queue depth falls below `WEBHOOK_QUEUE_SCALE_DOWN_THRESHOLD`
+- **Priority Boost**: Priority partitions always get at least one dedicated worker
+
+---
+
+## BE-W5-042: Webhook Endpoint Validation Hardening and SSRF Safeguards (Issue #303)
+
+### URL Validation Policy
+
+Webhook URLs are validated against SSRF (Server-Side Request Forgery) attacks on creation, update, and at dispatch time.
+
+### Blocked Targets
+
+| Category | Examples |
+|----------|----------|
+| **Private Networks** | 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 |
+| **Link-Local** | 169.254.0.0/16, fe80::/10 |
+| **Loopback** | 127.0.0.1, ::1 |
+| **Known Metadata Endpoints** | 169.254.169.254, metadata.google.internal, metadata.aws.internal |
+| **Blocked Hostnames** | localhost, localhost.localdomain, localhost6, localhost6.localdomain6 |
+
+### DNS Rebinding Protection
+
+- Hostnames are resolved at validation time
+- All resolved IPs are checked against the blocked ranges
+- If ANY resolved IP is blocked, the URL is rejected
+
+### Redirect Protection
+
+- Redirects are limited to `WEBHOOK_SSRF_MAX_REDIRECTS` (default: 3)
+- Prevents redirect chains that point to internal services
+
+### Configuration
+
+```
+WEBHOOK_SSRF_BLOCKED_CIDRS=127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,::1/128,fd00::/8,fe80::/10
+WEBHOOK_SSRF_BLOCKED_HOSTNAMES=localhost,localhost.localdomain,localhost6,localhost6.localdomain6,metadata.google.internal,metadata.aws.internal,169.254.169.254
+WEBHOOK_SSRF_ALLOW_PRIVATE=False
+WEBHOOK_SSRF_ALLOW_LOOPBACK=False
+WEBHOOK_SSRF_ALLOW_LINK_LOCAL=False
+WEBHOOK_SSRF_MAX_REDIRECTS=3
+```
+
+---
+
+## BE-W5-043: Webhook Payload Redaction Policy (Issue #304)
+
+### Overview
+
+Sensitive fields in webhook payloads are automatically redacted before delivery to prevent data leakage.
+
+### Redacted Fields
+
+The following field names are masked (case-insensitive matching):
+
+```
+seed, secret_seed, private_key, mnemonic, password,
+token, access_token, refresh_token, signing_key, wallet_secret
+```
+
+### Redaction Behavior
+
+- **Recursive**: Redaction applies to all nested dictionaries within the `data` payload
+- **Deep**: Up to 10 levels of nesting are scanned
+- **Masked Value**: `[REDACTED]` (configurable via `WEBHOOK_REDACTION_MASK`)
+- **Disabled**: Redaction can be disabled globally via `WEBHOOK_REDACTION_ENABLED`
+
+### Example
+
+**Before Redaction:**
+```json
+{
+  "schema_version": "1",
+  "event": "sla.violation",
+  "data": {
+    "device_id": "dev-123",
+    "wallet_secret": "SGFEPI...",
+    "credentials": {
+      "password": "super-secret-123",
+      "token": "eyJhbGci..."
+    }
+  }
+}
+```
+
+**After Redaction:**
+```json
+{
+  "schema_version": "1",
+  "event": "sla.violation",
+  "data": {
+    "device_id": "dev-123",
+    "wallet_secret": "[REDACTED]",
+    "credentials": {
+      "password": "[REDACTED]",
+      "token": "[REDACTED]"
+    }
+  }
+}
+```
+
+### Audit Events
+
+Redaction configuration changes are audited via the audit log:
+
+| Event Type | Description |
+|-----------|-------------|
+| `redaction.config.changed` | Redaction field list was modified |
+| `redaction.config.validated` | Redaction config passed validation |
+| `redaction.config.failed` | Redaction config failed validation |
+| `redaction.field_leak_detected` | Sensitive field detected in outbound payload |
+
+---
+
+## BE-W5-044: Webhook Delivery SLO Metrics and Alert Thresholds (Issue #305)
+
+### SLO Definition
+
+| Metric | Target | Description |
+|--------|--------|-------------|
+| **Success Rate** | 99.9% percentage of deliveries returning HTTP 2xx |
+| **Latency (P95)** | ≤ 5000 ms | 95th percentile delivery latency |
+| **Error Budget** | 0.1% | Maximum acceptable error rate |
+| **Window** | 3600 s | Sliding measurement window (1 hour) |
+
+### Burn Rate Alerts
+
+| Alert | Threshold | Action |
+|-------|-----------|--------|
+| **Burn Rate Alert** | ≥ 2.0x | Error budget being consumed twice as fast as budgeted |
+| **Budget Burn Alert** | ≤ 50% remaining | Critical: more than half the error budget consumed |
+| **Latency Breach** | P95 > 5000ms | Latency SLO is being violated |
+
+### Metrics Endpoint
+
+Retrieve current SLO metrics:
+
+```
+GET /webhooks/slo-metrics
+GET /metrics/webhook-slo
+```
+
+**Response**:
+```json
+{
+  "status": "ok",
+  "window_seconds": 3600,
+  "slo_target": 0.999,
+  "overall": {
+    "total_deliveries": 1500,
+    "successes": 1498,
+    "success_rate": 0.998667,
+    "avg_latency_ms": 245.3,
+    "p95_latency_ms": 890.1,
+    "p99_latency_ms": 2100.5
+  },
+  "burn_indicators": {
+    "error_budget": 0.001,
+    "actual_error_rate": 0.001333,
+    "burn_rate": 1.333,
+    "budget_remaining_pct": 33.33,
+    "burn_rate_alert": false,
+    "budget_burn_alert": true,
+    "latency_breach": false
+  },
+  "per_event": {
+    "sla.violation": {
+      "total": 1200,
+      "success_rate": 0.9992,
+      "avg_latency_ms": 210.5,
+      "p95_latency_ms": 750.0
+    },
+    "sla.warning": {
+      "total": 300,
+      "success_rate": 0.9967,
+      "avg_latency_ms": 380.2,
+      "p95_latency_ms": 1200.0
+    }
+  },
+  "per_endpoint": {
+    "https://consumer.example.com/webhook": {
+      "total": 800,
+      "success_rate": 0.9988
+    }
+  }
+}
+```
+
+### Configuration
+
+```
+WEBHOOK_SLO_SUCCESS_TARGET=0.999
+WEBHOOK_SLO_LATENCY_TARGET_MS=5000
+WEBHOOK_SLO_BURN_RATE_THRESHOLD=2.0
+WEBHOOK_SLO_WINDOW_SECONDS=3600
+WEBHOOK_SLO_BUDGET_BURN_ALERT_PERCENT=50.0
+```
+
+### Response Playbook Hooks
+
+When SLO alerts fire, the following actions are recommended:
+
+| Alert | Immediate Action | Long-term Fix |
+|-------|-----------------|---------------|
+| **Burn Rate Alert** | Check webhook endpoint health, investigate 5xx errors | Add retry jitter, adjust backoff |
+| **Budget Burn Alert** | Pause non-critical webhook dispatch | Scale workers, review infrastructure |
+| **Latency Breach** | Check network latency, DNS resolution | Optimize delivery pipeline, add CDN |
+
+### Cardinality Control
+
+SLO metrics include per-event and per-endpoint dimensions with implicit cardinality controls:
+- Per-event: Fixed set of known event types (sla.violation, sla.warning, sla.resolved)
+- Per-endpoint: Distinct endpoints are tracked but the sliding window bounds total memory usage
+- The `METRICS_CARDINALITY_BUDGET` setting limits total metric label combinations
