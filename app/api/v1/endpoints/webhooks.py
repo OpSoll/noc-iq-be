@@ -11,7 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
-from app.services.webhook_service import WEBHOOK_SCHEMA_VERSION, invalidate_webhook_cache
+from app.services.webhook_service import (
+    WEBHOOK_SCHEMA_VERSION,
+    invalidate_webhook_cache,
+    validate_webhook_url,
+    get_partition_metrics,
+    get_slo_metrics,
+)
 from app.core.security import require_admin
 from app.core.config import settings
 
@@ -52,10 +58,21 @@ class WebhookCreate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+    def validate_url_and_ssrf(cls, v: HttpUrl) -> HttpUrl:
+        """Validate URL length and SSRF safety (#303).
+
+        Uses a fast pre-check (hostname pattern matching, no DNS resolution)
+        in the validator. Full DNS-resolution-based SSRF checks happen
+        at dispatch time in trigger_sla_violation_webhooks.
+        """
         url_str = str(v)
         if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
             raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+        # Issue #303: Fast SSRF pre-check (no DNS resolution)
+        from app.services.webhook_service import validate_webhook_url_fast
+        is_valid, reason = validate_webhook_url_fast(url_str)
+        if not is_valid:
+            raise ValueError(f"URL rejected by SSRF policy: {reason}")
         return v
 
     @field_validator("events")
@@ -85,11 +102,22 @@ class WebhookUpdate(BaseModel):
 
     @field_validator("url")
     @classmethod
-    def validate_url_length(cls, v: HttpUrl) -> HttpUrl:
+    def validate_url_and_ssrf(cls, v: HttpUrl) -> HttpUrl:
+        """Validate URL length and SSRF safety (#303).
+
+        Uses a fast pre-check (hostname pattern matching, no DNS resolution)
+        in the validator. Full DNS-resolution-based SSRF checks happen
+        at dispatch time in trigger_sla_violation_webhooks.
+        """
         if v is not None:
             url_str = str(v)
             if len(url_str) > settings.MAX_WEBHOOK_URL_LENGTH:
                 raise ValueError(f"url too long. Maximum length is {settings.MAX_WEBHOOK_URL_LENGTH} characters.")
+            # Issue #303: Fast SSRF pre-check (no DNS resolution)
+            from app.services.webhook_service import validate_webhook_url_fast
+            is_valid, reason = validate_webhook_url_fast(url_str)
+            if not is_valid:
+                raise ValueError(f"URL rejected by SSRF policy: {reason}")
         return v
 
     @field_validator("events")
@@ -186,36 +214,24 @@ class WebhookMetadataResponse(BaseModel):
     schema_version: str
 
 
-# BE-W5-045: Disaster-recovery replay models
-class WebhookDRReplayRequest(BaseModel):
-    """Bounded time window request for disaster-recovery replay."""
-    model_config = ConfigDict(
-        json_schema_extra={
-            "example": {
-                "start_time": "2026-06-01T00:00:00",
-                "end_time": "2026-06-01T23:59:59",
-            }
-        }
-    )
-
-    start_time: datetime
-    end_time: datetime
-
-    @field_validator("end_time")
-    @classmethod
-    def _validate_window(cls, v: datetime, info) -> datetime:
-        start = info.data.get("start_time") if hasattr(info, "data") else None
-        if start is not None and v < start:
-            raise ValueError("end_time must be >= start_time")
-        return v
+# Issue #302: Partition metrics schema
+class WebhookPartitionMetricsResponse(BaseModel):
+    partition_count: int
+    priority_partition: int
+    partitions: Dict[str, dict]
+    global_pending: int
+    global_throughput: float
 
 
-class WebhookDRReplayResponse(BaseModel):
-    job_id: UUID
-    celery_task_id: Optional[str] = None
-    start_time: datetime
-    end_time: datetime
-    message: str
+# Issue #305: SLO metrics schema
+class WebhookSLOMetricsResponse(BaseModel):
+    status: str
+    window_seconds: int
+    slo_target: float
+    overall: Dict[str, Any]
+    burn_indicators: Dict[str, Any]
+    per_event: Dict[str, Any]
+    per_endpoint: Dict[str, Any]
 
 
 # --------------------------------------------------------------------------- #
@@ -504,8 +520,8 @@ def list_dead_letter_deliveries(
 
 @router.post("/{webhook_id}/deliveries/{delivery_id}/replay", response_model=WebhookDeliveryResponse)
 def replay_dead_letter_delivery(
-    webhook_id: UUID, 
-    delivery_id: UUID, 
+    webhook_id: UUID,
+    delivery_id: UUID,
     db: Session = Depends(get_db)
 ):
     """Replay a dead-lettered delivery."""
@@ -520,7 +536,7 @@ def replay_dead_letter_delivery(
     )
     if not delivery:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Delivery not found.")
-    
+
     from app.services.webhook_service import replay_dead_letter_delivery
     success = replay_dead_letter_delivery(db, delivery_id)
     if not success:
@@ -528,7 +544,7 @@ def replay_dead_letter_delivery(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Failed to replay delivery. It may not be in dead-letter status."
         )
-    
+
     db.refresh(delivery)
     return _serialize_delivery(delivery)
 
@@ -543,7 +559,7 @@ def replay_deliveries_by_context(
 ):
     """Replay deliveries by event and context (device or outage)."""
     from app.services.webhook_service import replay_deliveries_by_event_context
-    
+
     replayed_count = replay_deliveries_by_event_context(
         db,
         event=event,
@@ -551,7 +567,7 @@ def replay_deliveries_by_context(
         outage_id=payload.outage_id,
         limit=payload.limit
     )
-    
+
     return WebhookReplayResponse(
         replayed_count=replayed_count,
         message=f"Replayed {replayed_count} deliveries for event {event.value}"
@@ -579,34 +595,28 @@ def get_webhook_metadata():
     )
 
 
-# BE-W5-045: Webhook disaster-recovery replay endpoint
-@router.post(
-    "/disaster-recovery/replay",
-    response_model=WebhookDRReplayResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-def disaster_recovery_replay(
-    payload: WebhookDRReplayRequest,
-    current_user=Depends(require_admin),
-    db: Session = Depends(get_db),
-):
-    """Replay webhook deliveries whose ``event_timestamp`` falls in the supplied
-    bounded time window. Idempotent and resumable — runbook docs cover safe
-    operation and rollback.
-    """
-    from app.services.webhook_service import enqueue_webhook_dr_replay
+# --------------------------------------------------------------------------- #
+# Issue #302: Partition metrics endpoint
+# --------------------------------------------------------------------------- #
 
-    job = enqueue_webhook_dr_replay(
-        db,
-        start_time=payload.start_time,
-        end_time=payload.end_time,
-    )
-    return WebhookDRReplayResponse(
-        job_id=job.id,
-        celery_task_id=job.celery_task_id,
-        start_time=payload.start_time,
-        end_time=payload.end_time,
-        message=(
-            "DR replay enqueued. Poll GET /jobs/{job_id} to monitor progress."
-        ),
-    )
+@router.get("/partitions", response_model=WebhookPartitionMetricsResponse)
+def get_webhook_partition_metrics():
+    """Get webhook partition metrics for operational visibility.
+
+    Exposes per-partition pending count, throughput, and backpressure status.
+    """
+    return get_partition_metrics()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #305: SLO metrics endpoint
+# --------------------------------------------------------------------------- #
+
+@router.get("/slo-metrics", response_model=WebhookSLOMetricsResponse)
+def get_webhook_slo_metrics():
+    """Get webhook delivery SLO metrics.
+
+    Returns per-event and per-endpoint success rates, latency percentiles,
+    and burn indicators for the current SLO window.
+    """
+    return get_slo_metrics()

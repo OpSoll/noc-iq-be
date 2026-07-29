@@ -39,6 +39,21 @@ EXPECTED_EVENT_CLASSES: dict[str, dict[str, Any]] = {
         "impacted_metrics": ["payment_success_rate", "payment_volume"],
         "ingestion_stage": "payment_service",
     },
+    # Issue #304: Redaction audit events
+    "redaction.": {
+        "impacted_metrics": ["redaction_config_changes", "redaction_audit_events"],
+        "ingestion_stage": "webhook_service",
+    },
+    # Issue #302: Partition metrics audit events
+    "webhook.partition.": {
+        "impacted_metrics": ["partition_lag", "partition_throughput", "backpressure_events"],
+        "ingestion_stage": "webhook_service",
+    },
+    # Issue #305: SLO audit events
+    "webhook.slo.": {
+        "impacted_metrics": ["slo_burn_rate", "slo_budget_remaining", "slo_latency_breach"],
+        "ingestion_stage": "webhook_service",
+    },
 }
 
 
@@ -140,6 +155,40 @@ class BridgeAuditEvents:
     PREFIX = "bridge."
 
 
+# Issue #304: Redaction audit event classes
+class RedactionAuditEvents:
+    """Audit event taxonomy for webhook payload redaction policy changes."""
+
+    REDACTION_CONFIG_CHANGED = "redaction.config.changed"
+    REDACTION_CONFIG_VALIDATED = "redaction.config.validated"
+    REDACTION_CONFIG_FAILED = "redaction.config.failed"
+    REDACTION_FIELD_LEAK_DETECTED = "redaction.field_leak_detected"
+
+    PREFIX = "redaction."
+
+
+# Issue #302: Partition audit event classes
+class PartitionAuditEvents:
+    """Audit event taxonomy for webhook partition events."""
+
+    PARTITION_BACKPRESSURE_TRIGGERED = "webhook.partition.backpressure"
+    PARTITION_STARVATION_DETECTED = "webhook.partition.starvation"
+    PARTITION_SCALED = "webhook.partition.scaled"
+
+    PREFIX = "webhook.partition."
+
+
+# Issue #305: SLO audit event classes
+class SLOAuditEvents:
+    """Audit event taxonomy for webhook SLO metric events."""
+
+    SLO_BURN_RATE_ALERT = "webhook.slo.burn_rate_alert"
+    SLO_BUDGET_ALERT = "webhook.slo.budget_alert"
+    SLO_LATENCY_BREACH = "webhook.slo.latency_breach"
+
+    PREFIX = "webhook.slo."
+
+
 def _redacted_digest(data: Any) -> Optional[str]:
     """Return a SHA-256 hex digest of a JSON-serialized payload without exposing secrets.
 
@@ -167,6 +216,8 @@ class AuditLogService:
         "secret_seed",
         "private_key",
         "mnemonic",
+        "signing_key",
+        "wallet_secret",
     }
 
     def __init__(self, db_session_factory=None):

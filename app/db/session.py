@@ -1,15 +1,8 @@
-import time
-import logging
-from typing import Optional
-
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import QueuePool
 from __future__ import annotations
 
 import logging
-from typing import Generator
+import time
+from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
@@ -19,18 +12,13 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-DB_URL = settings.REDIS_URL.replace("redis://", "postgresql://") if "redis://" in settings.REDIS_URL else settings.REDIS_URL
-DB_URL = "sqlite:///./nociq.db" if "redis://" in settings.REDIS_URL or "postgresql://" not in settings.REDIS_URL else DB_URL
+# Use SQLite for local development/testing (default for preview environments)
+_DB_URL = "sqlite:///./nociq.db"
 
 engine: Engine = create_engine(
-    DB_URL,
-    poolclass=QueuePool,
-    pool_size=settings.DB_POOL_SIZE,
-    max_overflow=settings.DB_POOL_MAX_OVERFLOW,
-engine = create_engine(
-    settings.DATABASE_URL,
+    _DB_URL,
+    connect_args={"check_same_thread": False},
     pool_pre_ping=True,
-    pool_timeout=30,
 )
 
 
@@ -81,7 +69,6 @@ class PoolHealthChecker:
 pool_health = PoolHealthChecker(engine)
 
 
-def get_db():
 def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
