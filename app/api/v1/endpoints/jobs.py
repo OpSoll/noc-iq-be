@@ -60,6 +60,10 @@ class JobResponse(BaseModel):
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     created_at: str
+    # BE-W5-054: Quarantine metadata
+    payload_hash: Optional[str] = None
+    quarantine_reason: Optional[str] = None
+    quarantined_at: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -122,6 +126,10 @@ def _serialize_job(job: Job) -> JobResponse:
         started_at=job.started_at.isoformat() if job.started_at else None,
         finished_at=job.finished_at.isoformat() if job.finished_at else None,
         created_at=job.created_at.isoformat(),
+        # BE-W5-054: Include quarantine metadata
+        payload_hash=job.payload_hash,
+        quarantine_reason=job.quarantine_reason,
+        quarantined_at=job.quarantined_at.isoformat() if job.quarantined_at else None,
     )
 
 
@@ -530,21 +538,23 @@ def cleanup_old_jobs(
     db: Session = Depends(get_db)
 ):
     """Clean up old completed and failed jobs based on retention policy.
-    
+
     BE-042: Removes old job records to prevent unbounded database growth.
     - Successful/revoked jobs: default 30 day retention
     - Failed jobs: default 90 day retention (preserved longer for debugging)
-    
+
     Use dry_run=True to preview what would be deleted without actually deleting.
+    Note: quarantined jobs are excluded from automatic cleanup — they are
+    preserved until operators explicitly release or remove them.
     """
     cleanup_service = JobCleanupService(db)
-    
+
     result = cleanup_service.cleanup_old_jobs(
         successful_retention_days=payload.successful_retention_days,
         failed_retention_days=payload.failed_retention_days,
         dry_run=payload.dry_run,
     )
-    
+
     # Log the cleanup operation
     audit_log.log_event(
         db,
@@ -558,6 +568,186 @@ def cleanup_old_jobs(
             "executed_by": getattr(current_user, 'email', 'unknown'),
         }
     )
-    
+
     return JobCleanupResponse(**result)
+
+
+# BE-W5-054: Poison-message quarantine endpoints
+
+class QuarantinedJobSummary(BaseModel):
+    """Summary row for quarantined-job listings."""
+    id: UUID
+    celery_task_id: str
+    job_type: JobType
+    payload_hash: str
+    quarantine_reason: Optional[str] = None
+    quarantined_at: str
+    retry_count: int
+    max_retries: int
+
+
+class JobReleaseResponse(BaseModel):
+    job_id: UUID
+    celery_task_id: str
+    job_type: JobType
+    status: JobStatus
+    retry_count: int
+    max_retries: int
+    message: str
+
+
+@router.get("/quarantined", response_model=List[QuarantinedJobSummary])
+def list_quarantined_jobs(
+    limit: int = Query(50, ge=1, le=200),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """List quarantined jobs (BE-W5-054).
+
+    Quarantined jobs are poison messages that have repeatedly crashed workers;
+    they are excluded from normal retry sweeps until an operator inspects and
+    releases them. ``payload_hash`` lets operators group poison messages by
+    fingerprint.
+    """
+    rows = (
+        db.query(Job)
+        .filter(Job.status == JobStatus.QUARANTINED)
+        .order_by(Job.quarantined_at.desc().nullslast())  # type: ignore[attr-defined]
+        .limit(limit)
+        .all()
+    )
+    return [
+        QuarantinedJobSummary(
+            id=j.id,
+            celery_task_id=j.celery_task_id,
+            job_type=j.job_type,
+            payload_hash=j.payload_hash or "",
+            quarantine_reason=j.quarantine_reason,
+            quarantined_at=j.quarantined_at.isoformat() if j.quarantined_at else "",
+            retry_count=j.retry_count,
+            max_retries=j.max_retries,
+        )
+        for j in rows
+    ]
+
+
+@router.post(
+    "/{job_id}/release-from-quarantine",
+    response_model=JobReleaseResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def release_job_from_quarantine(
+    job_id: UUID,
+    request: Request,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Release a quarantined job back into the retry pipeline (BE-W5-054).
+
+    Resets retry bookkeeping, clears quarantine metadata, and re-enqueues
+    the underlying Celery task based on ``job_type``. Use this after the
+    underlying poison-payload root cause has been remediated.
+    """
+    correlation_id = get_correlation_id()
+    job = _get_job_or_404(db, job_id)
+
+    if job.status != JobStatus.QUARANTINED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Job is not quarantined (current status: {job.status.value}).",
+        )
+
+    audit_log.log_event(
+        db,
+        event_type="job_released_from_quarantine",
+        details={
+            "job_id": str(job.id),
+            "celery_task_id": job.celery_task_id,
+            "job_type": job.job_type.value,
+            "payload_hash": job.payload_hash,
+            "previous_quarantine_reason": job.quarantine_reason,
+            "released_by": getattr(current_user, "email", "unknown"),
+            "correlation_id": correlation_id,
+        },
+    )
+
+    # Reset quarantine metadata & retry bookkeeping.
+    job.quarantined_at = None
+    job.quarantine_reason = None
+    job.payload_hash = None
+    job.retry_count = 0
+    job.error = None
+    job.finished_at = None
+    job.started_at = None
+    job.progress = 0.0
+    job.status = JobStatus.PENDING
+
+    try:
+        payload = json.loads(job.payload) if job.payload else {}
+
+        if job.job_type == JobType.SLA_COMPUTATION:
+            new_task = enqueue_sla_computation(
+                db,
+                device_id=payload.get("device_id", ""),
+                period=payload.get("period", ""),
+                correlation_id=correlation_id,
+            )
+        elif job.job_type == JobType.BULK_SLA_COMPUTATION:
+            new_task = enqueue_bulk_sla_computation(
+                db,
+                device_ids=payload.get("device_ids", []),
+                period=payload.get("period", ""),
+                correlation_id=correlation_id,
+            )
+        elif job.job_type == JobType.WEBHOOK_DISPATCH:
+            from app.tasks.webhook_tasks import dispatch_webhook_delivery
+            delivery_id = payload.get("delivery_id") or payload.get("idempotency_key")
+            if not delivery_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="webhook dispatch job payload missing delivery_id.",
+                )
+            task_result = dispatch_webhook_delivery.delay(delivery_id)
+            job.celery_task_id = task_result.id
+            db.commit()
+            db.refresh(job)
+            return JobReleaseResponse(
+                job_id=job.id,
+                celery_task_id=job.celery_task_id,
+                job_type=job.job_type,
+                status=job.status,
+                retry_count=job.retry_count,
+                max_retries=job.max_retries,
+                message="Released from quarantine and re-dispatched.",
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported job type for release: {job.job_type.value}",
+            )
+
+        job.celery_task_id = new_task.celery_task_id
+        db.commit()
+        db.refresh(job)
+        return JobReleaseResponse(
+            job_id=job.id,
+            celery_task_id=job.celery_task_id,
+            job_type=job.job_type,
+            status=job.status,
+            retry_count=job.retry_count,
+            max_retries=job.max_retries,
+            message="Released from quarantine and re-enqueued.",
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error(
+            "Failed to release quarantine job=%s: %s", job_id, exc,
+            correlation_id=correlation_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to release quarantine: {str(exc)}",
+        )
 

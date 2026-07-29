@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
+from app.models.job import Job, JobType
 from app.services.webhook_signing import (
     CURRENT_SIGNATURE_VERSION,
     sign_payload,
@@ -1009,3 +1010,125 @@ def replay_deliveries_by_event_context(
         replayed_count, event.value, device_id, outage_id
     )
     return replayed_count
+
+
+# --------------------------------------------------------------------------- #
+# BE-W5-045: Webhook disaster-recovery replay                                #
+# --------------------------------------------------------------------------- #
+
+
+def recover_deliveries_in_window(
+    db: Session,
+    start_time: datetime,
+    end_time: datetime,
+    on_progress: Optional[Any] = None,
+) -> Dict[str, int]:
+    """Replay *all* webhook deliveries whose ``event_timestamp`` falls inside
+    ``[start_time, end_time]`` — including those in PENDING/RETRYING/FAILED.
+
+    Acceptance criteria for BE-W5-045:
+      * Bounded time window (caller-supplied).
+      * Safe & idempotent: ``replay_dead_letter_delivery`` preserves
+        ``idempotency_key`` and ``event_timestamp`` so receiver-side
+        deduplication remains correct across replays.
+      * Resumable & auditable: progress callbacks write to the parent
+        ``Job`` so an operator can poll ``GET /jobs/{id}``.
+
+    Non-DEAD_LETTER deliveries are marked PENDING before being dispatched,
+    so the normal retry pipeline takes over. Already-SUCCESS deliveries
+    are left untouched.
+    """
+    if end_time < start_time:
+        raise ValueError("end_time must be greater than or equal to start_time")
+
+    candidates = (
+        db.query(WebhookDelivery)
+        .filter(WebhookDelivery.event_timestamp >= start_time)
+        .filter(WebhookDelivery.event_timestamp <= end_time)
+        .order_by(WebhookDelivery.event_timestamp.asc())
+        .all()
+    )
+
+    replayed = 0
+    skipped = 0
+    total = len(candidates)
+
+    for idx, delivery in enumerate(candidates, start=1):
+        if delivery.status == WebhookDeliveryStatus.SUCCESS:
+            skipped += 1
+            if on_progress:
+                on_progress(idx, total)  # type: ignore[arg-type]
+            continue
+        # Reset to PENDING if currently RETRYING/FAILED; DEAD_LETTER goes
+        # through the dedicated replay helper which clears transient fields.
+        if delivery.status == WebhookDeliveryStatus.DEAD_LETTER:
+            ok = replay_dead_letter_delivery(db, delivery.id)
+        else:
+            delivery.status = WebhookDeliveryStatus.PENDING
+            delivery.next_retry_at = None
+            delivery.dead_lettered_at = None
+            db.commit()
+            from app.services.webhook_service import dispatch_delivery  # local
+            dispatch_delivery(db, delivery.id)
+            ok = True
+        if ok:
+            replayed += 1
+        else:
+            skipped += 1
+        if on_progress:
+            on_progress(idx, total)  # type: ignore[arg-type]
+
+    logger.info(
+        "BE-W5-045: recovered window=[%s,%s] total=%d replayed=%d skipped=%d",
+        start_time.isoformat(), end_time.isoformat(), total, replayed, skipped,
+    )
+    return {"total": total, "replayed": replayed, "skipped": skipped}
+
+
+def enqueue_webhook_dr_replay(
+    db: Session,
+    start_time: datetime,
+    end_time: datetime,
+) -> Job:
+    """Create the DR replay ``Job`` record and dispatch the Celery task.
+
+    BE-W5-045: Enables operators to kick off disaster recovery which then
+    runs asynchronously and reports progress via the ``Job`` lifecycle.
+    """
+    if end_time < start_time:
+        raise ValueError("end_time must be greater than or equal to start_time")
+
+    payload = {
+        "start_time": start_time.isoformat(),
+        "end_time": end_time.isoformat(),
+    }
+    from app.tasks.webhook_tasks import recover_webhooks_in_window
+
+    # Pre-allocate the Job so the caller has an id immediately.
+    placeholder_id = "pending"
+    job = Job(
+        celery_task_id=placeholder_id,
+        job_type=JobType.WEBHOOK_DR_REPLAY,
+        payload=json.dumps(payload),
+        progress=0.0,
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    # Dispatch the Celery task with the assigned Job's id.
+    task_result = recover_webhooks_in_window.apply_async(
+        kwargs={
+            "job_id": str(job.id),
+            "start_iso": start_time.isoformat(),
+            "end_iso": end_time.isoformat(),
+        },
+    )
+    job.celery_task_id = task_result.id
+    db.commit()
+    db.refresh(job)
+    logger.info(
+        "BE-W5-045: enqueued DR replay job=%s celery_task_id=%s window=[%s,%s]",
+        job.id, job.celery_task_id, start_time.isoformat(), end_time.isoformat(),
+    )
+    return job
