@@ -8,6 +8,7 @@ from uuid import UUID
 from celery import Task
 
 from app.tasks.celery_app import celery_app
+from app.core.config import settings as cfg
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
 from app.models.webhook import WebhookEvent
@@ -39,7 +40,8 @@ def _hash_job_payload(job: Job) -> str:
 
 
 class DatabaseTask(Task):
-    """Base task that provides a scoped DB session and updates Job records."""
+    """Base task that provides a scoped DB session, updates Job records,
+    and manages lease heartbeats for BE-W5-047."""
 
     abstract = True
     _db = None
@@ -55,6 +57,17 @@ class DatabaseTask(Task):
         if job:
             job.status = JobStatus.STARTED
             job.started_at = datetime.utcnow()
+            # BE-W5-047: Initialize lease on start
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS)
+            db.commit()
+
+    def _heartbeat(self, db, celery_task_id: str):
+        """BE-W5-047: Extend the lease on a running job."""
+        job = self._get_job(db, celery_task_id)
+        if job and job.status == JobStatus.STARTED:
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS)
             db.commit()
 
     def _mark_success(self, db, celery_task_id: str, result: Any):
@@ -64,21 +77,50 @@ class DatabaseTask(Task):
             job.result = json.dumps(result)
             job.progress = 100.0
             job.finished_at = datetime.utcnow()
+            # BE-W5-047: Clear lease on completion
+            job.lease_expires_at = None
+            job.heartbeat_at = None
             db.commit()
 
-    def _mark_failure(self, db, celery_task_id: str, error: str):
+    def _mark_failure(self, db, celery_task_id: str, error: str, error_code: Optional[str] = None, error_retryable: Optional[bool] = None):
         job = self._get_job(db, celery_task_id)
         if not job:
             return
         # BE-W5-054: bucket retry_count so the QUARANTINED boundary is invariant.
-        # We compare 'attempts' (this attempt) against max_retries so the
-        # transition into QUARANTINED occurs after the final allowed attempt
-        # fails — never one attempt early or late.
         attempts = (job.retry_count or 0) + 1
-        # BE-W5-054: poison-message quarantine. If this attempt exhausts the
-        # per-job ``max_retries`` cap, quarantine it instead of letting
-        # subsequent periodic retry sweeps keep bouncing it through the worker.
+        # BE-W5-054: poison-message quarantine
         if attempts >= max(job.max_retries, 0):
+            # BE-W5-048: if dead-letter is enabled, route exhausted jobs there
+            if cfg.JOB_RETRY_DEAD_LETTER_ENABLED:
+                job.status = JobStatus.DEAD_LETTER
+                job.dead_letter_reason = f"Max retries exhausted ({job.max_retries}). Last error: {error}"
+                job.dead_letter_at = datetime.utcnow()
+                job.finished_at = datetime.utcnow()
+                job.retry_count = attempts
+                job.error = error
+                job.error_code = error_code or "DEAD_LETTER"
+                job.error_retryable = False
+                logger.error(
+                    "BE-W5-048: dead-lettering job %s type=%s after %d attempts: %s",
+                    job.id, job.job_type.value, attempts, error,
+                )
+                audit_log.log_event(
+                    db,
+                    event_type="job_dead_lettered",
+                    details={
+                        "job_id": str(job.id),
+                        "celery_task_id": celery_task_id,
+                        "job_type": job.job_type.value,
+                        "retry_count": attempts,
+                        "max_retries": job.max_retries,
+                        "retry_class": job.retry_class,
+                        "error": error,
+                        "error_code": error_code,
+                    },
+                )
+                db.commit()
+                return
+
             payload_hash = _hash_job_payload(job)
             job.payload_hash = payload_hash
             job.quarantine_reason = error
@@ -86,6 +128,8 @@ class DatabaseTask(Task):
             job.status = JobStatus.QUARANTINED
             job.retry_count = attempts
             job.finished_at = datetime.utcnow()
+            job.error_code = error_code or "QUARANTINED"
+            job.error_retryable = False
             logger.error(
                 "BE-W5-054: quarantining job %s type=%s payload_hash=%s after "
                 "%d attempts: %s",
@@ -110,6 +154,8 @@ class DatabaseTask(Task):
         job.retry_count = attempts
         job.status = JobStatus.FAILURE
         job.error = error
+        job.error_code = error_code
+        job.error_retryable = error_retryable if error_retryable is not None else False
         job.finished_at = datetime.utcnow()
         db.commit()
 
@@ -238,12 +284,16 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("SLA computation failed for device=%s: %s", device_id, error_msg)
-        
+
+        # BE-W5-050: Classify error for typed envelope
+        error_code = "SLA_COMPUTATION_ERROR"
+        error_retryable = self.request.retries < self.max_retries
+
         # Log retry attempt if we have retries left
         if self.request.retries < self.max_retries:
             self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
-        
-        self._mark_failure(db, self.request.id, error_msg)
+
+        self._mark_failure(db, self.request.id, error_msg, error_code=error_code, error_retryable=error_retryable)
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -344,12 +394,14 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Bulk SLA computation failed: %s", error_msg)
-        
-        # Log retry attempt if we have retries left
+
+        error_code = "BULK_SLA_COMPUTATION_ERROR"
+        error_retryable = self.request.retries < self.max_retries
+
         if self.request.retries < self.max_retries:
             self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
-        
-        self._mark_failure(db, self.request.id, error_msg)
+
+        self._mark_failure(db, self.request.id, error_msg, error_code=error_code, error_retryable=error_retryable)
         raise self.retry(exc=exc)
     finally:
         db.close()

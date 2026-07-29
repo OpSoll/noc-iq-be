@@ -859,6 +859,186 @@ https://github.com/OpSoll/noc-iq-be/blob/main/postman/NOCIQ-API.json
 
 ---
 
+---
+
+## Jobs & Async Tasks
+
+Status: active and routed.  Background job tracking, retry governance, lease
+heartbeat, and retention tiering.
+
+### Job Status Values
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Job enqueued, awaiting worker pickup |
+| `started` | Job is actively executing |
+| `success` | Job completed successfully |
+| `failure` | Job failed with retries remaining |
+| `revoked` | Job was cancelled by an operator |
+| `quarantined` | Job moved to quarantine after exhausting all retries (BE-W5-054) |
+| `dead_letter` | Job reached terminal dead-letter after max retries (BE-W5-048) |
+
+### Job Result Envelope (BE-W5-050)
+
+Every job endpoint returns a standardised envelope:
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "celery_task_id": "abc123...",
+  "job_type": "sla_computation",
+  "status": "success",
+  "progress": 100.0,
+  "result": { "mttr_minutes": 12, "is_violated": false },
+  "error": {
+    "code": "SLA_TIMEOUT",
+    "message": "Contract execution timed out",
+    "retryable": true,
+    "details": { "timeout_ms": 5000 }
+  },
+  "retry_count": 2,
+  "max_retries": 3,
+  "retry_class": "exponential_backoff",
+  "started_at": "2026-07-29T10:00:00Z",
+  "finished_at": "2026-07-29T10:00:45Z",
+  "created_at": "2026-07-29T09:59:55Z",
+  "worker_id": "worker-01",
+  "lease_expires_at": "2026-07-29T10:02:00Z",
+  "under_investigation": false,
+  "under_dispute": false,
+  "audit_critical": false
+}
+```
+
+The `error` field uses a typed `JobErrorDetail` with:
+- `code`: Machine-readable error code (e.g. `"SLA_TIMEOUT"`, `"DEAD_LETTER"`)
+- `message`: Human-readable description
+- `retryable`: Whether the job can be retried
+- `details`: Optional contextual payload
+
+### GET `/api/v1/jobs`
+
+List all jobs with optional filters.
+
+**Query Parameters:**
+- `job_type`: Filter by type (`sla_computation`, `webhook_dispatch`, `bulk_sla_computation`, `webhook_dr_replay`)
+- `status`: Filter by status
+- `limit` (default=50, max=200): Number of results
+
+### GET `/api/v1/jobs/{job_id}`
+
+Get a single job's status.  Syncs from Celery for in-progress jobs.
+
+### GET `/api/v1/jobs/{job_id}/envelope`
+
+Get a single job wrapped in the standardised result envelope (BE-W5-050).
+
+### GET `/api/v1/jobs/{job_id}/progress`
+
+Lightweight polling endpoint returning only progress fields.
+
+### POST `/api/v1/jobs/sla-computation`
+
+Enqueue an async SLA computation for a single device.
+
+**Request Body:**
+```json
+{ "device_id": "dev-001", "period": "2026-07" }
+```
+
+### POST `/api/v1/jobs/sla-computation/bulk`
+
+Enqueue an async bulk SLA computation.
+
+**Request Body:**
+```json
+{ "device_ids": ["dev-001", "dev-002"], "period": "2026-07" }
+```
+
+### POST `/api/v1/jobs/{job_id}/retry`
+
+Retry a failed, revoked, or dead-letter job (BE-041, BE-W5-048).
+
+**Retry Taxonomy Governance (BE-W5-048):**
+- `at_most_once`: Cannot be retried (manual inspection only)
+- `at_least_once`: Retries until success with capped backoff
+- `exponential_backoff`: Progressive backoff with jitter
+
+Exhausted jobs are dead-lettered (`dead_letter` status) when
+`JOB_RETRY_DEAD_LETTER_ENABLED` is `True`.
+
+### GET `/api/v1/jobs/retry-policies`
+
+List configured retry taxonomy policies per job type (BE-W5-048).
+
+### GET `/api/v1/jobs/dead-letter`
+
+List jobs in `dead_letter` status (BE-W5-048).  Admin only.
+
+### POST `/api/v1/jobs/{job_id}/heartbeat`
+
+Record a lease heartbeat for a running job (BE-W5-047).
+Internal endpoint used by workers to extend their lease.
+
+**Query Parameters:**
+- `worker_id` (required): Worker identifier
+
+### POST `/api/v1/jobs/reclaim-stale-leases`
+
+Reclaim jobs with expired worker leases (BE-W5-047).
+
+**Request Body:**
+```json
+{
+  "timeout_seconds": 120,
+  "batch_size": 50,
+  "dry_run": false
+}
+```
+
+### GET `/api/v1/jobs/retention-stats`
+
+Get job retention statistics with protection-flag counts (BE-W5-052).
+
+### POST `/api/v1/jobs/cleanup`
+
+Clean up old jobs using retention tiering (BE-W5-052).
+
+Protected records (under investigation, under dispute, audit-critical)
+are excluded from standard cleanup sweeps.
+
+**Request Body:**
+```json
+{
+  "retention_days": { "success": 30, "failure": 90 },
+  "dry_run": true,
+  "batch_size": 1000
+}
+```
+
+### POST `/api/v1/jobs/cleanup-audit-critical`
+
+Clean up audit-critical jobs past their extended retention window (BE-W5-052).
+
+### PATCH `/api/v1/jobs/{job_id}/protection-flags`
+
+Toggle investigation or dispute flags to protect a job from cleanup (BE-W5-052).
+
+**Request Body:**
+```json
+{ "under_investigation": true, "under_dispute": false }
+```
+
+### GET `/api/v1/jobs/quarantined`
+
+List quarantined poison-message jobs (BE-W5-054).  Admin only.
+
+### POST `/api/v1/jobs/{job_id}/release-from-quarantine`
+
+Release a quarantined job back into the retry pipeline (BE-W5-054).
+
+---
+
 For more information, visit our [GitHub repository](https://github.com/OpSoll/noc-iq-be)
 
 # Analytics & SLA Error Handling Semantics
