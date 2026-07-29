@@ -2,8 +2,8 @@ import logging
 from typing import List, Optional
 from urllib.parse import urlparse
 
-from pydantic import BaseSettings, field_validator
-from pydantic_settings import BaseSettings as PydanticBaseSettings
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
 
 from app.core.env_validators import (
     validate_postgres_url,
@@ -14,93 +14,157 @@ from app.core.env_validators import (
 
 logger = logging.getLogger(__name__)
 
-
 VALID_STELLAR_NETWORKS = {"testnet", "mainnet", "futurenet", "standalone"}
 VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
 
+# ---------------------------------------------------------------------------
+# Default secrets for local/dev — must be overridden in production.
+# ---------------------------------------------------------------------------
+_DEFAULT_SECRET = "change-me-in-production-use-a-real-secret-key!!"
 
 
 class Settings(BaseSettings):
+    model_config = {
+        "env_prefix": "",
+        "case_sensitive": True,
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore",
+    }
+
+    # ── Core ──────────────────────────────────────────────────────────────
     PROJECT_NAME: str = "NOCIQ API"
     VERSION: str = "1.0.0"
-    REDIS_URL: str = "redis://localhost:6379"
-    OTEL_SERVICE_NAME: str = "nociq-api"
-    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
     DEBUG: bool = False
+
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/nociq"
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     API_V1_PREFIX: str = "/api/v1"
     API_V2_PREFIX: str = "/api/v2"
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:3001"]
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+    ]
+
+    # ── Secrets (must be overridden in production) ────────────────────────
+    SECRET_KEY: str = _DEFAULT_SECRET
+    JWT_SECRET_KEY: str = _DEFAULT_SECRET
+
+    # ── Celery ────────────────────────────────────────────────────────────
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
     CELERY_TASK_ALWAYS_EAGER: bool = True
+
+    # ── Observability ─────────────────────────────────────────────────────
+    OTEL_SERVICE_NAME: str = "nociq-api"
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
+
+    # ── Stellar ───────────────────────────────────────────────────────────
     SLA_CONTRACT_ADDRESS: str = "local-sla-calculator"
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
     PAYMENT_WEBHOOK_SECRET: str = ""
-    WALLET_CACHE_TTL_SECONDS: int = 60  # how long wallet data is considered fresh
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
-    # BE-364: Authoritative asset issuer for the configured payout asset.
-    # For USDC on testnet this is the Circle testnet issuer address.
-    # Must be set to a non-empty G-address when CONTRACT_EXECUTION_MODE=soroban_rpc.
     PAYMENT_ASSET_ISSUER: str = ""
-    # Trusted-proxy settings (#205)
-    # Number of trusted reverse-proxy hops in front of this app.
-    # Set to 0 when running without a proxy (uses direct connection IP).
-    # Set to N when N proxy hops are trusted (e.g. 1 for a single load balancer).
-    # Only the Nth entry from the right of X-Forwarded-For is used, preventing
-    # spoofed headers injected by untrusted clients from being trusted.
-    TRUSTED_PROXY_COUNT: int = 0
 
-    # Auth rate limiting settings
-    AUTH_MAX_FAILED_ATTEMPTS: int = 5  # Max failed login attempts before lockout
-    AUTH_LOCKOUT_DURATION_MINUTES: int = 15  # Lockout duration in minutes
-    AUTH_RATE_LIMIT_REQUESTS: int = 10  # Max requests per window
-    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 300  # Rate limit window in seconds
+    @property
+    def horizon_url(self) -> str:
+        if self.STELLAR_NETWORK == "mainnet":
+            return "https://horizon.stellar.org"
+        return "https://horizon-testnet.stellar.org"
 
-    # Input size and payload guardrails
-    MAX_REQUEST_BODY_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB max request body size
-    MAX_FILE_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB max file upload size (matches existing import limit)
-    MAX_BULK_OUTAGES_COUNT: int = 1000  # Max number of outages in bulk create/import
-    MAX_WEBHOOK_PAYLOAD_SIZE_BYTES: int = 1024 * 1024  # 1 MB max webhook payload size
-    MAX_AFFECTED_SERVICES_COUNT: int = 100  # Max number of affected services per outage
-    MAX_SITE_NAME_LENGTH: int = 255  # Max site name length
-    MAX_DESCRIPTION_LENGTH: int = 5000  # Max description length
-    MAX_WEBHOOK_EVENTS_COUNT: int = 50  # Max webhook events per webhook
-    MAX_WEBHOOK_NAME_LENGTH: int = 255  # Max webhook name length
-    MAX_WEBHOOK_URL_LENGTH: int = 2048  # Max webhook URL length
+    # ── Auth throttling ───────────────────────────────────────────────────
+    AUTH_MAX_FAILED_ATTEMPTS: int = 5
+    AUTH_LOCKOUT_DURATION_MINUTES: int = 15
+    AUTH_RATE_LIMIT_REQUESTS: int = 10
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: int = 300
 
-    # Webhook retry backoff policy (#236)
-    # Comma-separated base delay seconds for each retry attempt.
-    # e.g. "30,120,600" means 30 s on first retry, 2 min on second, 10 min on third.
+    # ── Payload guardrails ────────────────────────────────────────────────
+    MAX_REQUEST_BODY_SIZE_BYTES: int = 10 * 1024 * 1024   # 10 MB
+    MAX_FILE_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024    # 10 MB
+    MAX_BULK_OUTAGES_COUNT: int = 1000
+    MAX_WEBHOOK_PAYLOAD_SIZE_BYTES: int = 1024 * 1024     # 1 MB
+    MAX_AFFECTED_SERVICES_COUNT: int = 100
+    MAX_SITE_NAME_LENGTH: int = 255
+    MAX_DESCRIPTION_LENGTH: int = 5000
+    MAX_WEBHOOK_EVENTS_COUNT: int = 50
+    MAX_WEBHOOK_NAME_LENGTH: int = 255
+    MAX_WEBHOOK_URL_LENGTH: int = 2048
+
+    MAX_AUTH_BODY_SIZE: int = 1024                         # 1 KB
+    MAX_CRUD_BODY_SIZE: int = 10 * 1024                    # 10 KB
+    MAX_BULK_BODY_SIZE: int = 10 * 1024 * 1024             # 10 MB
+    MAX_WEBHOOK_BODY_SIZE: int = 1 * 1024 * 1024           # 1 MB
+
+    # ── Cache & idempotency ───────────────────────────────────────────────
+    WALLET_CACHE_TTL_SECONDS: int = 60
+    WALLET_CACHE_LOCK_TIMEOUT: int = 5
+    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
+    WALLET_CACHE_TTL: int = 300
+    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
+
+    # ── Webhook retry policy ──────────────────────────────────────────────
     WEBHOOK_RETRY_BASE_DELAYS: str = "30,120,600"
-    # Hard cap on any single computed delay (seconds) to prevent retry storms.
     WEBHOOK_RETRY_MAX_DELAY_SECONDS: int = 3600
-    # BE-295: Grace window (seconds) during which the previous secret is still accepted.
     WEBHOOK_SECRET_GRACE_WINDOW_SECONDS: int = 3600
 
-    # Bridge timeout configuration (#358)
+    # ── BE-W5-041 (#302): Queue partitioning & backpressure ──────────────
+    WEBHOOK_PARTITION_COUNT: int = 4
+    WEBHOOK_PARTITION_BACKPRESSURE_THRESHOLD: int = 500
+    WEBHOOK_PARTITION_MAX_PENDING: int = 2000
+    WEBHOOK_ENDPOINT_PARTITION_ENABLED: bool = True
+    WEBHOOK_SLA_PRIORITY_PARTITION: int = 0
+    WEBHOOK_PAYMENT_PRIORITY_PARTITION: int = 1
+
+    # ── BE-W5-042 (#303): SSRF safeguards ────────────────────────────────
+    WEBHOOK_SSRF_BLOCKED_CIDRS: str = (
+        "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,"
+        "169.254.0.0/16,::1/128,fd00::/8,fe80::/10"
+    )
+    WEBHOOK_SSRF_BLOCKED_HOSTNAMES: str = (
+        "localhost,localhost.localdomain,localhost6,localhost6.localdomain6,"
+        "metadata.google.internal,metadata.aws.internal,169.254.169.254"
+    )
+    WEBHOOK_SSRF_ALLOW_PRIVATE: bool = False
+    WEBHOOK_SSRF_ALLOW_LOOPBACK: bool = False
+    WEBHOOK_SSRF_ALLOW_LINK_LOCAL: bool = False
+    WEBHOOK_SSRF_MAX_REDIRECTS: int = 3
+
+    # ── BE-W5-043 (#304): Payload redaction ──────────────────────────────
+    WEBHOOK_REDACTION_ENABLED: bool = True
+    WEBHOOK_REDACTED_FIELDS: str = (
+        "seed,secret_seed,private_key,mnemonic,password,token,"
+        "access_token,refresh_token,signing_key,wallet_secret"
+    )
+    WEBHOOK_REDACTION_MASK: str = "[REDACTED]"
+
+    # ── BE-W5-044 (#305): SLO metrics & alert thresholds ─────────────────
+    WEBHOOK_SLO_SUCCESS_TARGET: float = 0.999
+    WEBHOOK_SLO_LATENCY_TARGET_MS: int = 5000
+    WEBHOOK_SLO_BURN_RATE_THRESHOLD: float = 2.0
+    WEBHOOK_SLO_WINDOW_SECONDS: int = 3600
+    WEBHOOK_SLO_BUDGET_BURN_ALERT_PERCENT: float = 50.0
+
+    # ── Bridge ────────────────────────────────────────────────────────────
     BRIDGE_TIMEOUT_SLA_CHECK_MS: int = 5000
     BRIDGE_TIMEOUT_PAYMENT_MS: int = 30000
     BRIDGE_TIMEOUT_BALANCE_MS: int = 10000
+    BRIDGE_RESPONSE_VERSION: str = "v2"
+    BRIDGE_FALLBACK_ENABLED: bool = True
+    BRIDGE_CIRCUIT_BREAKER_THRESHOLD: int = 3
+    BRIDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 30
 
-    # Contract execution guardrails (#360)
+    # ── Contract ──────────────────────────────────────────────────────────
     ALLOWED_CONTRACT_ADDRESSES: List[str] = []
     MAX_CONTRACT_EXECUTION_AMOUNT: float = 0.0
     CONTRACT_CALL_RATE_LIMIT: int = 10
+    CONTRACT_CANONICAL_SALT: str = ""
+    CONTRACT_IDEMPOTENCY_TTL_SECONDS: int = 3600
 
-    # Bridge response versioning (#361)
-    BRIDGE_RESPONSE_VERSION: str = "v2"
-
-    # Application secret keys
-    # SECURITY: Generate with: openssl rand -hex 32
-    # These must be set to non-empty values before deploying to production.
-    SECRET_KEY: str = ""
-    JWT_SECRET_KEY: str = ""
-
-    # Cold-start optimisation (#355)
+    # ── Startup ───────────────────────────────────────────────────────────
     STARTUP_WARM_CACHE_ENABLED: bool = True
     STARTUP_LAZY_LOAD_MODULES: List[str] = [
         "app.services.contracts.sla_adapter",
@@ -109,81 +173,34 @@ class Settings(BaseSettings):
         "app.services.sla_metric_registry",
     ]
 
-    # Contract canonicalisation (#357)
-    CONTRACT_CANONICAL_SALT: str = ""
-    # Contract idempotency (#362)
-    CONTRACT_IDEMPOTENCY_TTL_SECONDS: int = 3600
-
-    # Bridge fallback strategy (#363)
-    BRIDGE_FALLBACK_ENABLED: bool = True
-    BRIDGE_CIRCUIT_BREAKER_THRESHOLD: int = 3
-    BRIDGE_CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = 30
-
-    # Zero-downtime migration (#411)
+    # ── Migration ─────────────────────────────────────────────────────────
     MIGRATION_BATCH_SIZE: int = 500
     MIGRATION_SHADOW_SUFFIX: str = "_shadow"
 
-    # BE-W5-051: Worker startup health probes and queue binding verification
-    # Comma-separated list of queue/exchange names that must be present at
-    # Celery worker startup. Workers fail fast (exit 1) if any of these
-    # bindings are not reachable on the broker at boot.
-    CELERY_REQUIRED_QUEUES: str = "celery"
-    # When True, boot fails fast on missing queue bindings (default true).
-    CELERY_STRICT_QUEUE_BINDINGS: bool = True
-    # Timeout in seconds for the startup queue-binding probe.
-    CELERY_QUEUE_PROBE_TIMEOUT_SECONDS: float = 5.0
-    model_config = {"env_prefix": "", "case_sensitive": True, "env_file": ".env"}
+    # ── Proxy ─────────────────────────────────────────────────────────────
+    TRUSTED_PROXY_COUNT: int = 0
 
-    @property
-    def horizon_url(self) -> str:
-        """Horizon base URL derived from STELLAR_NETWORK."""
-        if self.STELLAR_NETWORK == "mainnet":
-            return "https://horizon.stellar.org"
-        return "https://horizon-testnet.stellar.org"
-
-    IDEMPOTENCY_KEY_TTL_HOURS: int = 24
-
-    WALLET_CACHE_LOCK_TIMEOUT: int = 5
-    WALLET_CACHE_LOCK_PREFIX: str = "wallet:lock:"
-    WALLET_CACHE_TTL: int = 300
-    REDIS_URL: str = "redis://localhost:6379/1"
-
-    class Config:
-        env_file = ".env"
-
-
-    REDIS_URL: str = "redis://localhost:6379/0"
-
+    # ── Worker autoscaling ────────────────────────────────────────────────
     WEBHOOK_WORKER_MIN: int = 1
     WEBHOOK_WORKER_MAX: int = 10
     WEBHOOK_QUEUE_SCALE_UP_THRESHOLD: int = 100
     WEBHOOK_QUEUE_SCALE_DOWN_THRESHOLD: int = 10
 
+    # ── DB pool ───────────────────────────────────────────────────────────
     DB_POOL_SATURATION_THRESHOLD: float = 0.9
     DB_POOL_REJECT_AFTER_SECONDS: int = 30
     DB_POOL_SIZE: int = 10
     DB_POOL_MAX_OVERFLOW: int = 20
 
+    # ── Rate limiting ─────────────────────────────────────────────────────
     RATE_LIMIT_BACKEND: str = "redis"
     RATE_LIMIT_MAX_KEYS: int = 10000
     RATE_LIMIT_EVICT_BATCH_SIZE: int = 100
 
+    # ── Metrics ───────────────────────────────────────────────────────────
     METRICS_CARDINALITY_BUDGET: int = 1000
 
-    class Config:
-        env_file = ".env"
-        extra = "ignore"
-    DATABASE_URL: str = "postgresql://localhost:5432/nociq"
-    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
-    SECRET_KEY: str = "change-me-in-production-use-a-real-secret-key!!"
-    JWT_SECRET_KEY: str = "change-me-in-production-use-a-real-jwt-secret-key!!"
-    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
-
-    MAX_AUTH_BODY_SIZE: int = 1024  # 1 KB
-    MAX_CRUD_BODY_SIZE: int = 10 * 1024  # 10 KB
-    MAX_BULK_BODY_SIZE: int = 10 * 1024 * 1024  # 10 MB
-    MAX_WEBHOOK_BODY_SIZE: int = 1 * 1024 * 1024  # 1 MB
-
+    # ── Validators ────────────────────────────────────────────────────────
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_database_url(cls, v: str) -> str:
@@ -203,10 +220,6 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_jwt_secret_key(cls, v: str) -> str:
         return validate_min_length(v, 32, "JWT_SECRET_KEY")
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 settings = Settings()
@@ -243,7 +256,10 @@ def validate_env_schema() -> None:
     if errors:
         for err in errors:
             logger.error("Environment validation error: %s", err)
-        raise ValueError(f"Environment validation failed with {len(errors)} error(s): {'; '.join(errors)}")
+        raise ValueError(
+            f"Environment validation failed with {len(errors)} error(s): "
+            f"{'; '.join(errors)}"
+        )
 
     logger.info("Environment schema validation passed.")
 
@@ -286,9 +302,7 @@ def validate_critical_settings(config: Settings) -> None:
             if not origin.startswith(("http://", "https://"))
         ]
         if invalid_origins:
-            errors.append(
-                "ALLOWED_ORIGINS must contain valid http or https origins."
-            )
+            errors.append("ALLOWED_ORIGINS must contain valid http or https origins.")
 
     if config.STELLAR_NETWORK not in VALID_STELLAR_NETWORKS:
         errors.append(
@@ -321,7 +335,6 @@ def validate_critical_settings(config: Settings) -> None:
     if not config.PAYMENT_TO_ADDRESS.strip():
         errors.append("PAYMENT_TO_ADDRESS must not be empty.")
 
-    # BE-364: Require a well-formed issuer address in soroban_rpc mode.
     if config.CONTRACT_EXECUTION_MODE == "soroban_rpc":
         issuer = config.PAYMENT_ASSET_ISSUER.strip()
         if not issuer:
@@ -355,4 +368,6 @@ def validate_critical_settings(config: Settings) -> None:
         errors.append("JWT_SECRET_KEY must not be empty.")
 
     if errors:
-        raise ValueError("Invalid startup configuration:\n- " + "\n- ".join(errors))
+        raise ValueError(
+            "Invalid startup configuration:\n- " + "\n- ".join(errors)
+        )
