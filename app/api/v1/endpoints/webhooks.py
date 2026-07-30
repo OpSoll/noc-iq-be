@@ -620,3 +620,41 @@ def get_webhook_slo_metrics():
     and burn indicators for the current SLO window.
     """
     return get_slo_metrics()
+
+# --------------------------------------------------------------------------- #
+# Issue #300 (BE-W5-039): Webhook delivery audit timeline
+# --------------------------------------------------------------------------- #
+
+@router.get("/{webhook_id}/deliveries/{delivery_id}/timeline")
+def get_webhook_delivery_timeline(
+    webhook_id: UUID,
+    delivery_id: UUID,
+    db: Session = Depends(get_db),
+    current_user=Depends(require_admin)
+):
+    """Normalized audit timeline for a webhook delivery (BE-W5-039)."""
+    _get_webhook_or_404(db, webhook_id)
+    
+    # fetch audit logs related to this delivery
+    from app.services.audit_log import audit_log
+    
+    # We fetch a large number of logs and filter for this delivery
+    events = audit_log.list(event_type_prefix="webhook.", limit=500, offset=0)
+    delivery_events = [
+        e for e in events 
+        if e.get("details", {}).get("delivery_id") == str(delivery_id) 
+           or e.get("details", {}).get("idempotency_key", "").endswith(str(delivery_id))
+    ]
+    
+    # Normalize the timeline response
+    normalized_timeline = []
+    for event in delivery_events:
+        normalized_timeline.append({
+            "event_id": event.get("id"),
+            "timestamp": event.get("timestamp"),
+            "action": event.get("event_type"),
+            "actor": event.get("actor"),
+            "details": event.get("details", {})
+        })
+        
+    return {"timeline": normalized_timeline}

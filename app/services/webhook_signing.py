@@ -142,3 +142,26 @@ def verify_with_grace_window(
     if previous_secret and verify_signature(previous_secret, payload, signature, version):
         return True
     return False
+
+def parse_signature_header(header_value: str) -> dict:
+    """Strictly parse and canonicalize webhook signature header (BE-W5-040).
+    
+    Expected format: `sha256=abcdef123` or multiple parts `t=123, v1=abc, sha256=def`.
+    Strips whitespaces and canonicalizes the signature header.
+    
+    Args:
+        header_value: The raw signature header string
+        
+    Returns:
+        A dictionary of parsed key-value pairs from the header.
+    """
+    result = {}
+    if not header_value:
+        return result
+        
+    parts = [p.strip() for p in header_value.split(",")]
+    for part in parts:
+        if "=" in part:
+            key, val = part.split("=", 1)
+            result[key.strip()] = val.strip()
+    return result
