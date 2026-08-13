@@ -5,7 +5,7 @@ import time
 from typing import Generator, Optional
 
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
@@ -16,15 +16,22 @@ import os
 
 _DB_URL = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or ("sqlite:///./test_nociq.db" if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") else "sqlite:///./nociq.db")
 
+# check_same_thread and the PRAGMA statements below are SQLite-specific and
+# must not be applied to other backends (e.g. PostgreSQL).
+_is_sqlite = make_url(_DB_URL).get_backend_name() == "sqlite"
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
+
 engine: Engine = create_engine(
     _DB_URL,
-    connect_args={"check_same_thread": False},
+    connect_args=_connect_args,
     pool_pre_ping=True,
 )
 
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+    if not _is_sqlite:
+        return
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")

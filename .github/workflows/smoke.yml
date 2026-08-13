@@ -47,7 +47,7 @@ jobs:
       SECRET_KEY: ci-test-secret-key-not-for-production
       API_V1_PREFIX: /api/v1
       STELLAR_NETWORK: testnet
-      CONTRACT_EXECUTION_MODE: local
+      CONTRACT_EXECUTION_MODE: local_adapter
       ALLOWED_ORIGINS: '["http://localhost:3000"]'
       ENVIRONMENT: test
 
