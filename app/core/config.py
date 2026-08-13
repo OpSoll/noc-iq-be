@@ -236,6 +236,8 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_database_url(cls, v: str) -> str:
+        if v.startswith("sqlite"):
+            return v
         return validate_postgres_url(v)
 
     @field_validator("CELERY_BROKER_URL")

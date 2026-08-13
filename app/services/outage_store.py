@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from app.models import Outage
 from app.models.enums import OutageStatus, Severity
 from app.services.soft_delete import SoftDeleteMixin
+from app.services.sla import SLACalculator
 
 
 class OutageStore(SoftDeleteMixin):
@@ -67,7 +70,10 @@ class OutageStore(SoftDeleteMixin):
     def delete(self, outage_id: str) -> None:
         self._data.pop(outage_id, None)
 
-
+    def resolve(self, outage_id: str, mttr_minutes: int) -> Optional[Outage]:
+        outage = self.get(outage_id)
+        if not outage:
+            return None
         outage.status = OutageStatus.resolved
         outage.mttr_minutes = mttr_minutes
         return outage
