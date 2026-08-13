@@ -1,7 +1,7 @@
 """add auth rate limiting fields to users table
 
 Revision ID: 0008
-Revises: 0007
+Revises: 0008_users_table
 Create Date: 2026-04-26
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0008"
-down_revision: Union[str, None] = "0007"
+down_revision: Union[str, None] = "0008_users_table"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

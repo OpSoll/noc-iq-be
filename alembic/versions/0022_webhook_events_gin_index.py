@@ -18,8 +18,11 @@ depends_on = None
 def upgrade() -> None:
     # Create GIN index on events column for JSON containment queries
     # This enables efficient @> operator lookups like: events @> '["sla.violation"]'
+    # The events column stores JSON-encoded text, so index the jsonb cast
+    # (the cast is a no-op if the column is already jsonb).
     op.execute(
-        "CREATE INDEX idx_webhooks_events_gin ON webhooks USING GIN (events)"
+        "CREATE INDEX IF NOT EXISTS idx_webhooks_events_gin "
+        "ON webhooks USING GIN ((events::jsonb))"
     )
 
 

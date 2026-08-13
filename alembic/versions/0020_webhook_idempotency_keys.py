@@ -22,6 +22,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # pgcrypto provides the digest() function used for idempotency keys
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
     # Add event_timestamp column (nullable initially for existing records)
     op.add_column(
         "webhook_deliveries",

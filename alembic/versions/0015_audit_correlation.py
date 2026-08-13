@@ -1,7 +1,7 @@
 """BE-010: Add audit log correlation and actor attribution
 
 Revision ID: 0015_audit_correlation
-Revises: 0014_job_retry_tracking
+Revises: 0014_audit_logs_table
 Create Date: 2026-04-29
 
 Adds actor_id and correlation_id columns to audit_logs table to enable
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = '0015_audit_correlation'
-down_revision = '0014_job_retry_tracking'
+down_revision = '0014_audit_logs_table'
 branch_labels = None
 depends_on = None
 
