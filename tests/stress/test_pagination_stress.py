@@ -36,15 +36,14 @@ def _seed_audit_logs(session, count: int) -> None:
     for i in range(count):
         session.execute(
             text(
-                "INSERT INTO audit_logs (id, action, entity_type, entity_id, actor_id, details, created_at) "
-                "VALUES (:id, :action, :entity_type, :entity_id, :actor_id, :details, :created_at)"
+                "INSERT INTO audit_logs (event_type, email, actor_id, correlation_id, details, created_at) "
+                "VALUES (:event_type, :email, :actor_id, :correlation_id, :details, :created_at)"
             ),
             {
-                "id": str(uuid.uuid4()),
-                "action": "create",
-                "entity_type": "outage",
-                "entity_id": str(i),
+                "event_type": "outage_create",
+                "email": "user@example.com",
                 "actor_id": "stress-test-user",
+                "correlation_id": str(uuid.uuid4()),
                 "details": "{}",
                 "created_at": datetime.now(timezone.utc),
             },
@@ -63,6 +62,9 @@ def _count_rows(session, table: str) -> int:
 @pytest.fixture(scope="module")
 def seeded_db():
     """Seed audit_logs with 10 000 rows for pagination stress testing."""
+    from app.models.orm.audit_log import AuditLogORM
+    from app.db.session import engine
+    AuditLogORM.__table__.create(bind=engine, checkfirst=True)
     session = SessionLocal()
     try:
         existing = _count_rows(session, "audit_logs")
@@ -101,7 +103,7 @@ class TestOffsetPaginationStress:
 
     def test_last_page_partial(self, seeded_db):
         total = _count_rows(seeded_db, "audit_logs")
-        last_offset = (total // _PAGE_SIZE) * _PAGE_SIZE
+        last_offset = ((total - 1) // _PAGE_SIZE) * _PAGE_SIZE
         rows = seeded_db.execute(
             text("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
             {"limit": _PAGE_SIZE, "offset": last_offset},

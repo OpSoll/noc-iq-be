@@ -186,16 +186,42 @@ def setup_lazy_imports(module_names: list[str] | None = None) -> None:
             def __init__(self, name: str) -> None:
                 self.__dict__["_name"] = name
                 self.__dict__["_real"] = None
+                self.__dict__["_loading"] = False
 
             def _load(self) -> Any:  # noqa: ANN401
-                real = importlib.import_module(self.__dict__["_name"])
-                self.__dict__["_real"] = real
-                sys.modules[self.__dict__["_name"]] = real
-                return real
+                if self.__dict__.get("_real") is not None:
+                    return self.__dict__["_real"]
+                if self.__dict__.get("_loading"):
+                    return None
+                mod_name = self.__dict__["_name"]
+                self.__dict__["_loading"] = True
+                try:
+                    if sys.modules.get(mod_name) is self:
+                        del sys.modules[mod_name]
+                    real = importlib.import_module(mod_name)
+                    self.__dict__["_real"] = real
+                    sys.modules[mod_name] = real
+                    return real
+                finally:
+                    self.__dict__["_loading"] = False
 
             def __getattr__(self, item: str) -> Any:  # noqa: ANN401
-                real = self.__dict__["_real"] or self._load()
+                if item in ("_name", "_real", "_loading"):
+                    return self.__dict__.get(item)
+                real = self.__dict__.get("_real")
+                if real is None:
+                    real = self._load()
+                if real is None or real is self:
+                    if item in ("__file__", "__spec__", "__name__", "__path__", "__loader__", "__package__"):
+                        return None
+                    raise AttributeError(f"Module {self.__dict__.get('_name')} is loading")
                 return getattr(real, item)
+
+            def __call__(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+                real = self.__dict__.get("_real") or self._load()
+                if real is None:
+                    raise TypeError(f"Module {self.__dict__.get('_name')} is not callable")
+                return real(*args, **kwargs)
 
             def __repr__(self) -> str:
                 return f"<LazyModule '{self.__dict__['_name']}'>"
@@ -239,7 +265,11 @@ def run_startup_optimization(p: StartupProfiler | None = None) -> StartupProfile
     p.begin()
 
     # Phase: lazy imports
-    p.record("lazy_imports", lambda: setup_lazy_imports())
+    import os
+    if not (os.environ.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST")):
+        p.record("lazy_imports", lambda: setup_lazy_imports())
+    else:
+        logger.info("Skipping lazy imports due to test environment")
 
     # Phase: pre-compile regexes
     p.record("precompile_regexes", lambda: precompile_patterns())

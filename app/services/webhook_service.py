@@ -598,13 +598,21 @@ def get_active_webhooks_for_event(db: Session, event: WebhookEvent) -> List[Webh
     """
     # Use PostgreSQL JSON containment operator with GIN index for efficient filtering
     # This filters at the database level, avoiding loading all webhooks into memory
-    event_json = json.dumps([event.value])
-    webhooks = (
-        db.query(Webhook)
-        .filter(Webhook.is_active == True)
-        .filter(text("webhooks.events @> :event_json").bindparams(event_json=event_json))
-        .all()
-    )
+    if db.bind and db.bind.dialect.name == "sqlite":
+        webhooks = (
+            db.query(Webhook)
+            .filter(Webhook.is_active == True)
+            .all()
+        )
+        webhooks = [w for w in webhooks if event.value in (w.events or [])]
+    else:
+        event_json = json.dumps([event.value])
+        webhooks = (
+            db.query(Webhook)
+            .filter(Webhook.is_active == True)
+            .filter(text("webhooks.events @> :event_json").bindparams(event_json=event_json))
+            .all()
+        )
 
     # Validate parsed events from cache to ensure no misrouting
     result = []
@@ -672,7 +680,7 @@ def create_delivery(
     delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=event,
-        payload=json.dumps(payload),
+        payload=json.dumps(payload, default=str),
         status=WebhookDeliveryStatus.PENDING,
         signature_version=signature_version,
         idempotency_key=idempotency_key,

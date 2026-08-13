@@ -6,9 +6,10 @@ from app.services.audit_log import audit_log
 logger = logging.getLogger(__name__)
 
 VALID_TRANSITIONS: Dict[str, Set[str]] = {
-    "investigating": {"active", "resolved"},
+    "investigating": {"active", "resolved", "open"},
     "active": {"resolved"},
-    "resolved": set(),
+    "open": {"resolved", "active", "investigating"},
+    "resolved": {"resolved"},
 }
 
 

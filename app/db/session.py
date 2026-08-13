@@ -12,8 +12,9 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Use SQLite for local development/testing (default for preview environments)
-_DB_URL = "sqlite:///./nociq.db"
+import os
+
+_DB_URL = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or ("sqlite:///./test_nociq.db" if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") else "sqlite:///./nociq.db")
 
 engine: Engine = create_engine(
     _DB_URL,

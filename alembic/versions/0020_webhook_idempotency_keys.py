@@ -16,7 +16,7 @@ from datetime import datetime
 
 
 revision = "0020_webhook_idempotency_keys"
-down_revision = "0016_webhook_signature_versioning"
+down_revision = "0020_wallet_lookup_indexes"
 branch_labels = None
 depends_on = None
 

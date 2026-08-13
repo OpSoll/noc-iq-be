@@ -16,6 +16,10 @@ class UserORM(Base):
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime(timezone=True), nullable=True)
 
+    @property
+    def user_id(self) -> str:
+        return self.id
+
     __table_args__ = (
         Index("ix_users_stellar_wallet", "stellar_wallet", postgresql_where=(stellar_wallet.isnot(None))),
     )

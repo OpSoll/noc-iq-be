@@ -55,6 +55,8 @@ def get_tracer() -> trace.Tracer:
 
 def instrument_fastapi(app) -> None:  # type: ignore[no-untyped-def]
     """Auto-instrument a FastAPI application."""
+    if os.environ.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 

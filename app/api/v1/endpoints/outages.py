@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import List
 import csv
 import io
@@ -185,7 +187,14 @@ def bulk_create_outages(payload: BulkOutageCreate, current_user=Depends(require_
                 persisted_count += 1
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"count": len(items), "persisted": persisted_count, "items": items}
+    return {
+        "count": len(items),
+        "persisted": persisted_count,
+        "items": items,
+        "successful": len(items),
+        "failed": 0,
+        "message": "Successfully created bulk outages",
+    }
 
 
 # Duplicate detection is explicit and consistent for imports:
@@ -302,9 +311,11 @@ async def import_outages(
             raise HTTPException(status_code=500, detail=f"Transaction failed: {exc}") from exc
     else:
         for i, row in enumerate(rows):
+            savepoint = db.begin_nested()
             try:
                 payload = OutageCreate(**row)
                 created, persisted = repo.create_or_get_existing(payload)
+                savepoint.commit()
                 row_outcomes.append(ImportRowResult(
                     row=i,
                     id=payload.id,
@@ -317,8 +328,9 @@ async def import_outages(
                 if persisted:
                     persisted_count += 1
             except Exception as exc:
-                db.rollback()
+                savepoint.rollback()
                 row_outcomes.append(_row_error(i, row, exc))
+        db.commit()
 
     return _import_response("dry_run" if dry_run else "import", consistency, len(rows), persisted_count, row_outcomes)
 def _row_error(index: int, raw_row: dict, exc: Exception) -> ImportRowResult:

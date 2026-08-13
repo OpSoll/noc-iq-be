@@ -9,6 +9,10 @@ from app.utils.logging import get_structured_logger
 logger = get_structured_logger("correlation_middleware")
 
 
+async def _single_body_iterator(body: bytes):
+    yield body
+
+
 class CorrelationMiddleware(BaseHTTPMiddleware):
     """Middleware to add correlation IDs to requests and enable request tracing."""
     

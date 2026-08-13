@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -223,18 +225,20 @@ class AuditLogService:
     def __init__(self, db_session_factory=None):
         self.db_session_factory = db_session_factory or SessionLocal
 
-    def _sanitize(self, details: Optional[dict[str, Any]]) -> dict[str, Any]:
+    @classmethod
+    def _sanitize(cls, details: Optional[dict[str, Any]]) -> dict[str, Any]:
         """Return a copy of details with all sensitive fields redacted."""
         if not details:
             return {}
         safe = details.copy()
-        for key in self._SENSITIVE_KEYS:
+        for key in cls._SENSITIVE_KEYS:
             if key in safe:
                 safe[key] = "[REDACTED]"
         return safe
 
+    @classmethod
     def log_event(
-        self,
+        cls,
         db: Session,
         event_type: str,
         email: Optional[str] = None,
@@ -244,19 +248,6 @@ class AuditLogService:
     ) -> None:
         """
         Records a structured audit event with actor attribution and correlation context.
-
-        BE-010 Enhancements:
-        - actor_id: Consistent user identifier for cross-event correlation
-        - correlation_id: Request correlation ID to link related events
-        - Sensitive data sanitization to prevent secret leakage
-
-        Args:
-            db: Database session
-            event_type: Namespaced event type (e.g., 'wallet.created', 'login_success')
-            email: User email (legacy field, kept for backward compatibility)
-            actor_id: User ID for consistent actor tracking (preferred over email)
-            details: Event details dict (will be sanitized before persistence)
-            correlation_id: Request correlation ID (auto-detected from context if omitted)
         """
         if correlation_id is None:
             correlation_id = get_correlation_id()
@@ -266,7 +257,7 @@ class AuditLogService:
             email=email,
             actor_id=actor_id,
             correlation_id=correlation_id,
-            details=self._sanitize(details),
+            details=cls._sanitize(details),
             created_at=datetime.now(timezone.utc),
         )
         db.add(audit_entry)

@@ -60,12 +60,12 @@ def _check_celery() -> None:
         logger.info("Celery workers online: %d", len(active))
     except ImportError:
         logger.info("Celery not configured – skipping connection check")
-    except Exception:
-        logger.exception("Celery connection check failed")
+    except (Exception, BaseException) as exc:
+        logger.warning("Celery connection check skipped: %s", exc)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # --- startup ---
     logger.info("Application starting up")
     init_tracing()

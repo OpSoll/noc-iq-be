@@ -10,7 +10,8 @@ import hashlib
 import httpx
 import logging
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from enum import Enum
 from typing import Any, Callable, Literal, Optional
 
@@ -42,8 +43,23 @@ def classify_error(error: Exception) -> RetryClass:
 
 
 class SLAContractAdapter:
-    """Backend-facing contract adapter (legacy stub)."""
-    pass
+    """Backend-facing contract adapter."""
+
+    @staticmethod
+    def calculate_sla(
+        outage_id: str,
+        severity: str,
+        mttr_minutes: int,
+        policy_version: str = "1.0",
+        threshold_source: str = "config",
+    ) -> dict[str, Any]:
+        return SLACalculator.calculate_sla(
+            outage_id=outage_id,
+            severity=severity,
+            mttr_minutes=mttr_minutes,
+            policy_version=policy_version,
+            threshold_source=threshold_source,
+        )
 
 
 import logging

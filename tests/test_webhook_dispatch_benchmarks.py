@@ -8,6 +8,8 @@ CI artifact retention and trend comparison.
 Thresholds (configurable via env vars for CI tuning):
   WEBHOOK_LOOKUP_THRESHOLD_MS default 50 ms (for 10k webhooks)
 """
+from __future__ import annotations
+
 import json
 import os
 import time

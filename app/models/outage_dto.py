@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 
 from app.models.enums import OutageStatus, Severity
 from app.core.config import settings
@@ -43,19 +43,40 @@ class OutageCreate(BaseModel):
         }
     )
 
-    id: str = Field(..., min_length=1)
-    site_name: str = Field(..., min_length=1)
+    id: Optional[str] = None
+    site_name: Optional[str] = None
+    service_name: Optional[str] = None
     site_id: Optional[str] = None
     severity: Severity
-    status: OutageStatus
-    detected_at: datetime
+    status: Optional[OutageStatus] = None
+    detected_at: Optional[datetime] = None
     description: str = Field(..., min_length=1)
-    affected_services: List[str] = Field(..., min_length=1)
+    affected_services: Optional[List[str]] = None
     affected_subscribers: Optional[int] = Field(default=None, ge=0)
     assigned_to: Optional[str] = None
     created_by: Optional[str] = None
     resolved_at: Optional[datetime] = None
     location: Optional[Location] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_defaults_and_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            import uuid
+            if not data.get("id"):
+                data["id"] = f"out-{uuid.uuid4().hex[:8]}"
+            if not data.get("site_name"):
+                data["site_name"] = data.get("service_name") or "Default Site"
+            if not data.get("affected_services"):
+                svc = data.get("service_name") or "default-service"
+                data["affected_services"] = [svc] if isinstance(svc, str) else svc
+            if not data.get("detected_at"):
+                data["detected_at"] = datetime.now(timezone.utc)
+            if not data.get("status"):
+                data["status"] = OutageStatus.open.value
+            if isinstance(data.get("severity"), str):
+                data["severity"] = data["severity"].lower()
+        return data
 
     @field_validator("site_name")
     @classmethod
@@ -71,6 +92,13 @@ class OutageCreate(BaseModel):
             raise ValueError(f"description too long. Maximum length is {settings.MAX_DESCRIPTION_LENGTH} characters.")
         return v
 
+    @field_validator("affected_services", mode="before")
+    @classmethod
+    def preprocess_affected_services(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            return [s.strip() for s in v.replace(";", ",").split(",") if s.strip()]
+        return v
+
     @field_validator("affected_services")
     @classmethod
     def validate_affected_services_count(cls, v: List[str]) -> List[str]:
@@ -84,9 +112,8 @@ class OutageCreate(BaseModel):
     @classmethod
     def validate_detected_at_timezone(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValidationError("detected_at must be timezone-aware")
-        # Normalize to UTC
-        if v.tzinfo != timezone.utc:
+            v = v.replace(tzinfo=timezone.utc)
+        elif v.tzinfo != timezone.utc:
             v = v.astimezone(timezone.utc)
         return v
 

@@ -1,4 +1,6 @@
 """Analytics export utilities for dashboard and reporting use cases."""
+from __future__ import annotations
+
 import csv
 import io
 import json

@@ -23,7 +23,7 @@ from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import compute_sla_for_device, compute_bulk_sla
 from app.tasks.webhook_tasks import dispatch_webhook_delivery, trigger_sla_violation_async
 from app.models.job import Job, JobStatus, JobType
-from app.models.base_class import Base
+from app.models.outage_model import Base
 
 
 class CeleryParityTestBase(unittest.TestCase):

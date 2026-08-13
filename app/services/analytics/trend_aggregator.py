@@ -18,7 +18,7 @@ class WindowSize(str, Enum):
 _WINDOW_DELTAS: Dict[WindowSize, timedelta] = {
     WindowSize.HOURLY: timedelta(hours=1),
     WindowSize.DAILY: timedelta(days=1),
-    WindowSize.WEEKLY: timedelta=timedelta(weeks=1),
+    WindowSize.WEEKLY: timedelta(weeks=1),
 }
 
 

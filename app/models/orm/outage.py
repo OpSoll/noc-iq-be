@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import ARRAY, Column, DateTime, Float, Integer, JSON, String, Text
-from sqlalchemy.dialects.postgresql import ARRAY, JSON
+from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 
 from app.db.base import Base
 
@@ -17,7 +17,7 @@ class OutageORM(Base):
     detected_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     description = Column(Text, nullable=False)
-    affected_services = Column(ARRAY(String), nullable=False, default=list)
+    affected_services = Column(JSON().with_variant(PG_ARRAY(String), "postgresql"), nullable=False, default=list)
     affected_subscribers = Column(Integer, nullable=True)
     assigned_to = Column(String(255), nullable=True)
     created_by = Column(String(255), nullable=True)

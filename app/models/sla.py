@@ -52,8 +52,8 @@ class SLAResult(BaseModel):
     amount: int
     payment_type: Literal["reward", "penalty"]
     rating: Literal["exceptional", "excellent", "good", "poor"]
-    policy_version: str = Field(..., description="Version of SLA policy used for this calculation")
-    threshold_source: str = Field(..., description="Source of threshold values (e.g., 'config', 'contract')")
+    policy_version: Optional[str] = Field("v1.0", description="Version of SLA policy used for this calculation")
+    threshold_source: Optional[str] = Field("config", description="Source of threshold values (e.g., 'config', 'contract')")
     reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
     decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
 

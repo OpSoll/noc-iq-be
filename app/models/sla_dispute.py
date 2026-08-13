@@ -19,20 +19,27 @@ class SLADispute(Base):
     __tablename__ = "sla_disputes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=False, index=True)
+    sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True, index=True)
     baseline_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
     proposed_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
 
     # Dispute metadata
-    flagged_by = Column(String(255), nullable=False)
-    dispute_reason = Column(Text, nullable=False)
-    flagged_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    flagged_by = Column(String(255), nullable=True)
+    dispute_reason = Column(Text, nullable=True)
+    flagged_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
     # Resolution metadata
     status = Column(Enum(DisputeStatus), default=DisputeStatus.PENDING, nullable=False)
     resolved_by = Column(String(255), nullable=True)
     resolution_notes = Column(Text, nullable=True)
     resolved_at = Column(DateTime, nullable=True)
+
+    # Legacy / API compatibility fields
+    sla_id = Column(Integer, nullable=True)
+    reason = Column(Text, nullable=True)
+    evidence_url = Column(String(255), nullable=True)
+    state = Column(String(50), nullable=True, default="OPEN")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
     sla_result = relationship("SLAResultORM", foreign_keys=[sla_result_id], back_populates="disputes")
     baseline_sla_result = relationship("SLAResultORM", foreign_keys=[baseline_sla_result_id])
