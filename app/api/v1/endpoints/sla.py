@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -512,7 +514,7 @@ class MockAnalyticsService:
             return []
         return [{"metric": "uptime_percentage", "value": 99.98}]
 
-@router.get("/sla/summary", status_code=status.HTTP_200_OK)
+@router.get("/summary", status_code=status.HTTP_200_OK)
 async def get_sla_summary(
     start_time: datetime = Query(...),
     end_time: datetime = Query(...)

@@ -1,5 +1,6 @@
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from sqlalchemy import engine_from_config, pool
 
 from alembic import context
@@ -39,6 +40,36 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _ensure_version_table(connection) -> None:
+    """Ensure alembic_version.version_num is wide enough for revision ids.
+
+    Alembic's default version_num column is VARCHAR(32), but some revision
+    ids in this project exceed 32 chars (e.g. 0016_webhook_signature_versioning).
+    Create the table with a wider column, or widen an existing one.
+    """
+    if not sa.inspect(connection).has_table("alembic_version"):
+        meta = sa.MetaData()
+        sa.Table(
+            "alembic_version",
+            meta,
+            sa.Column("version_num", sa.String(255), nullable=False),
+        ).create(connection)
+        return
+
+    col = next(
+        c for c in sa.inspect(connection).get_columns("alembic_version")
+        if c["name"] == "version_num"
+    )
+    col_type = col["type"]
+    if isinstance(col_type, sa.String) and (col_type.length or 0) < 255:
+        connection.execute(
+            sa.text(
+                "ALTER TABLE alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(255)"
+            )
+        )
+
+
 def run_migrations_online() -> None:
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
@@ -46,6 +77,8 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
+        with connection.begin():
+            _ensure_version_table(connection)
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()

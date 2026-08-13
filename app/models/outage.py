@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -38,9 +40,8 @@ class Outage(BaseModel):
     @classmethod
     def validate_detected_at_timezone(cls, v: datetime) -> datetime:
         if v.tzinfo is None:
-            raise ValidationError("detected_at must be timezone-aware")
-        # Normalize to UTC
-        if v.tzinfo != timezone.utc:
+            v = v.replace(tzinfo=timezone.utc)
+        elif v.tzinfo != timezone.utc:
             v = v.astimezone(timezone.utc)
         return v
 
@@ -50,9 +51,8 @@ class Outage(BaseModel):
         if v is None:
             return None
         if v.tzinfo is None:
-            raise ValidationError("resolved_at must be timezone-aware")
-        # Normalize to UTC
-        if v.tzinfo != timezone.utc:
+            v = v.replace(tzinfo=timezone.utc)
+        elif v.tzinfo != timezone.utc:
             v = v.astimezone(timezone.utc)
         return v
 
@@ -90,6 +90,8 @@ class PaginatedOutages(BaseModel):
     total: int
     page: int
     page_size: int
+    sort_by: Optional[str] = "detected_at"
+    sort_direction: Optional[str] = "desc"
 
 
 class ResolveOutageRequest(BaseModel):

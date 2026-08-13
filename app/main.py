@@ -73,14 +73,14 @@ async def lifespan(app: FastAPI):
     yield
 
 from app.api.v1.router import api_router
-from app.core.lifespan import lifespan
+from app.core.lifespan import app_lifespan
 from app.core.rate_limiter import RateLimiterMiddleware
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     description="NOCIQ Backend API",
-    lifespan=lifespan,
+    lifespan=app_lifespan,
 )
 
 app.add_middleware(PoolSaturationMiddleware)

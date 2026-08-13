@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, UTC, timedelta
+from datetime import datetime, timedelta, timezone
+UTC = timezone.utc
 from uuid import uuid4
 
 import redis

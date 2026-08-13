@@ -4,6 +4,7 @@ from app.db.base_class import Base
 
 class ChangelogEntry(Base):
     __tablename__ = "api_changelog"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True, index=True)
     version = Column(String, index=True, nullable=False, unique=True)

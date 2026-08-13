@@ -3,6 +3,10 @@ from .config import SLA_CONFIG, get_config_for_severity
 
 
 class SLACalculator:
+    @classmethod
+    def calculate_sla(cls, outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config") -> SLAResult:
+        return cls.calculate(outage_id, severity, mttr_minutes, policy_version, threshold_source)
+
     @staticmethod
     def calculate(outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config") -> SLAResult:
         severity = severity.lower()

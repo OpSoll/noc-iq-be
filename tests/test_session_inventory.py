@@ -27,12 +27,15 @@ client = TestClient(app)
 
 def create_test_user(db: Session, email: str, password: str = "Password123!", role: Role = Role.engineer) -> UserORM:
     """Helper to create a test user."""
+    existing = db.query(UserORM).filter_by(email=email).first()
+    if existing:
+        return existing
     user = UserORM(
         id=f"user_test_{email.split('@')[0]}",
         email=email,
         hashed_password=get_password_hash(password),
         full_name=f"Test User {email}",
-        role=role.value,
+        role=role.value if hasattr(role, "value") else str(role),
     )
     db.add(user)
     db.commit()
@@ -43,10 +46,17 @@ def create_test_user(db: Session, email: str, password: str = "Password123!", ro
 def create_test_session(db: Session, access_token: str, refresh_token: str, email: str) -> SessionORM:
     """Helper to create a test session (stores hashed tokens)."""
     from datetime import datetime, timedelta
+    h_atk = hash_token(access_token)
+    h_rtk = hash_token(refresh_token)
+    db.query(SessionORM).filter(
+        (SessionORM.access_token == h_atk) |
+        (SessionORM.refresh_token == h_rtk)
+    ).delete()
+    db.commit()
     
     session = SessionORM(
-        access_token=hash_token(access_token),
-        refresh_token=hash_token(refresh_token),
+        access_token=h_atk,
+        refresh_token=h_rtk,
         email=email,
         expires_at=datetime.utcnow() + timedelta(hours=1),
     )
@@ -243,11 +253,15 @@ def test_session_inventory_no_sessions(db: Session):
     # Create user but don't login
     create_test_user(db, email, password)
     
+    import uuid
+    db.query(SessionORM).filter_by(email=email).delete()
+    db.commit()
+    
     # Manually create expired session to test filtering
     from datetime import datetime, timedelta
     session = SessionORM(
-        access_token=hash_token("atk_expired"),
-        refresh_token=hash_token("rtk_expired"),
+        access_token=hash_token(f"atk_expired_{uuid.uuid4().hex[:6]}"),
+        refresh_token=hash_token(f"rtk_expired_{uuid.uuid4().hex[:6]}"),
         email=email,
         expires_at=datetime.utcnow() - timedelta(hours=1),  # Expired
     )
@@ -283,8 +297,8 @@ def test_tokens_are_hashed_in_db(db: Session):
     raw_access = login_resp.json()["access_token"]
     raw_refresh = login_resp.json()["refresh_token"]
     
-    # Query DB directly
-    session = db.query(SessionORM).filter(SessionORM.email == email).first()
+    # Query DB directly for most recent session
+    session = db.query(SessionORM).filter(SessionORM.email == email).order_by(SessionORM.created_at.desc()).first()
     assert session is not None
     assert session.access_token != raw_access, "Access token must be hashed in DB"
     assert session.refresh_token != raw_refresh, "Refresh token must be hashed in DB"

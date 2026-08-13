@@ -1,7 +1,7 @@
 """add token families and session family tracking
 
 Revision ID: 0009
-Revises: 0008
+Revises: 0008_sessions_table
 Create Date: 2026-04-28
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0009"
-down_revision: Union[str, None] = "0008"
+down_revision: Union[str, None] = "0008_sessions_table"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

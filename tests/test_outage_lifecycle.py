@@ -14,8 +14,16 @@ from app.models.sla import SLAResult
 
 class OutageLifecycleTests(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import MagicMock
+        from app.core.security import require_engineer, require_admin
         self.client = TestClient(app)
-        app.dependency_overrides[get_db] = lambda: iter([object()])
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalar.return_value = True
+        def _get_db():
+            yield mock_db
+        app.dependency_overrides[get_db] = _get_db
+        app.dependency_overrides[require_engineer] = lambda: {"user_id": "test", "role": "engineer"}
+        app.dependency_overrides[require_admin] = lambda: {"user_id": "test", "role": "admin"}
 
         self.outage = Outage(
             id="out_1",
@@ -100,7 +108,7 @@ class OutageLifecycleTests(unittest.TestCase):
             "affected_services": ["5G"],
         }
         with patch("app.api.v1.endpoints.outages.OutageRepository", FakeOutageRepo):
-            response = self.client.post("/api/v1/outages", json=payload)
+            response = self.client.post("/api/v1/outages/", json=payload)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["id"], "out_new")
 
@@ -112,6 +120,13 @@ class OutageLifecycleTests(unittest.TestCase):
         class FakeOutageRepo:
             def __init__(self, db):
                 self.db = db
+
+            @staticmethod
+            def validate_status_transition(c, n):
+                pass
+
+            def get(self, outage_id):
+                return self_outage
 
             def resolve(self, outage_id, mttr_minutes):
                 return self_outage
@@ -152,10 +167,17 @@ class OutageLifecycleTests(unittest.TestCase):
             def __init__(self, db):
                 self.db = db
 
+            @staticmethod
+            def validate_status_transition(c, n):
+                pass
+
             def get(self, outage_id):
                 return self_outage
 
             def get_orm(self, outage_id):
+                return SimpleNamespace(mttr_minutes=20)
+
+            def get_orm_locked(self, outage_id):
                 return SimpleNamespace(mttr_minutes=20)
 
         class FakeSLARepo:

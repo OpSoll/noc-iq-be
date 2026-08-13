@@ -57,9 +57,10 @@ def upgrade() -> None:
     )
 
     # Extend jobstatus enum with DEAD_LETTER
-    op.execute(
-        "ALTER TYPE jobstatus ADD VALUE IF NOT EXISTS 'dead_letter'"
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        with op.get_context().autocommit_block():
+            op.execute("ALTER TYPE jobstatus ADD VALUE IF NOT EXISTS 'dead_letter'")
 
     # BE-W5-047: Lease heartbeat
     op.add_column(

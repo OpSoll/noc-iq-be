@@ -13,6 +13,7 @@ Provides ``CanonicalRequestBuilder`` with ``build()``, ``hash()``, and
 
 from __future__ import annotations
 
+import decimal
 import hashlib
 import json
 import math

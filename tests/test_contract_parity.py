@@ -38,14 +38,14 @@ class ContractTranslationParityTests(unittest.TestCase):
 
     def test_violated_contract_status_translates_to_violated(self):
         raw = SLAContractAdapter.calculate_sla("out_1", "critical", mttr_minutes=999)
-        self.assertEqual(raw["status"], "viol")
+        self.assertEqual(raw.status, "violated")
         translated = translate_contract_result(raw)
         self.assertEqual(translated.status, "violated")
         self.assertEqual(translated.payment_type, "penalty")
 
     def test_met_contract_status_translates_to_met(self):
         raw = SLAContractAdapter.calculate_sla("out_1", "low", mttr_minutes=1)
-        self.assertEqual(raw["status"], "met")
+        self.assertEqual(raw.status, "met")
         translated = translate_contract_result(raw)
         self.assertEqual(translated.status, "met")
         self.assertEqual(translated.payment_type, "reward")
@@ -79,7 +79,13 @@ class SLAPreviewContractParityTests(unittest.TestCase):
     """SLA preview endpoint must return results consistent with contract adapter semantics."""
 
     def setUp(self):
+        from app.core.security import require_engineer, require_admin
         self.client = TestClient(app)
+        app.dependency_overrides[require_engineer] = lambda: {"user_id": "test", "role": "engineer"}
+        app.dependency_overrides[require_admin] = lambda: {"user_id": "test", "role": "admin"}
+
+    def tearDown(self):
+        app.dependency_overrides.clear()
 
     def test_preview_violated_critical(self):
         response = self.client.post("/api/v1/sla/preview", json={"severity": "critical", "mttr_minutes": 999})
@@ -112,8 +118,16 @@ class ResolveContractParityTests(unittest.TestCase):
     """Resolve endpoint SLA output must align with contract adapter translation."""
 
     def setUp(self):
+        from unittest.mock import MagicMock
+        from app.core.security import require_engineer, require_admin
         self.client = TestClient(app)
-        app.dependency_overrides[get_db] = lambda: iter([object()])
+        mock_db = MagicMock()
+        mock_db.execute.return_value.scalar.return_value = True
+        def _get_db():
+            yield mock_db
+        app.dependency_overrides[get_db] = _get_db
+        app.dependency_overrides[require_engineer] = lambda: {"user_id": "test", "role": "engineer"}
+        app.dependency_overrides[require_admin] = lambda: {"user_id": "test", "role": "admin"}
 
         self.outage = Outage(
             id="out_c1",
@@ -132,7 +146,7 @@ class ResolveContractParityTests(unittest.TestCase):
             status="violated",
             mttr_minutes=60,
             threshold_minutes=30,
-            amount=-300.0,
+            amount=-300,
             payment_type="penalty",
             rating="poor",
             policy_version="1.0",
@@ -160,7 +174,11 @@ class ResolveContractParityTests(unittest.TestCase):
 
         class FakeOutageRepo:
             def __init__(self, db): pass
+            @staticmethod
+            def validate_status_transition(c, n): pass
+            def get(self, outage_id): return outage
             def resolve(self, outage_id, mttr_minutes): return outage
+            def get_orm_locked(self, outage_id): return SimpleNamespace(mttr_minutes=60)
 
         class FakeSLARepo:
             def __init__(self, db): pass
@@ -192,7 +210,7 @@ class ResolveContractParityTests(unittest.TestCase):
         outage = self.outage
         sla_met = SLAResult(
             id=11, outage_id="out_c1", status="met", mttr_minutes=5,
-            threshold_minutes=30, amount=150.0, payment_type="reward", rating="exceptional",
+            threshold_minutes=30, amount=150, payment_type="reward", rating="exceptional",
             policy_version="1.0",
             threshold_source="config",
         )
@@ -204,6 +222,9 @@ class ResolveContractParityTests(unittest.TestCase):
 
         class FakeOutageRepo:
             def __init__(self, db): pass
+            @staticmethod
+            def validate_status_transition(c, n): pass
+            def get(self, outage_id): return outage
             def resolve(self, outage_id, mttr_minutes): return outage
 
         class FakeSLARepo:
@@ -234,6 +255,8 @@ class ResolveContractParityTests(unittest.TestCase):
 
         class FakeOutageRepo:
             def __init__(self, db): pass
+            @staticmethod
+            def validate_status_transition(c, n): pass
             def get(self, outage_id): return outage
             def get_orm_locked(self, outage_id): return SimpleNamespace(mttr_minutes=60)
 
@@ -260,21 +283,17 @@ class ResolveContractParityTests(unittest.TestCase):
         self.assertEqual(body["payment"]["sla_result_id"], 10)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-ef test_sla_endpoint_returns_clean_empty_state_semantics():
+def test_sla_endpoint_returns_clean_empty_state_semantics(client: TestClient):
     # Triggering the mock engine's empty logic (year 200)
-    response = client.get("/sla/summary?start_time=0200-01-01T00:00:00&end_time=2026-06-29T00:00:00")
+    response = client.get("/api/v1/sla/summary?start_time=0200-01-01T00:00:00&end_time=2026-06-29T00:00:00")
     assert response.status_code == 200
     payload = response.json()
     assert payload["is_empty"] is True
     assert payload["data"] == []
 
-def test_sla_endpoint_returns_typed_service_unavailable_error():
+def test_sla_endpoint_returns_typed_service_unavailable_error(client: TestClient):
     # Triggering the mock engine's failure logic (year 503)
-    response = client.get("/sla/summary?start_time=0503-01-01T00:00:00&end_time=2026-06-29T00:00:00")
+    response = client.get("/api/v1/sla/summary?start_time=0503-01-01T00:00:00&end_time=2026-06-29T00:00:00")
     assert response.status_code == 503
     payload = response.json()
     assert payload["detail"]["error_code"] == "ANALYTICS_SERVICE_UNAVAILABLE"

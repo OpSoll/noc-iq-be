@@ -49,6 +49,15 @@ class OutageRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    @staticmethod
+    def validate_status_transition(current_status: str, new_status: str) -> None:
+        c = current_status.lower()
+        n = new_status.lower()
+        if c == n:
+            return
+        if c == "resolved" and n == "open":
+            raise ValueError("Invalid status transition: resolved to open")
+
     def list(
         self,
         severity: Optional[Severity] = None,
@@ -166,19 +175,18 @@ class OutageRepository:
 
     @staticmethod
     def _is_same_outage(orm: OutageORM, payload: OutageCreate) -> bool:
+        orm_dt = orm.detected_at.replace(tzinfo=None) if hasattr(orm.detected_at, "replace") else orm.detected_at
+        p_dt = payload.detected_at.replace(tzinfo=None) if hasattr(payload.detected_at, "replace") else payload.detected_at
+        severity_match = (str(orm.severity) == str(payload.severity)) or (hasattr(payload.severity, "value") and str(orm.severity) == payload.severity.value)
+        status_match = (str(orm.status) == str(payload.status)) or (hasattr(payload.status, "value") and str(orm.status) == payload.status.value)
         return (
             orm.id == payload.id
             and orm.site_name == payload.site_name
-            and orm.site_id == payload.site_id
-            and orm.severity == payload.severity.value
-            and orm.status == payload.status.value
-            and orm.detected_at == payload.detected_at
+            and (orm.site_id or None) == (payload.site_id or None)
+            and severity_match
+            and status_match
+            and orm_dt == p_dt
             and orm.description == payload.description
-            and (orm.affected_services or []) == payload.affected_services
-            and orm.affected_subscribers == payload.affected_subscribers
-            and orm.assigned_to == payload.assigned_to
-            and orm.created_by == payload.created_by
-            and (orm.location or None) == (payload.location.model_dump() if payload.location else None)
         )
 
     def check_duplicate(self, payload: OutageCreate) -> Optional[Outage]:
@@ -219,12 +227,13 @@ class OutageRepository:
             location=location_data,
         )
         self.db.add(orm)
-        self.db.commit()
+        self.db.flush()
         self.db.refresh(orm)
         return _orm_to_pydantic(orm), True
 
     def create(self, payload: OutageCreate) -> Outage:
         outage, _ = self.create_or_get_existing(payload)
+        self.db.commit()
         return outage
 
     def bulk_create(self, outages: List[OutageCreate]) -> List[Outage]:
@@ -301,17 +310,11 @@ class OutageRepository:
 
         return violations
 
-
-class OutageRepository:
-    def __init__(self, db_session: Any = None):
-        self.db = db_session
-
     def get_raw_outage_events(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
         """
         Retrieves root infrastructure downtime events within a window.
         Uses system identifiers (cluster_id, region) to protect user data privacy.
         """
-        # Production query extracts raw database rows
         return [
             {
                 "outage_id": "out-88291-xyz",

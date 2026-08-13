@@ -24,7 +24,7 @@ class SLAResultORM(Base):
     reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
     decision_trace = Column(Text, nullable=True)          # Machine-readable decision trace
 
-    disputes = relationship("SLADispute", back_populates="sla_result")
+    disputes = relationship("SLADispute", primaryjoin="SLAResultORM.id == SLADispute.sla_result_id", foreign_keys="[SLADispute.sla_result_id]", back_populates="sla_result")
 
     __table_args__ = (
         Index("ix_sla_results_outage_latest", "outage_id", "is_latest"),

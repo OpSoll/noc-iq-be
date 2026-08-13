@@ -18,48 +18,54 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-job_status_enum = sa.Enum(
+job_status_enum = postgresql.ENUM(
     "pending",
     "started",
     "success",
     "failure",
     "revoked",
     name="jobstatus",
+    create_type=False,
 )
-job_type_enum = sa.Enum(
+job_type_enum = postgresql.ENUM(
     "sla_computation",
     "webhook_dispatch",
     "bulk_sla_computation",
     name="jobtype",
+    create_type=False,
 )
-webhook_event_enum = sa.Enum(
+webhook_event_enum = postgresql.ENUM(
     "sla.violation",
     "sla.warning",
     "sla.resolved",
     name="webhookevent",
+    create_type=False,
 )
-webhook_delivery_status_enum = sa.Enum(
+webhook_delivery_status_enum = postgresql.ENUM(
     "pending",
     "success",
     "failed",
     "retrying",
     name="webhookdeliverystatus",
+    create_type=False,
 )
-dispute_status_enum = sa.Enum(
+dispute_status_enum = postgresql.ENUM(
     "pending",
     "resolved",
     "rejected",
     name="disputestatus",
+    create_type=False,
 )
 
 
 def upgrade() -> None:
     bind = op.get_bind()
-    job_status_enum.create(bind, checkfirst=True)
-    job_type_enum.create(bind, checkfirst=True)
-    webhook_event_enum.create(bind, checkfirst=True)
-    webhook_delivery_status_enum.create(bind, checkfirst=True)
-    dispute_status_enum.create(bind, checkfirst=True)
+    if bind.dialect.name == "postgresql":
+        job_status_enum.create(bind, checkfirst=True)
+        job_type_enum.create(bind, checkfirst=True)
+        webhook_event_enum.create(bind, checkfirst=True)
+        webhook_delivery_status_enum.create(bind, checkfirst=True)
+        dispute_status_enum.create(bind, checkfirst=True)
 
     op.create_table(
         "jobs",
