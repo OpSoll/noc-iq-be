@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import audit
 
 from app.api.v1.endpoints import (
+    analytics,
     auth,
     jobs,
     metrics,
@@ -46,3 +47,4 @@ api_router.include_router(idempotency.router, prefix="/idempotency", tags=["idem
 api_router.include_router(logging_ep.router, prefix="/logging", tags=["logging"])
 api_router.include_router(readiness.router, prefix="/system", tags=["system"])
 api_router.include_router(site_hierarchy.router, prefix="/site-hierarchy", tags=["site-hierarchy"])
+api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
