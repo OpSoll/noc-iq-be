@@ -16,6 +16,7 @@ from app.core.dependencies import di_router
 from app.db.session import engine
 from app.middleware.body_size_limiter import BodySizeLimitMiddleware
 from app.middleware.correlation import CorrelationMiddleware
+from app.middleware.deprecation import DeprecationHeaderMiddleware
 from app.middleware.payload_size import PayloadSizeMiddleware
 from app.middleware.pool_saturation import PoolSaturationMiddleware
 from app.metrics.database_metrics import router as metrics_router, setup_db_metrics
@@ -117,6 +118,9 @@ async def add_api_version_header(request, call_next):
     return response
 
 app.add_middleware(BodySizeLimitMiddleware)
+
+# Issue #511: RFC 8594 deprecation headers for legacy /api/v0/* routes.
+app.add_middleware(DeprecationHeaderMiddleware)
 
 
 # Health checks

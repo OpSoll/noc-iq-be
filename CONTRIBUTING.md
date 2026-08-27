@@ -600,6 +600,42 @@ Benchmark results are written to `tests/benchmark-results.json` and uploaded as 
 
 Drift findings are categorised as `critical`, `warning`, or `info`.  **Critical findings cause a CI failure** (exit code 1).
 
+### Verifying the database schema
+
+After changing a SQLAlchemy model, make sure a matching Alembic migration is
+present. Run the schema verification command to detect model/migration drift:
+
+```bash
+DATABASE_URL=postgresql://user:pass@host:5432/nociq \
+  python scripts/verify_db_schema.py
+```
+
+The script runs `alembic check` and **fails (exit code 1) when the models have
+drifted from the current migration head**, so it can be wired into CI to gate
+merges. If drift is reported, generate the missing migration with:
+
+```bash
+alembic revision --autogenerate -m 'describe change'
+alembic upgrade head
+```
+
+then re-run the verification.
+
+### Database backup & restore drill
+
+Before relying on a backup in production, verify restore integrity with the
+automated drill script:
+
+```bash
+DATABASE_URL=postgresql://user:pass@host:5432/nociq \
+  ./scripts/verify_db_backup.sh
+```
+
+The script executes `pg_dump`, restores the dump into a temporary database,
+and compares row counts for the core tables (`outages`, `sla_results`,
+`payment_transactions`) between the source and the restored database. It logs
+each step and exits non-zero if any row count mismatches.
+
 ---
 
 ## 🙏 Thank You!

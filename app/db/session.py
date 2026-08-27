@@ -21,10 +21,18 @@ _DB_URL = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or (
 _is_sqlite = make_url(_DB_URL).get_backend_name() == "sqlite"
 _connect_args = {"check_same_thread": False} if _is_sqlite else {}
 
+# Issue #526: honour the configured transaction isolation level on the
+# engine. SQLite only supports SERIALIZABLE, so the option is only passed
+# through for real (PostgreSQL) backends.
+_engine_isolation_level = (
+    None if _is_sqlite else settings.DB_TRANSACTION_ISOLATION_LEVEL
+)
+
 engine: Engine = create_engine(
     _DB_URL,
     connect_args=_connect_args,
     pool_pre_ping=True,
+    isolation_level=_engine_isolation_level,
 )
 
 

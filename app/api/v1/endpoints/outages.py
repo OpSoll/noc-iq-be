@@ -6,7 +6,8 @@ import io
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -32,7 +33,7 @@ from app.core.outage_state_machine import OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
-from app.utils.exporter import export_outages
+from app.utils.exporter import export_outages, stream_outages_csv
 from app.api.v1.endpoints.sla import _invalidate_analytics_cache
 from app.core.security import require_engineer, require_admin
 from app.core.config import settings
@@ -53,6 +54,23 @@ def export_outages_endpoint(
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
+
+    # Issue #507: CSV exports stream database rows in chunks of 500 instead
+    # of loading the full dataset into memory before sending the payload.
+    if format.lower() == "csv":
+        batches = repo.stream_filtered(
+            severity=severity,
+            status=status,
+            search=search,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return StreamingResponse(
+            stream_outages_csv(batches),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=outages.csv"},
+        )
+
     data = repo.list_filtered(
         severity=severity,
         status=status,
@@ -64,13 +82,6 @@ def export_outages_endpoint(
         exported = export_outages(data, format)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if format == "csv":
-        return Response(
-            content=exported,
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=outages.csv"},
-        )
     return exported
 
 
@@ -417,22 +428,22 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    result = outage_store.soft_delete(outage_id)
+    # Issue #521: soft-delete keeps historical SLA compliance data available
+    # for financial audits instead of permanently removing the record.
+    result = repo.soft_delete(outage_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Outage not found")
-    repo.delete(outage_id)
+    audit_log.log("outage_deleted", {"id": outage_id, "deleted_at": str(result.deleted_at)})
     return {"message": "Outage deleted successfully", "deleted_at": result.deleted_at}
 
 
 @router.post("/{outage_id}/restore")
-def restore_outage(outage_id: str):
-    existing = outage_store.get(outage_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Outage not found")
-
-    result = outage_store.restore(outage_id)
+def restore_outage(outage_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    result = repo.restore(outage_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Outage not found")
+    audit_log.log("outage_restored", {"id": outage_id})
     return {"message": "Outage restored successfully", "outage": result}
 
 
