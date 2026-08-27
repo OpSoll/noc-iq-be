@@ -65,6 +65,10 @@ jobs:
           flake8 app/ --select=E9,F821,F823 \
             --format="::error file=%(path)s,line=%(row)d,col=%(col)d::%(text)s"
 
+      - name: Check single Alembic head (blocking — issue #516)
+        run: |
+          python scripts/check_alembic_single_head.py
+
       - name: Lint with flake8 (informational — style and import issues)
         run: |
           flake8 app/ --max-line-length=120 \
