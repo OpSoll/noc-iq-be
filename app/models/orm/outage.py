@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import Column, DateTime, Float, Index, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 
 from app.db.base import Base
@@ -8,6 +8,12 @@ from app.db.base import Base
 
 class OutageORM(Base):
     __tablename__ = "outages"
+
+    # Issue #515: composite index backing queries that filter open outages by
+    # site ID (see migration 0025_add_outages_site_status_idx).
+    __table_args__ = (
+        Index("ix_outages_site_status_detected", "site_id", "status", "detected_at"),
+    )
 
     id = Column(String, primary_key=True, index=True)
     site_name = Column(String(255), nullable=False)
