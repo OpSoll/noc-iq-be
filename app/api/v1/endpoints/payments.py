@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -17,6 +17,7 @@ from app.models.payment import (
     PaymentResponse,
     PaymentTransaction,
     PaymentTransitionError,
+    ReconciliationReport,
 )
 from app.utils.correlation import get_correlation_id
 from app.repositories.payment_repository import PaymentRepository
@@ -27,10 +28,26 @@ from app.core.security import get_current_user, require_admin, require_engineer
 
 router = APIRouter()
 
+
+class IdempotencyMetrics(BaseModel):
+    """Idempotency cache usage counters."""
+    hits: int
+    misses: int
+    stored: int
+    expired_cleaned: int
+
+
+class EnvelopeResponse(BaseModel):
+    """Standard response envelope: data plus correlation metadata."""
+    data: Any = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=lambda: {"correlation_id": None})
+
+
 _SEEN_NONCES: dict[str, float] = {}
 CALLBACK_NONCE_TTL_SECONDS = 300  
 
-@router.get("/idempotency/metrics")
+@router.get("/idempotency/metrics", response_model=IdempotencyMetrics)
 def idempotency_metrics(db: Session = Depends(get_db)):
     service = IdempotencyService(db)
     return service.get_metrics()
@@ -125,12 +142,12 @@ def list_payments(
     )
 
 
-@router.get("/ping")
+@router.get("/ping", response_model=EnvelopeResponse)
 def payments_ping():
     return _envelope(data={"message": "payments ok"})
 
 
-@router.get("/dead-letter")
+@router.get("/dead-letter", response_model=EnvelopeResponse)
 def list_dead_letter_payments(
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
@@ -140,7 +157,7 @@ def list_dead_letter_payments(
     return _envelope(data=[i.model_dump(mode="json") for i in items])
 
 
-@router.post("/{transaction_id}/replay")
+@router.post("/{transaction_id}/replay", response_model=EnvelopeResponse)
 def replay_dead_letter_payment(
     transaction_id: str,
     current_user=Depends(require_admin),
@@ -241,7 +258,7 @@ class ReconcileRequest(BaseModel):
     status: str
 
 
-@router.post("/reconcile")
+@router.post("/reconcile", response_model=List[ReconciliationReport])
 def reconcile_all_payments(
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),

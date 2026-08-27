@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException, status, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.models.auth import (
@@ -86,7 +86,11 @@ def _extract_bearer_token(authorization: str | None) -> str:
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(..., description="Valid refresh token issued at login")
+
+
+class PingResponse(BaseModel):
+    message: str = Field(..., description="Service liveness message")
 
 
 @router.post("/register", response_model=AuthUser, status_code=status.HTTP_201_CREATED)
@@ -235,6 +239,6 @@ def admin_logout_all_sessions(
     )
 
 
-@router.get("/ping")
+@router.get("/ping", response_model=PingResponse)
 def auth_ping():
     return {"message": "auth ok"}

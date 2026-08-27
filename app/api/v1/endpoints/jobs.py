@@ -182,6 +182,12 @@ class RetryPolicyResponse(BaseModel):
     base_delay_seconds: int
 
 
+class JobHeartbeatResponse(BaseModel):
+    """Response confirming a lease heartbeat was recorded (BE-W5-047)."""
+    job_id: str
+    heartbeat_at: str
+
+
 class DeadLetterSummary(BaseModel):
     id: UUID
     celery_task_id: str
@@ -489,7 +495,7 @@ def get_job_progress(
     )
 
 
-@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def cancel_job(
     job_id: UUID,
     current_user=Depends(require_admin),
@@ -780,7 +786,7 @@ def list_dead_letter_jobs(
 # BE-W5-047: Lease heartbeat / reclamation endpoints                           #
 # --------------------------------------------------------------------------- #
 
-@router.post("/{job_id}/heartbeat", status_code=status.HTTP_200_OK)
+@router.post("/{job_id}/heartbeat", response_model=JobHeartbeatResponse, status_code=status.HTTP_200_OK)
 def record_job_heartbeat(
     job_id: UUID,
     worker_id: str = Query(..., description="Worker identifier"),
