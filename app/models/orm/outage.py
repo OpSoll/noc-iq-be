@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 
 from app.db.base import Base
@@ -24,6 +24,8 @@ class OutageORM(Base):
     location = Column(JSON, nullable=True)          # {"latitude": float, "longitude": float}
     sla_status = Column(JSON, nullable=True)        # SLAStatus dict
     mttr_minutes = Column(Integer, nullable=True)
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     updated_at = Column(
         DateTime,

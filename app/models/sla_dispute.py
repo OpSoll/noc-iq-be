@@ -19,7 +19,7 @@ class SLADispute(Base):
     __tablename__ = "sla_disputes"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True, index=True)
+    sla_result_id = Column(Integer, ForeignKey("sla_results.id", ondelete="CASCADE"), nullable=True, index=True)
     baseline_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
     proposed_sla_result_id = Column(Integer, ForeignKey("sla_results.id"), nullable=True)
 
@@ -51,7 +51,7 @@ class DisputeAuditLog(Base):
     __tablename__ = "dispute_audit_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    dispute_id = Column(UUID(as_uuid=True), ForeignKey("sla_disputes.id"), nullable=False, index=True)
+    dispute_id = Column(UUID(as_uuid=True), ForeignKey("sla_disputes.id", ondelete="CASCADE"), nullable=False, index=True)
     action = Column(String(50), nullable=False)  # e.g. "flagged", "resolved", "rejected"
     actor = Column(String(255), nullable=False)
     notes = Column(Text, nullable=True)
