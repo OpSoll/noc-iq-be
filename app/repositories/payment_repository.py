@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
@@ -17,6 +18,9 @@ from app.models.payment import (
 )
 from app.models.sla import SLAResult
 from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
@@ -232,10 +236,45 @@ class PaymentRepository:
         self.db.refresh(orm)
         return _orm_to_pydantic(orm)
 
+    def _apply_payment_dedup_isolation(self) -> None:
+        """Steer the current session transaction to REPEATABLE READ.
+
+        Issue #526: the payment deduplication check-then-insert sequence runs
+        under ``PAYMENT_DEDUP_ISOLATION_LEVEL`` so concurrent settlement
+        checks cannot read skewed state under the default Read Committed
+        isolation. Row locking (``with_for_update``) is applied inside
+        :meth:`get_by_sla_result` for the dedup read.
+
+        SQLite only supports SERIALIZABLE and an already-open transaction
+        cannot change isolation mid-flight, so the option is only applied
+        when it can take effect.
+        """
+        bind = self.db.get_bind()
+        if bind is None or bind.dialect.name == "sqlite":
+            return
+        if self.db.in_transaction():
+            return
+        try:
+            self.db.connection(
+                execution_options={
+                    "isolation_level": settings.PAYMENT_DEDUP_ISOLATION_LEVEL
+                }
+            )
+        except Exception:
+            logger.warning(
+                "Unable to set payment dedup isolation level to %s",
+                settings.PAYMENT_DEDUP_ISOLATION_LEVEL,
+                exc_info=True,
+            )
+
     def create_for_sla_result(self, outage_id: str, sla_result: SLAResult) -> PaymentTransaction:
         if sla_result.id is None:
             raise ValueError("SLA result id is required to generate a payment record")
 
+        # Issue #526: run the deduplication check under REPEATABLE READ with
+        # an explicit row lock so concurrent SLA settlements converge on a
+        # single payment row instead of racing on a read-then-insert.
+        self._apply_payment_dedup_isolation()
         existing = self.get_by_sla_result(sla_result.id, for_update=True)
         if existing:
             return existing

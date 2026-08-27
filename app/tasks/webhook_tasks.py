@@ -5,9 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from celery import Task
-
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, GuardedTask
 from app.core.config import settings as cfg
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
@@ -16,13 +14,14 @@ from app.services.audit_log import audit_log
 logger = logging.getLogger(__name__)
 
 
-class WebhookDatabaseTask(Task):
+class WebhookDatabaseTask(GuardedTask):
     """Task base for webhook Celery tasks — tracks progress, supports quarantine,
     and manages lease heartbeats (BE-W5-047).
 
     BE-W5-054: Tasks inherit this base so retries can be quarantined after the
     per-delivery retry budget is exhausted.
     BE-W5-047: Lease heartbeats are recorded for long-running DR replay tasks.
+    Inherits :class:`GuardedTask` for issue #531 execution time-limit cleanup.
     """
 
     abstract = True

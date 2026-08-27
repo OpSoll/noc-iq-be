@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging
 import sys
+from datetime import datetime
 from typing import Dict, List
 
-from celery import Celery
+from celery import Celery, Task
 from celery.signals import worker_ready
 
 from app.core.config import settings
@@ -19,6 +20,8 @@ celery_app = Celery(
         "app.tasks.sla_tasks",
         "app.tasks.webhook_tasks",
         "app.tasks.idempotency_tasks",
+        "app.tasks.timeout_guard",
+        "app.tasks.dead_letter",
     ],
 )
 
@@ -33,6 +36,14 @@ celery_app.conf.update(
     ],
     task_track_started=True,
     task_acks_late=True,
+    # Issue #530: reject (and redeliver) messages whose worker process died
+    # mid-execution so they can be retried elsewhere instead of silently
+    # vanishing. Requires acks_late (set above).
+    task_reject_on_worker_lost=True,
+    # Issue #531: execution time limits. Soft limit lets tasks clean up
+    # gracefully (SoftTimeLimitExceeded); hard limit SIGKILLs the worker.
+    task_soft_time_limit=settings.CELERY_TASK_SOFT_TIME_LIMIT,
+    task_time_limit=settings.CELERY_TASK_TIME_LIMIT,
     task_always_eager=settings.CELERY_TASK_ALWAYS_EAGER,
     task_store_eager_result=True,
     worker_prefetch_multiplier=1,
@@ -59,10 +70,78 @@ celery_app.conf.update(
             "task": "app.tasks.celery_app.guardrail_check_task",
             "schedule": 60.0,
         },
+        # Issue #531: periodically revoke tasks that are still marked STARTED
+        # after their lease (time limit) expired so hung executions cannot
+        # pin workers indefinitely.
+        "revoke-hung-tasks": {
+            "task": "app.tasks.timeout_guard.revoke_hung_tasks",
+            "schedule": 60.0,
+        },
     },
 )
 
+# Issue #530: register the task_failure signal handler that routes
+# permanently failed tasks to the dead-letter queue and persists their
+# payload + traceback for audit. Importing the module wires the signal.
+from app.tasks import dead_letter as _dead_letter  # noqa: E402,F401
+
+
 celery_app.autodiscover_tasks(["app.tasks"])
+
+
+def _mark_job_timed_out(task_id: str, code: str) -> None:
+    """Mark the tracked ``Job`` row for ``task_id`` as failed on time limit.
+
+    Issue #531: used by the soft/hard time-limit hooks so a timed-out task is
+    surfaced in the jobs API instead of hanging as STARTED forever.
+    """
+    try:
+        from app.db.session import SessionLocal
+        from app.models.job import Job, JobStatus
+
+        db = SessionLocal()
+        try:
+            job = db.query(Job).filter(Job.celery_task_id == task_id).first()
+            if job and job.status == JobStatus.STARTED:
+                job.status = JobStatus.FAILURE
+                job.error = f"{code}: task exceeded its execution time limit"
+                job.error_code = code
+                job.error_retryable = False
+                job.finished_at = datetime.utcnow()
+                job.heartbeat_at = None
+                job.lease_expires_at = None
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("Failed to mark task %s as timed out (%s)", task_id, code)
+
+
+class GuardedTask(Task):
+    """Task base with execution time-limit guards.
+
+    Issue #531: long-running tasks (e.g. stalled Stellar RPC network
+    fetches) can hang Celery workers indefinitely. Tasks inheriting this
+    base get graceful cleanup hooks for the soft and hard time limits.
+    """
+
+    abstract = True
+
+    def on_soft_time_limit(self, exc, task_id, args, kwargs):  # type: ignore[override]
+        logger.warning(
+            "Soft time limit exceeded for task %s (%ds) — cleaning up gracefully",
+            task_id,
+            settings.CELERY_TASK_SOFT_TIME_LIMIT,
+        )
+        _mark_job_timed_out(task_id, "SOFT_TIME_LIMIT")
+
+    def on_time_limit(self, exc, task_id, args, kwargs):  # type: ignore[override]
+        logger.error(
+            "Hard time limit exceeded for task %s (%ds) — worker process killed",
+            task_id,
+            settings.CELERY_TASK_TIME_LIMIT,
+        )
+        _mark_job_timed_out(task_id, "HARD_TIME_LIMIT")
 
 
 def _required_queue_names() -> List[str]:

@@ -30,4 +30,7 @@ class PaymentTransactionORM(Base):
     __table_args__ = (
         Index("ix_payment_transactions_from_address", "from_address"),
         Index("ix_payment_transactions_to_address", "to_address"),
+        # Issue #528: composite index for settlement lookups by wallet
+        # address + status, ordered by newest first.
+        Index("ix_payment_tx_to_addr_status", "to_address", "status", "created_at"),
     )

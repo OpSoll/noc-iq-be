@@ -1,15 +1,19 @@
 import logging
 from typing import Dict, Any
 
-from celery import Task
-
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, GuardedTask
 from app.db.session import SessionLocal
 
 logger = logging.getLogger(__name__)
 
 
-class IdempotencyCleanupTask(Task):
+class IdempotencyCleanupTask(GuardedTask):
+    """Task base for idempotency cleanup.
+
+    Inherits :class:`GuardedTask` for issue #531 execution time-limit
+    cleanup hooks.
+    """
+
     abstract = True
 
 
