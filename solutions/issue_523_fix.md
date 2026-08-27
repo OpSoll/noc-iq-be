@@ -1,0 +1,1 @@
+Solution proposal for DB: Add Foreign Key onDelete CASCADE rules on audit log child tables
