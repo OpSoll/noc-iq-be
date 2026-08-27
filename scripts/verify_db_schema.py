@@ -49,7 +49,7 @@ def main() -> int:
 
     print(f"Verifying schema against migration head on {database_url.split('@')[-1]} ...")
     result = subprocess.run(
-        ["alembic", "check"],
+        [sys.executable, "-m", "alembic", "check"],
         cwd=str(REPO_ROOT),
         env={**os.environ, "DATABASE_URL": database_url},
         capture_output=True,
