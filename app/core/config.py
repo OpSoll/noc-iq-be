@@ -213,6 +213,11 @@ class Settings(BaseSettings):
     WEBHOOK_QUEUE_SCALE_UP_THRESHOLD: int = 100
     WEBHOOK_QUEUE_SCALE_DOWN_THRESHOLD: int = 10
 
+    # Optional alert webhook for the Celery worker heartbeat monitor (#536).
+    # When set, a JSON payload is POSTed here whenever no worker responds to
+    # the ``ping_celery_workers`` beat task.
+    WORKER_ALERT_WEBHOOK_URL: str = ""
+
     # ── BE-W5-047: Job lease heartbeat ────────────────────────────────────
     JOB_LEASE_HEARTBEAT_INTERVAL_SECONDS: int = 30
     JOB_LEASE_TIMEOUT_SECONDS: int = 120
