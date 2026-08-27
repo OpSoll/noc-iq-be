@@ -1,0 +1,1 @@
+Solution proposal for DB: Add database table partitioning by month for webhook_deliveries
