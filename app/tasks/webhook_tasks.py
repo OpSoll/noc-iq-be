@@ -86,6 +86,7 @@ class WebhookDatabaseTask(GuardedTask):
     name="app.tasks.webhook_tasks.dispatch_webhook_delivery",
     max_retries=5,
     default_retry_delay=30,
+    rate_limit="100/m",  # Issue #532: webhook_dispatch = 100 tasks per minute
 )
 def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     """Deliver a single WebhookDelivery record asynchronously.
