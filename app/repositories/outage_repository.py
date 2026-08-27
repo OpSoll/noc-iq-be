@@ -34,6 +34,7 @@ def _orm_to_pydantic(orm: OutageORM) -> Outage:
         created_by=orm.created_by,
         location=location,
         sla_status=sla_status,
+        deleted_at=orm.deleted_at,
     )
 
 
@@ -71,6 +72,7 @@ class OutageRepository:
         sort_direction: OutageSortDirection = OutageSortDirection.desc,
     ) -> dict:
         query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
 
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
@@ -107,7 +109,7 @@ class OutageRepository:
         }
 
     def list_all(self) -> List[Outage]:
-        rows = self.db.query(OutageORM).all()
+        rows = self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False)).all()
         return [_orm_to_pydantic(r) for r in rows]
 
     def list_filtered(
@@ -119,6 +121,7 @@ class OutageRepository:
         end_date: Optional[datetime] = None,
     ) -> List[Outage]:
         query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
@@ -138,22 +141,68 @@ class OutageRepository:
         return [_orm_to_pydantic(r) for r in query.all()]
 
     def get(self, outage_id: str) -> Optional[Outage]:
-        row = self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
+        row = self._query_active().filter(OutageORM.id == outage_id).first()
         if not row:
             return None
         return _orm_to_pydantic(row)
 
     def get_orm(self, outage_id: str) -> Optional[OutageORM]:
-        return self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
+        return self._query_active().filter(OutageORM.id == outage_id).first()
 
     def get_orm_locked(self, outage_id: str) -> Optional[OutageORM]:
         """Acquire a row-level lock (SELECT FOR UPDATE) before mutating."""
         return (
-            self.db.query(OutageORM)
+            self._query_active()
             .filter(OutageORM.id == outage_id)
             .with_for_update()
             .first()
         )
+
+    def _query_active(self):
+        """Base query that excludes soft-deleted outages by default (Issue #521)."""
+        return self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False))
+
+    def soft_delete(self, outage_id: str) -> Optional[Outage]:
+        """Soft-delete an outage so historical SLA compliance data is retained.
+
+        Soft-deleted records are excluded from queries by default and can be
+        restored with :meth:`restore`.
+        """
+        orm = self.get_orm(outage_id)
+        if not orm:
+            return None
+        orm.is_deleted = True
+        orm.deleted_at = datetime.now(timezone.utc)
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def restore(self, outage_id: str) -> Optional[Outage]:
+        """Restore a soft-deleted outage record (Issue #521)."""
+        orm = (
+            self.db.query(OutageORM)
+            .filter(OutageORM.id == outage_id)
+            .first()
+        )
+        if not orm:
+            return None
+        orm.is_deleted = False
+        orm.deleted_at = None
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def list_deleted(self) -> List[Outage]:
+        """Return all soft-deleted outages (Issue #521)."""
+        rows = (
+            self.db.query(OutageORM)
+            .filter(OutageORM.is_deleted.is_(True))
+            .order_by(OutageORM.deleted_at.desc())
+            .all()
+        )
+        return [_orm_to_pydantic(r) for r in rows]
 
     @staticmethod
     def validate_status_transition(current_status: str, next_status: str) -> None:
@@ -292,7 +341,10 @@ class OutageRepository:
 
         rows = (
             self.db.query(OutageORM)
-            .filter(OutageORM.status == OutageStatus.resolved.value)
+            .filter(
+                OutageORM.status == OutageStatus.resolved.value,
+                OutageORM.is_deleted.is_(False),
+            )
             .all()
         )
 

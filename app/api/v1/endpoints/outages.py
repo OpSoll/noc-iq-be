@@ -417,22 +417,22 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
-    result = outage_store.soft_delete(outage_id)
+    # Issue #521: soft-delete keeps historical SLA compliance data available
+    # for financial audits instead of permanently removing the record.
+    result = repo.soft_delete(outage_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Outage not found")
-    repo.delete(outage_id)
+    audit_log.log("outage_deleted", {"id": outage_id, "deleted_at": str(result.deleted_at)})
     return {"message": "Outage deleted successfully", "deleted_at": result.deleted_at}
 
 
 @router.post("/{outage_id}/restore")
-def restore_outage(outage_id: str):
-    existing = outage_store.get(outage_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Outage not found")
-
-    result = outage_store.restore(outage_id)
+def restore_outage(outage_id: str, current_user=Depends(require_engineer), db: Session = Depends(get_db)):
+    repo = OutageRepository(db)
+    result = repo.restore(outage_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Outage not found")
+    audit_log.log("outage_restored", {"id": outage_id})
     return {"message": "Outage restored successfully", "outage": result}
 
 
