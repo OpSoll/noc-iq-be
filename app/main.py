@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi import FastAPI
 from datetime import datetime
 from sqlalchemy import text
@@ -96,8 +97,14 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Issue #514: cache preflight responses for 24h so browsers stop reissuing
+    # OPTIONS before every API fetch.
+    max_age=86400,
 )
 app.add_middleware(RateLimiterMiddleware)
+
+# Issue #509: gzip-compress API responses larger than 1 KB.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # ---------------------------------------------------------------------------
