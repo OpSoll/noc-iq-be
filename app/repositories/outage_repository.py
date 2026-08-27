@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 from sqlalchemy import and_, asc, desc, or_
 from sqlalchemy.orm import Session
@@ -136,6 +136,47 @@ class OutageRepository:
         if end_date:
             query = query.filter(OutageORM.detected_at <= end_date)
         return [_orm_to_pydantic(r) for r in query.all()]
+
+    def stream_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        chunk_size: int = 500,
+    ) -> Iterator[List[Outage]]:
+        """Yield filtered outages in batches of ``chunk_size`` rows.
+
+        Uses ``yield_per`` so database rows are streamed in chunks instead of
+        loading the full result set into memory (Issue #507).
+        """
+        query = self.db.query(OutageORM)
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == status.value)
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        batch: List[Outage] = []
+        for orm in query.yield_per(chunk_size):
+            batch.append(_orm_to_pydantic(orm))
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
     def get(self, outage_id: str) -> Optional[Outage]:
         row = self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()

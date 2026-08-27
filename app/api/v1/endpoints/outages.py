@@ -6,7 +6,8 @@ import io
 import json
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
@@ -32,7 +33,7 @@ from app.core.outage_state_machine import OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
-from app.utils.exporter import export_outages
+from app.utils.exporter import export_outages, stream_outages_csv
 from app.api.v1.endpoints.sla import _invalidate_analytics_cache
 from app.core.security import require_engineer, require_admin
 from app.core.config import settings
@@ -53,6 +54,23 @@ def export_outages_endpoint(
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
+
+    # Issue #507: CSV exports stream database rows in chunks of 500 instead
+    # of loading the full dataset into memory before sending the payload.
+    if format.lower() == "csv":
+        batches = repo.stream_filtered(
+            severity=severity,
+            status=status,
+            search=search,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        return StreamingResponse(
+            stream_outages_csv(batches),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=outages.csv"},
+        )
+
     data = repo.list_filtered(
         severity=severity,
         status=status,
@@ -64,13 +82,6 @@ def export_outages_endpoint(
         exported = export_outages(data, format)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if format == "csv":
-        return Response(
-            content=exported,
-            media_type="text/csv",
-            headers={"Content-Disposition": "attachment; filename=outages.csv"},
-        )
     return exported
 
 
