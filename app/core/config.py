@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 VALID_STELLAR_NETWORKS = {"testnet", "mainnet", "futurenet", "standalone"}
 VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
 
+# SQL transaction isolation levels supported by PostgreSQL. Values must use
+# the exact SQL names (spaces, not underscores) accepted by
+# ``connection.execution_options(isolation_level=...)``.
+VALID_DB_ISOLATION_LEVELS = {
+    "READ UNCOMMITTED",
+    "READ COMMITTED",
+    "REPEATABLE READ",
+    "SERIALIZABLE",
+}
+
 # ---------------------------------------------------------------------------
 # Default secrets for local/dev — must be overridden in production.
 # ---------------------------------------------------------------------------
@@ -55,6 +65,23 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
     CELERY_TASK_ALWAYS_EAGER: bool = True
+
+    # ── Celery execution time limits (issue #531) ─────────────────────────
+    # Soft limit raises ``SoftTimeLimitExceeded`` inside the running task so
+    # it can clean up gracefully; the hard limit SIGKILLs the worker process.
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 60
+    CELERY_TASK_TIME_LIMIT: int = 120
+
+    # ── Celery dead-letter queue (issue #530) ─────────────────────────────
+    CELERY_DEAD_LETTER_QUEUE: str = "celery_dead_letter"
+    CELERY_DEAD_LETTER_ENABLED: bool = True
+
+    # ── DB transaction isolation (issue #526) ─────────────────────────────
+    # Applied to the engine for all transactions (PostgreSQL only).
+    DB_TRANSACTION_ISOLATION_LEVEL: str = "READ COMMITTED"
+    # Isolation level used for the payment deduplication check-then-insert
+    # path so concurrent settlement checks do not suffer from read skew.
+    PAYMENT_DEDUP_ISOLATION_LEVEL: str = "REPEATABLE READ"
 
     # ── Observability ─────────────────────────────────────────────────────
     OTEL_SERVICE_NAME: str = "nociq-api"
@@ -239,6 +266,23 @@ class Settings(BaseSettings):
         if v.startswith("sqlite"):
             return v
         return validate_postgres_url(v)
+
+    @field_validator("DB_TRANSACTION_ISOLATION_LEVEL", "PAYMENT_DEDUP_ISOLATION_LEVEL")
+    @classmethod
+    def _validate_db_isolation_level(cls, v: str) -> str:
+        if v.upper() not in VALID_DB_ISOLATION_LEVELS:
+            raise ValueError(
+                f"{v!r} is not a supported isolation level. "
+                f"Supported: {sorted(VALID_DB_ISOLATION_LEVELS)}"
+            )
+        return v
+
+    @field_validator("CELERY_TASK_SOFT_TIME_LIMIT", "CELERY_TASK_TIME_LIMIT")
+    @classmethod
+    def _validate_celery_time_limits(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Celery time limits must be positive integers")
+        return v
 
     @field_validator("CELERY_BROKER_URL")
     @classmethod

@@ -5,9 +5,9 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from celery import Task
+from celery.exceptions import SoftTimeLimitExceeded
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, GuardedTask
 from app.core.config import settings as cfg
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
@@ -39,9 +39,12 @@ def _hash_job_payload(job: Job) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-class DatabaseTask(Task):
+class DatabaseTask(GuardedTask):
     """Base task that provides a scoped DB session, updates Job records,
-    and manages lease heartbeats for BE-W5-047."""
+    and manages lease heartbeats for BE-W5-047.
+
+    Inherits :class:`GuardedTask` for issue #531 execution time-limit
+    cleanup hooks."""
 
     abstract = True
     _db = None
@@ -281,6 +284,22 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
         logger.info("SLA computation complete for device=%s", device_id)
         return result
 
+    except SoftTimeLimitExceeded as exc:
+        # Issue #531: log graceful cleanup and surface as a timeout failure.
+        # Do not retry — the task keeps exceeding its time limit.
+        logger.warning(
+            "SLA computation for device=%s hit soft time limit — cleaning up gracefully",
+            device_id,
+        )
+        self._mark_failure(
+            db,
+            self.request.id,
+            f"SoftTimeLimitExceeded: {exc}",
+            error_code="SOFT_TIME_LIMIT",
+            error_retryable=False,
+        )
+        raise
+
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("SLA computation failed for device=%s: %s", device_id, error_msg)
@@ -390,6 +409,20 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
         self._mark_success(db, self.request.id, summary)
         logger.info("Bulk SLA computation complete. Violations: %d/%d, Errors: %d", len(violations), total, error_count)
         return summary
+
+    except SoftTimeLimitExceeded as exc:
+        # Issue #531: log graceful cleanup; do not retry a timing-out task.
+        logger.warning(
+            "Bulk SLA computation hit soft time limit — cleaning up gracefully",
+        )
+        self._mark_failure(
+            db,
+            self.request.id,
+            f"SoftTimeLimitExceeded: {exc}",
+            error_code="SOFT_TIME_LIMIT",
+            error_retryable=False,
+        )
+        raise
 
     except Exception as exc:
         error_msg = str(exc)

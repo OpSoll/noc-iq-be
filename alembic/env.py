@@ -11,6 +11,7 @@ import app.models.orm.outage  # noqa: F401
 import app.models.orm.outage_event  # noqa: F401
 import app.models.orm.sla     # noqa: F401
 import app.models.orm.payment  # noqa: F401
+import app.models.orm.celery_task_dead_letter  # noqa: F401
 import app.models.job  # noqa: F401
 import app.models.webhook  # noqa: F401
 import app.models.sla_dispute  # noqa: F401
