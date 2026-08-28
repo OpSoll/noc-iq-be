@@ -11,6 +11,7 @@ class ContentLengthLimitMiddleware:
             headers = dict(scope.get("headers", []))
             content_length = int(headers.get(b"content-length", 0))
             if content_length > self.max_bytes:
+                # payload too large
                 await send({
                     "type": "http.response.start",
                     "status": 413,
