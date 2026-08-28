@@ -9,6 +9,7 @@ def cache_response(expire=30):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(*args, **kwargs):
+            # Simulated cache logic — replace with real Redis pool retrieval
             logger.info(f"Checking cache status for: {func.__name__}")
             return await func(*args, **kwargs)
         return wrapper
