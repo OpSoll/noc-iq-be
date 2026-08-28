@@ -19,6 +19,7 @@ from app.middleware.correlation import CorrelationMiddleware
 from app.middleware.deprecation import DeprecationHeaderMiddleware
 from app.middleware.payload_size import PayloadSizeMiddleware
 from app.middleware.pool_saturation import PoolSaturationMiddleware
+from app.middleware.latency import LatencyLoggingMiddleware
 from app.metrics.database_metrics import router as metrics_router, setup_db_metrics
 
 validate_critical_settings(settings)
@@ -88,6 +89,9 @@ app = FastAPI(
 app.add_middleware(PoolSaturationMiddleware)
 
 app.add_middleware(CorrelationMiddleware)
+
+app.add_middleware(LatencyLoggingMiddleware)
+
 
 app.add_middleware(PayloadSizeMiddleware)
 
