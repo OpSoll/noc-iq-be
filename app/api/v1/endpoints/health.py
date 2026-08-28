@@ -1,7 +1,7 @@
 """V1 health endpoints (issue #536, #505).
 
-Exposes ``GET /api/v1/health/detailed`` with database, Redis and
-Celery worker heartbeat status.
+Exposes ``GET /api/v1/health/detailed`` with database, Redis,
+Celery worker heartbeat and Stellar operator wallet balance status.
 """
 
 import logging
@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.db.session import engine
+from app.services.stellar.balance_monitor import read_wallet_health
 from app.tasks.worker_health import check_worker_health, read_worker_health
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,19 @@ def _check_redis() -> bool:
         return False
 
 
+def _wallet_health() -> dict:
+    """Return cached Stellar wallet balance metrics, never raising.
+
+    Reads only the snapshot written by the balance monitor beat task — the
+    health endpoint must not make a Horizon call on the request path.
+    """
+    try:
+        return read_wallet_health()
+    except Exception:
+        logger.warning("Failed to read Stellar wallet balance health")
+        return {"status": "unknown", "healthy": None, "error": "unavailable"}
+
+
 @router.get("/health/detailed")
 def detailed_health() -> JSONResponse:
     """Detailed health probe: database, Redis and Celery worker heartbeat.
@@ -65,6 +79,7 @@ def detailed_health() -> JSONResponse:
 
     Issue #505: explicitly pings PostgreSQL (SELECT 1) and Redis (PING).
     Issue #536: includes Celery worker heartbeat status.
+    Also reports Stellar operator wallet balance metrics under ``wallet``.
     """
     db_ok = _check_database()
     redis_ok = _check_redis()
@@ -86,5 +101,10 @@ def detailed_health() -> JSONResponse:
             "celery_broker": "ok" if broker_ok else "down",
             "celery_workers": workers,
         },
+        # Operator wallet balance metrics, as recorded by the 15-minute
+        # balance monitor beat. Reported for observability only: a low
+        # balance is alerted on by the monitor and does not mark the API
+        # itself unhealthy.
+        "wallet": _wallet_health(),
     }
     return JSONResponse(status_code=200 if all_healthy else 503, content=payload)

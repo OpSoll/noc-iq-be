@@ -898,3 +898,161 @@ PAYMENT_ASSET_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
 In `local_adapter` mode `PAYMENT_ASSET_ISSUER` may be left empty.
 In `soroban_rpc` mode it **must** be a valid G-address — startup validation
 will reject an empty or malformed value.
+
+---
+
+## Payment Operations Services (`app/services/stellar/`)
+
+Four operational concerns around Stellar settlement live in
+`app/services/stellar/`: faucet funding, memo auditing, key custody and
+balance monitoring.
+
+### 1. Friendbot auto-faucet funding
+
+`app/services/stellar/friendbot.py`
+
+Testnet resets wipe operator wallets, which previously meant hitting
+Friendbot by hand before payouts could resume.
+
+```python
+from app.services.stellar import friendbot_service
+
+# Explicit request
+result = await friendbot_service.request_friendbot_funding(address)
+
+# Auto-trigger: only requests funding when the XLM balance is 0
+result = await friendbot_service.fund_if_unfunded(address)
+```
+
+- A missing account on Horizon (404) reads as a 0 XLM balance — exactly the
+  state a testnet reset leaves behind — so it is re-funded.
+- Every response is logged: a summary at INFO (`hash`, `ledger`,
+  `status_code`), the raw body at DEBUG, failures at ERROR.
+- Friendbot only exists on the test networks: a request on `mainnet`, or
+  with `STELLAR_FRIENDBOT_ENABLED=false`, raises `FriendbotError` before any
+  HTTP call is made. `FriendbotError.retryable` distinguishes a transport
+  failure from a configuration one.
+- Friendbot's `op_already_exists` response means the account is already on
+  the ledger and is reported as `outcome="already_funded"`, not a failure.
+
+The 15-minute balance monitor calls `fund_if_unfunded` automatically when a
+monitored testnet wallet breaches its threshold.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `STELLAR_FRIENDBOT_ENABLED` | `true` | Master switch |
+| `STELLAR_FRIENDBOT_URL` | *(derived)* | Override the faucet URL |
+| `STELLAR_FRIENDBOT_TIMEOUT_SECONDS` | `30` | Faucet request timeout |
+
+### 2. SLA result ID transaction memos
+
+`app/services/stellar/memo.py`
+
+Every settlement transaction carries the SLA result it pays out for, so an
+auditor can walk from a ledger entry back to the SLA record.
+
+```python
+from app.services.stellar import build_sla_memo, verify_transaction_memo
+
+memo = build_sla_memo(sla_result.id)        # validated on construction
+builder.add_memo(memo.to_stellar_memo())    # requires stellar-sdk
+...
+verify_transaction_memo(confirmed_tx, memo)  # raises MemoMismatchError
+```
+
+- `build_sla_memo` picks `MEMO_ID` for a numeric SLA result ID (exact, no
+  length limit) and `MEMO_TEXT` (`SLA:<id>`) for UUID-style IDs. Pass
+  `memo_type="text"` or `"id"` to force one.
+- Validation runs *before* the envelope is built: MEMO_TEXT is capped at 28
+  UTF-8 **bytes** and MEMO_ID at the unsigned 64-bit range. A memo rejected
+  here costs nothing; one rejected by Horizon burns a sequence number.
+- `verify_transaction_memo` checks the memo on the confirmed transaction and
+  raises `MemoMismatchError` on a missing, mistyped or mismatched memo.
+  `verify_sla_result_id` is the non-raising form for reconciliation sweeps.
+- `to_stellar_memo()` imports `stellar_sdk` lazily — construction,
+  validation and verification all work without the SDK installed.
+
+### 3. Secret key encryption at rest
+
+`app/services/stellar/keystore.py`
+
+An operator secret key in a plaintext env var is one `cat` away from
+draining the settlement wallet. Keys are stored encrypted and decrypted only
+inside the process, for the duration of a signing call.
+
+```python
+from app.services.stellar import encrypt_secret_key, operator_signing_key
+
+# One-off, to produce the value for STELLAR_OPERATOR_SECRET_ENCRYPTED:
+print(encrypt_secret_key("S..."))
+
+# At signing time — the plaintext is scrubbed when the block exits:
+with operator_signing_key() as secret:
+    transaction.sign(Keypair.from_secret(secret))
+```
+
+- Schemes: `fernet` (default; AES-128-CBC + HMAC-SHA256, via
+  `cryptography.fernet`) and `aesgcm` (AES-256-GCM). Tokens are
+  self-describing (`stellar.v1.<scheme>.<payload>`), so a stored key stays
+  readable after the configured scheme changes.
+- The data key comes from `STELLAR_KEY_ENCRYPTION_KEY` (url-safe base64,
+  32 bytes) or is derived from `SECRET_KEY` with PBKDF2-HMAC-SHA256
+  (480,000 iterations).
+- Both schemes are authenticated: a tampered ciphertext or a wrong key
+  raises `SecretKeyEncryptionError` rather than returning garbage. Error
+  messages never contain key material.
+- `signing_key()` zeroes its plaintext buffer on exit, including when the
+  block raises. `load_operator_secret_token()` fails closed when
+  `STELLAR_OPERATOR_SECRET_ENCRYPTED` is unset — there is no plaintext
+  fallback.
+
+### 4. Wallet balance threshold monitor
+
+`app/services/stellar/balance_monitor.py`
+
+If the settlement wallet runs dry, every SLA payout fails. The
+`monitor-wallet-balances` Celery beat runs every 15 minutes
+(`WALLET_BALANCE_CHECK_INTERVAL_SECONDS=900`) and:
+
+1. reads XLM and the settlement asset (USDC) balance from Horizon;
+2. alerts when XLM < 50 or USDC < $500 — an ERROR log line always, plus a
+   JSON POST to `WALLET_ALERT_WEBHOOK_URL` when configured;
+3. re-funds a drained testnet wallet through Friendbot;
+4. caches the snapshot in Redis (`stellar:wallet:balance:health`, 30-minute
+   TTL) for the health endpoint.
+
+`GET /api/v1/health/detailed` reports the cached snapshot under `wallet`:
+
+```json
+{
+  "status": "ok",
+  "dependencies": { "database": "ok", "redis": "ok", "celery_broker": "ok" },
+  "wallet": {
+    "address": "GA...",
+    "status": "low",
+    "healthy": false,
+    "checked_at": "2026-08-28T12:00:00+00:00",
+    "balances": { "XLM": "12.5000000", "USDC": "900.0000000" },
+    "thresholds": { "XLM": "50.0", "USDC": "500.0" },
+    "breaches": [
+      {"asset_code": "XLM", "balance": "12.5000000", "threshold": "50.0", "shortfall": "37.5000000"}
+    ],
+    "error": null
+  }
+}
+```
+
+The endpoint reads only the cached snapshot — it never calls Horizon on the
+request path — and a low balance does **not** flip the endpoint to 503: the
+API itself is healthy, and the breach is alerted on by the monitor. A
+`status` of `unknown` means no check has been recorded yet (or Horizon was
+unreachable), never that balances are fine.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `WALLET_BALANCE_MONITOR_ENABLED` | `true` | Master switch |
+| `WALLET_BALANCE_CHECK_INTERVAL_SECONDS` | `900` | Beat interval (15 min) |
+| `WALLET_MIN_XLM_BALANCE` | `50` | XLM alert threshold |
+| `WALLET_MIN_USDC_BALANCE` | `500` | Settlement asset alert threshold |
+| `WALLET_MONITOR_ADDRESS` | *(`PAYMENT_FROM_ADDRESS`)* | Wallet to watch |
+| `WALLET_ALERT_WEBHOOK_URL` | *(empty)* | Optional alert sink |

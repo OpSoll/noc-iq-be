@@ -2,11 +2,14 @@
 import asyncio
 import logging
 from celery.exceptions import SoftTimeLimitExceeded
+from app.core.config import settings
 from app.tasks.celery_app import celery_app
 from app.tasks.sla_tasks import DatabaseTask
 from app.db.session import SessionLocal
 from app.repositories.payment_repository import PaymentRepository
 from app.services.contracts.sla_adapter import SLAAdapter
+from app.services.stellar.balance_monitor import wallet_balance_monitor
+from app.services.stellar.friendbot import FriendbotError, friendbot_service
 
 logger = logging.getLogger(__name__)
 
@@ -82,3 +85,46 @@ def verify_payment_transactions(self: DatabaseTask):
 
     finally:
         db.close()
+
+@celery_app.task(
+    name="app.tasks.payment_tasks.monitor_wallet_balances",
+    max_retries=0,
+)
+def monitor_wallet_balances(address: str | None = None) -> dict:
+    """Check the operator wallet balance against its thresholds (every 15 min).
+
+    Alerts when XLM drops below ``WALLET_MIN_XLM_BALANCE`` (50) or the
+    settlement asset below ``WALLET_MIN_USDC_BALANCE`` ($500), and caches the
+    snapshot for ``GET /api/v1/health/detailed``.
+
+    On testnet a wallet emptied by a network reset is additionally re-funded
+    through Friendbot, so payouts recover without operator intervention.
+    """
+    if not settings.WALLET_BALANCE_MONITOR_ENABLED:
+        logger.debug("Wallet balance monitor disabled; skipping check.")
+        return {"status": "disabled"}
+
+    health = asyncio.run(wallet_balance_monitor.run_check(address))
+    summary = health.as_dict()
+
+    if health.breaches and settings.STELLAR_FRIENDBOT_ENABLED and settings.supports_friendbot:
+        summary["friendbot"] = _auto_fund_testnet_wallet(health.address)
+
+    logger.info("Wallet balance check complete | %s", summary)
+    return summary
+
+
+def _auto_fund_testnet_wallet(address: str) -> dict:
+    """Best-effort Friendbot top-up for a drained testnet wallet.
+
+    Funding failures must not fail the monitoring run — the alert has
+    already been raised by the time this is called.
+    """
+    try:
+        result = asyncio.run(friendbot_service.fund_if_unfunded(address))
+        return result.as_dict()
+    except FriendbotError as exc:
+        logger.warning(
+            "Friendbot auto-funding skipped | address=%s reason=%s", address, exc.reason
+        )
+        return {"funded": False, "outcome": "error", "reason": exc.reason}
