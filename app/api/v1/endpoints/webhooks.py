@@ -221,6 +221,7 @@ class WebhookMetadataResponse(BaseModel):
     terminal_status_codes: List[int]
     retry_policy: Dict[str, Any]
     schema_version: str
+    headers: Dict[str, str]  # Documented headers sent with each delivery
 
 
 # Issue #302: Partition metrics schema
@@ -619,6 +620,15 @@ def get_webhook_metadata():
             "max_delay_seconds": settings.WEBHOOK_RETRY_MAX_DELAY_SECONDS,
         },
         schema_version=WEBHOOK_SCHEMA_VERSION,
+        headers={
+            "Content-Type": "application/json",
+            "X-Webhook-Event": "Event type (e.g. sla.violation)",
+            "X-Webhook-Timestamp": "ISO-formatted UTC timestamp",
+            "X-Webhook-Idempotency-Key": "Deterministic key for receiver-side deduplication (constant across retries)",
+            "X-Webhook-Delivery-ID": "Unique UUID per delivery attempt (changes on redelivery)",
+            "X-Webhook-Signature": "HMAC SHA-256 signature (if secret configured)",
+            "X-Webhook-Signature-Version": "Signature algorithm version (if secret configured)",
+        },
     )
 
 

@@ -766,12 +766,20 @@ def create_delivery(
 
 def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_str = delivery.payload
+
+    # Generate a unique delivery_id (UUID) for this specific delivery attempt.
+    # X-Webhook-Delivery-ID changes with each attempt, enabling receivers to
+    # identify duplicate redeliveries of the same underlying event.
+    import uuid as _uuid
+    delivery_id = str(_uuid.uuid4())
+
     headers = _build_headers(
         webhook,
         payload_str,
         delivery.event,
         delivery.signature_version,
         idempotency_key=delivery.idempotency_key,
+        delivery_id=delivery_id,
     )
 
     # Issue #303: SSRF redirect protection - limit redirects
