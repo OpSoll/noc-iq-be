@@ -5,6 +5,12 @@ from typing import Any, Dict, FrozenSet, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
+# Maximum time a transaction can remain unsubmitted (seconds)
+TRANSACTION_TIMEOUT_MAX_SECONDS = 300  # 5 minutes
+# Default expiry window for unconfirmed transactions
+TRANSACTION_EXPIRY_WINDOW_SECONDS = TRANSACTION_TIMEOUT_MAX_SECONDS
+
+
 class RetryClass(str, Enum):
     network = "network"
     rate_limit = "rate_limit"
@@ -74,6 +80,38 @@ def validate_transition(current: str, next_status: str) -> None:
         raise PaymentTransitionError(current=current, next_status=next_status, allowed=allowed)
 
 
+class TimeBounds(BaseModel):
+    """Stellar transaction time bounds for timeout enforcement.
+
+    min_time: Earliest valid submission time (0 = no lower bound).
+    max_time: Latest valid submission time (transaction expires after this).
+    """
+    min_time: int = 0
+    max_time: int = 0
+
+    @classmethod
+    def default_for_transaction(cls, now_utc: Optional[datetime] = None) -> "TimeBounds":
+        """Create default time bounds: min=0, max=now+300s.
+
+        Transactions built with these bounds remain valid for at most 5 minutes
+        and are automatically expired if not submitted within that window.
+        """
+        from datetime import timezone
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        return cls(
+            min_time=0,
+            max_time=int(now_utc.timestamp()) + TRANSACTION_TIMEOUT_MAX_SECONDS,
+        )
+
+    def is_expired(self, now_utc: Optional[datetime] = None) -> bool:
+        """Return True if current time exceeds max_time."""
+        from datetime import timezone
+        if now_utc is None:
+            now_utc = datetime.now(timezone.utc)
+        return int(now_utc.timestamp()) > self.max_time
+
+
 class PaymentTransaction(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -95,6 +133,9 @@ class PaymentTransaction(BaseModel):
                 "dead_letter_reason": None,
                 "dead_lettered_at": None,
                 "residual": 0.0,
+                "time_bounds_min": 0,
+                "time_bounds_max": 1735689600,
+                "fee_re_estimation_pending": False,
             }
         }
     )
@@ -118,6 +159,12 @@ class PaymentTransaction(BaseModel):
     dead_letter_reason: Optional[str] = None
     dead_lettered_at: Optional[datetime] = None
     residual: float = 0.0
+    # Transaction timeout bounds (Stellar time_bounds)
+    time_bounds_min: int = 0
+    time_bounds_max: int = 0
+    # Whether the transaction is pending fee re-estimation after expiry
+    fee_re_estimation_pending: bool = False
+    expired_at: Optional[datetime] = None
 
 
 class PaginatedPayments(BaseModel):

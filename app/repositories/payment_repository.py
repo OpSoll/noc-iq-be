@@ -43,6 +43,10 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         idempotency_key=orm.idempotency_key,
         dead_letter_reason=orm.dead_letter_reason,
         dead_lettered_at=orm.dead_lettered_at,
+        time_bounds_min=getattr(orm, 'time_bounds_min', 0),
+        time_bounds_max=getattr(orm, 'time_bounds_max', 0),
+        fee_re_estimation_pending=bool(getattr(orm, 'fee_re_estimation_pending', 0)),
+        expired_at=getattr(orm, 'expired_at', None),
     )
 
 
@@ -65,6 +69,9 @@ class PaymentRepository:
             created_at=data.created_at,
             confirmed_at=data.confirmed_at,
             idempotency_key=data.idempotency_key,
+            time_bounds_min=data.time_bounds_min,
+            time_bounds_max=data.time_bounds_max,
+            fee_re_estimation_pending=1 if data.fee_re_estimation_pending else 0,
         )
         self.db.add(orm)
         self.db.commit()
@@ -84,6 +91,9 @@ class PaymentRepository:
             outage_id=data.outage_id,
             sla_result_id=data.sla_result_id,
             created_at=data.created_at,
+            time_bounds_min=data.time_bounds_min,
+            time_bounds_max=data.time_bounds_max,
+            fee_re_estimation_pending=1 if data.fee_re_estimation_pending else 0,
         )
         self.db.add(orm)
         self.db.flush()
@@ -279,6 +289,10 @@ class PaymentRepository:
         if existing:
             return existing
 
+        # Set time bounds: min=0, max=now+300s (5 minute timeout)
+        from app.models.payment import TimeBounds
+        time_bounds = TimeBounds.default_for_transaction()
+
         normalized_amount = abs(float(sla_result.amount))
         transaction = PaymentTransaction(
             id=f"pay_{uuid4().hex[:12]}",
@@ -294,6 +308,8 @@ class PaymentRepository:
             created_at=datetime.now(timezone.utc),
             confirmed_at=None,
             idempotency_key=f"sla_result_{sla_result.id}_{sla_result.payment_type}",
+            time_bounds_min=time_bounds.min_time,
+            time_bounds_max=time_bounds.max_time,
         )
         return self.create(transaction)
 
