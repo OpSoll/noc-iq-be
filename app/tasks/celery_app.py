@@ -23,6 +23,7 @@ celery_app = Celery(
         "app.tasks.timeout_guard",
         "app.tasks.dead_letter",
         "app.tasks.worker_health",
+        "app.tasks.payment_tasks",
     ],
 )
 
@@ -51,6 +52,10 @@ celery_app.conf.update(
     result_expires=86400,  # 24 hours
 
     beat_schedule={
+        "verify-payment-transactions": {
+            "task": "app.tasks.payment_tasks.verify_payment_transactions",
+            "schedule": 300.0,  # every 5 minutes
+        },
         "webhook-autoscale-check": {
             "task": "app.tasks.webhook_autoscaler.periodic_autoscale_check",
             "schedule": 30.0,
