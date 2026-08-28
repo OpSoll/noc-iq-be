@@ -22,6 +22,8 @@ class SLACalculator:
             config = SLA_CONFIG[severity]
         
         threshold = config.threshold_minutes
+        asset_code = config.asset_code
+        asset_issuer = config.asset_issuer
 
         # Case 1: SLA violated → penalty
         # Deterministic boundary handling: use >= for violation check to handle exact threshold edges
@@ -41,6 +43,8 @@ class SLACalculator:
                 threshold_source=threshold_source,
                 reason_code="mttr_exceeded",
                 decision_trace=f"MTTR {mttr_minutes} > threshold {threshold} (overtime {overtime} minutes)",
+                asset_code=asset_code,
+                asset_issuer=asset_issuer,
             )
 
         # Case 2: SLA met → reward
@@ -74,4 +78,6 @@ class SLACalculator:
             threshold_source=threshold_source,
             reason_code=reason_code,
             decision_trace=f"MTTR {mttr_minutes} <= threshold {threshold}, performance ratio {performance_ratio}%, rating {rating}",
+            asset_code=asset_code,
+            asset_issuer=asset_issuer,
         )

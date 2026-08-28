@@ -13,6 +13,7 @@ class PaymentTransactionORM(Base):
     type = Column(String(50), nullable=False)
     amount = Column(Float, nullable=False)
     asset_code = Column(String(20), nullable=False)
+    asset_issuer = Column(String(255), nullable=True)
     from_address = Column(String(255), nullable=False)
     to_address = Column(String(255), nullable=False)
     status = Column(String(50), nullable=False, default="pending", index=True)

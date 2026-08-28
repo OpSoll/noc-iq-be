@@ -25,6 +25,9 @@ from app.services.idempotency_service import IdempotencyService
 from app.services.contracts.sla_adapter import check_blockchain_payment_status
 from app.services.audit_log import audit_log
 from app.core.security import get_current_user, require_admin, require_engineer
+from app.services.analytics_exporter import AnalyticsExporter
+from fastapi.responses import StreamingResponse
+import io
 
 router = APIRouter()
 
@@ -139,6 +142,49 @@ def list_payments(
     )
     return _envelope(
         data=PaginatedPayments(items=items, total=total, page=page, page_size=page_size).model_dump(mode="json")
+    )
+
+
+@router.get("/accounting-report")
+def get_accounting_report(
+    format: str = Query(default="csv", regex="^(csv|pdf)$"),
+    date_from: Optional[datetime] = Query(default=None),
+    date_to: Optional[datetime] = Query(default=None),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
+
+    repo = PaymentRepository(db)
+    payments, _ = repo.list(
+        page=1,
+        page_size=10000,  # A large number to get all records for the report
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    exporter = AnalyticsExporter()
+    try:
+        report_data = exporter.export(format, payments, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except NotImplementedError:
+        raise HTTPException(status_code=501, detail="PDF export is not yet implemented.")
+
+    if format == "csv":
+        media_type = "text/csv"
+        file_extension = "csv"
+        content = io.StringIO(report_data)
+    else: # pdf
+        media_type = "application/pdf"
+        file_extension = "pdf"
+        content = io.BytesIO(report_data)
+
+    return StreamingResponse(
+        content,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename=accounting_report_{datetime.utcnow().strftime('%Y%m%d')}.{file_extension}"}
     )
 
 

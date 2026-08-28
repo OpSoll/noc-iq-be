@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
-
+import httpx
 from fastapi import FastAPI
 
+from app.core.config import settings
 from app.db.session import shutdown_db_pool, warmup_db_pool
 from app.core.tracing import init_tracing, shutdown_tracing, instrument_fastapi
 
@@ -64,6 +65,35 @@ def _check_celery() -> None:
         logger.warning("Celery connection check skipped: %s", exc)
 
 
+async def _check_stellar_network() -> None:
+    """Verify that the configured Stellar network matches the Horizon server's network."""
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(settings.horizon_url)
+            resp.raise_for_status()
+            horizon_data = resp.json()
+            horizon_network = horizon_data.get("network_passphrase")
+
+        if not horizon_network:
+            logger.warning("Could not determine Stellar network from Horizon server.")
+            return
+
+        if horizon_network != settings.STELLAR_NETWORK:
+            logger.error(
+                "Stellar network mismatch: HORIZON_URL is for '%s' but STELLAR_NETWORK is set to '%s'",
+                horizon_network,
+                settings.STELLAR_NETWORK,
+            )
+            raise RuntimeError("Stellar network mismatch")
+        else:
+            logger.info("Stellar network check passed: %s", settings.STELLAR_NETWORK)
+
+    except httpx.RequestError as exc:
+        logger.warning("Could not connect to Horizon server for network check: %s", exc)
+    except Exception as exc:
+        logger.warning("Stellar network check skipped: %s", exc)
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # --- startup ---
@@ -73,6 +103,7 @@ async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     warmup_db_pool()
     await _startup_redis()
     _check_celery()
+    await _check_stellar_network()
 
     yield
 
