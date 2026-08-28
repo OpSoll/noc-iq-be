@@ -1,7 +1,7 @@
-from datetime import datetime
-
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
-from sqlalchemy.dialects.postgresql import ARRAY, JSON
+from datetime import datetime, timezone
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, Index
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+from sqlalchemy.orm import validates
 
 from app.db.base import Base
 
@@ -9,25 +9,45 @@ from app.db.base import Base
 class OutageORM(Base):
     __tablename__ = "outages"
 
+    # Issue #515: composite index backing queries that filter open outages by
+    # site ID (see migration 0025_add_outages_site_status_idx).
+    __table_args__ = (
+        Index("ix_outages_site_status_detected", "site_id", "status", "detected_at"),
+    )
+
     id = Column(String, primary_key=True, index=True)
     site_name = Column(String(255), nullable=False)
     site_id = Column(String(255), nullable=True)
     severity = Column(String(50), nullable=False)
     status = Column(String(50), nullable=False, default="open", index=True)
-    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    resolved_at = Column(DateTime, nullable=True)
+    detected_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
     description = Column(Text, nullable=False)
-    affected_services = Column(ARRAY(String), nullable=False, default=list)
+    affected_services = Column(JSON().with_variant(PG_ARRAY(String), "postgresql"), nullable=False, default=list)
     affected_subscribers = Column(Integer, nullable=True)
     assigned_to = Column(String(255), nullable=True)
     created_by = Column(String(255), nullable=True)
     location = Column(JSON, nullable=True)          # {"latitude": float, "longitude": float}
     sla_status = Column(JSON, nullable=True)        # SLAStatus dict
     mttr_minutes = Column(Integer, nullable=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    is_deleted = Column(Boolean, nullable=False, default=False, index=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+
+    @validates("mttr_minutes")
+    def _validate_mttr_minutes(self, key: str, value) -> int:
+        """Reject negative MTTR values before they reach the database.
+
+        Issue #524: ``mttr_minutes`` can be accidentally saved as a negative
+        number when ``resolved_at`` precedes ``detected_at``. Raising here
+        surfaces the bad value at the ORM boundary instead of persisting it.
+        """
+        if value is not None and value < 0:
+            raise ValueError("mttr_minutes must be a non-negative integer")
+        return value
     updated_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=datetime.now(timezone.utc),
+        onupdate=datetime.now(timezone.utc),
     )
