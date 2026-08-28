@@ -383,3 +383,58 @@ def trigger_sla_violation_async(
         raise self.retry(exc=exc)
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Delivery log retention purging                                               #
+# --------------------------------------------------------------------------- #
+
+
+@celery_app.task(
+    name="app.tasks.webhook_tasks.purge_old_webhook_logs",
+)
+def purge_old_webhook_logs() -> Dict[str, Any]:
+    """Periodic Celery beat task: delete webhook delivery logs older than the
+    configured retention period (default 30 days).
+
+    Runs daily via celery_app.conf.beat_schedule. Logs the number of purged
+    rows for operational visibility.
+    """
+    from app.models.webhook import WebhookDelivery
+
+    retention_days = cfg.WEBHOOK_DELIVERY_LOG_RETENTION_DAYS
+    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+
+    db = SessionLocal()
+    try:
+        # Count matching rows before deletion for logging
+        count_result = (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.created_at < cutoff)
+            .count()
+        )
+
+        if count_result == 0:
+            logger.info("purge_old_webhook_logs: no deliveries older than %d days.", retention_days)
+            return {"purged": 0, "retention_days": retention_days}
+
+        # Delete old delivery records
+        result = (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        total_purged = result
+
+        logger.info(
+            "purge_old_webhook_logs: purged %d delivery logs older than %d days (cutoff=%s).",
+            total_purged, retention_days, cutoff.isoformat(),
+        )
+        return {"purged": total_purged, "retention_days": retention_days, "cutoff": cutoff.isoformat()}
+    except Exception as exc:
+        logger.exception("purge_old_webhook_logs failed: %s", exc)
+        db.rollback()
+        return {"purged": 0, "error": str(exc)}
+    finally:
+        db.close()

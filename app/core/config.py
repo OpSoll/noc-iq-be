@@ -168,6 +168,9 @@ class Settings(BaseSettings):
     )
     WEBHOOK_REDACTION_MASK: str = "[REDACTED]"
 
+    # ── Delivery log retention ──────────────────────────────────────────
+    WEBHOOK_DELIVERY_LOG_RETENTION_DAYS: int = 30
+
     # ── BE-W5-044 (#305): SLO metrics & alert thresholds ─────────────────
     WEBHOOK_SLO_SUCCESS_TARGET: float = 0.999
     WEBHOOK_SLO_LATENCY_TARGET_MS: int = 5000
