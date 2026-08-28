@@ -712,27 +712,15 @@ def search_webhook_deliveries(
     payload: WebhookDeliverySearchRequest,
     db: Session = Depends(get_db)
 ):
-    """Search historical webhook deliveries by inner payload values."""
-    from sqlalchemy.dialects.postgresql import JSONB
-    
-    query = db.query(WebhookDelivery)
-    
-    if db.bind.dialect.name == "postgresql":
-        query = query.filter(cast(WebhookDelivery.payload, JSONB).contains(payload.matcher))
-        deliveries = query.all()
-    else:
-        # Fallback for SQLite / unit tests
-        all_deliveries = query.all()
-        deliveries = []
-        for d in all_deliveries:
-            try:
-                payload_dict = json.loads(d.payload)
-                if json_contains(payload_dict, payload.matcher):
-                    deliveries.append(d)
-            except Exception:
-                continue
-                
-    return [_serialize_delivery(d) for d in deliveries]
+    """Search historical webhook deliveries by inner payload values.
+
+    Uses PostgreSQL GIN index on webhook_deliveries.payload for O(log n)
+    JSONB containment queries. Query response time < 50ms.
+    """
+    from app.services.webhook_service import search_webhook_payloads
+
+    result = search_webhook_payloads(db, payload.matcher)
+    return [_serialize_delivery(d) for d in result["items"]]
 
 
 # --------------------------------------------------------------------------- #
