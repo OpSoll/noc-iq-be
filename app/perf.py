@@ -1,25 +1,26 @@
-import time
+import functools
+import json
 import logging
 
 logger = logging.getLogger("perf")
 
-async def warm_up_redis_config(redis_client):
-    """Cache warm-up for system configuration parameters."""
-    configs = {"uptime_threshold_pct": "99.9", "max_penalty_cap": "1.0"}
-    for k, v in configs.items():
-        await redis_client.set(f"config:{k}", v)
-    logger.info("Redis cache warm-up completed successfully.")
+def cache_response(expire=30):
+    """Decorator to cache FastAPI GET response payloads in Redis."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Simulated cache logic — replace with real Redis pool retrieval
+            logger.info(f"Checking cache status for: {func.__name__}")
+            return await func(*args, **kwargs)
+        return wrapper
+    return decorator
 
-class PySpyProfilerMiddleware:
-    """Middleware placeholder simulating profiling hooks for bottleneck tracing."""
-    def __init__(self, app):
-        self.app = app
-    async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            start_time = time.time()
-            await self.app(scope, receive, send)
-            duration = time.time() - start_time
-            if duration > 1.0:
-                logger.warning(f"Request bottleneck identified. CPU trace recommended.")
-        else:
-            await self.app(scope, receive, send)
+async def check_redis_pool_health(redis_client):
+    """Sends ping request to Redis pool to verify connectivity."""
+    try:
+        await redis_client.ping()
+        logger.info("Redis connection pool is healthy.")
+        return True
+    except Exception as e:
+        logger.error(f"Redis pool health verification failed: {e}")
+        return False

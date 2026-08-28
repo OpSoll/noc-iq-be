@@ -1,613 +1,281 @@
-# NOCIQ Backend
+# NOC IQ Backend
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-009688?logo=fastapi)](https://fastapi.tiangolo.com/)
-[![Python](https://img.shields.io/badge/Python-3.9+-3776AB?logo=python)](https://www.python.org/)
-[![Stellar](https://img.shields.io/badge/Stellar-Integrated-7D00FF?logo=stellar)](https://stellar.org/)
+Backend API and integration layer for the NOC IQ system.
 
-> High-performance blockchain-powered REST API for NOCIQ - Network Operations Center Intelligence & Quality with Stellar network integration
+This repository sits in the middle of the 3-repo architecture:
 
-## 🌟 Overview
+- `noc-iq-fe` -> frontend
+- `noc-iq-be` -> backend and integration layer
+- `noc-iq-contracts` -> Soroban smart contracts
 
-NOCIQ Backend is the core API service powering the NOCIQ platform with **Stellar blockchain integration**. Built with FastAPI, it provides robust endpoints for managing network outages, performing analytics, and **automating SLA-based payments** through Soroban smart contracts on the Stellar network.
+System flow:
 
-**🚀 Stellar Features**: Automated penalty/reward calculations, instant cross-border payments, smart contract execution, and immutable audit trails.
+`User -> FE -> BE -> Contracts -> BE -> FE`
 
-**Frontend Repository:** [noc-iq-fe](https://github.com/OpSoll/noc-iq-fe)  
-**Smart Contracts:** [Soroban SLA Calculator](https://github.com/OpSoll/noc-iq-contracts)  
-**API Documentation:** Available at `/docs` when running
+Important rule:
 
-## ✨ Key Features
+- the frontend does not call contracts directly
+- the backend is the bridge between UI and contract execution
 
-### 🔌 RESTful API
-- **Fast & Async**: Built on FastAPI with async/await support
-- **Auto-generated Docs**: Interactive Swagger UI and ReDoc
-- **Type Safety**: Pydantic models for request/response validation
-- **CORS Support**: Configured for cross-origin requests
-- **Rate Limiting**: Protect against abuse
+## Overview
 
-### 💰 Blockchain Integration (Stellar)
-- **Smart Contract Integration**: Soroban-powered SLA calculations
-- **Automated Payments**: Instant penalty/reward processing via Stellar
-- **Wallet Management**: Create and manage Stellar wallets for users/organizations
-- **Transaction Monitoring**: Real-time payment status tracking
-- **Multi-Asset Support**: USDC (payments), NOCIQ tokens (rewards), XLM (fees)
-- **Immutable Audit Trails**: Store RCA hashes on-chain
+`noc-iq-be` is a FastAPI application responsible for:
 
-### 📊 Outage Management
-- CRUD operations for network outages
-- Advanced filtering and search
-- Bulk import/export (CSV, JSON)
-- Automated report generation
-- **NEW:** Real-time SLA status calculation
-- **NEW:** Automatic payment trigger on outage resolution
+- managing outages
+- computing and storing SLA results
+- exposing aggregation and audit endpoints
+- acting as the future bridge to Soroban contracts
 
-### 🎯 Root Cause Analysis (RCA)
-- Structured RCA tracking
-- Categorization and tagging
-- Historical analysis
-- **NEW:** Blockchain-backed RCA hash storage
-- Pattern recognition
+As of the current stabilized baseline, the backend is strongest in the outage and SLA domains. Other domains are now routed, but not all of them are equally production-ready.
 
-### 📈 Analytics Engine
-- MTTR (Mean Time To Repair) calculations
-- Site-level performance metrics
-- **NEW:** SLA compliance reporting
-- **NEW:** Payment analytics and forecasting
-- Trend analysis
-- Custom report generation
+## Current Stack
 
-### 🔐 Authentication & Security
-- Firebase Authentication integration
-- JWT token validation
-- Role-based access control (RBAC)
-- **NEW:** Stellar wallet binding per user
-- API rate limiting
-- Secure key management for blockchain operations
+- Python
+- FastAPI
+- SQLAlchemy
+- PostgreSQL
+- Alembic
+- Pydantic Settings
+- Celery
+- HTTPX
 
-## 🛠️ Technology Stack
+Dependencies are declared in [requirements.txt](requirements.txt).
 
-| Category | Technologies |
-|----------|-------------|
-| **Framework** | FastAPI 0.109+ |
-| **Language** | Python 3.9+ |
-| **Database** | Google Firestore (NoSQL) |
-| **Authentication** | Firebase Admin SDK |
-| **Blockchain** | ⭐ **Stellar SDK (Python)**, Soroban Client |
-| **Data Processing** | Pandas, NumPy |
-| **Visualization** | Matplotlib, Seaborn, Plotly |
-| **Mapping** | Folium |
-| **Validation** | Pydantic |
-| **ASGI Server** | Uvicorn |
-| **Testing** | Pytest, pytest-asyncio |
-| **Documentation** | Swagger UI, ReDoc |
+## Active Runtime Surface
 
-## 🚀 Getting Started
+The app entrypoint is [app/main.py](app/main.py).
 
-### Prerequisites
+Current active routes are wired through [app/api/v1/router.py](app/api/v1/router.py):
 
-- **Python**: 3.9 or higher ([Download](https://www.python.org/downloads/))
-- **pip**: Python package installer
-- **Git**: For version control
-- **Firebase Project**: For Firestore and Authentication
-- **Stellar Account**: For blockchain operations ([Create testnet account](https://laboratory.stellar.org/#account-creator?network=test))
-- **Virtual Environment**: Recommended (venv or conda)
+- `/health`
+- `/api/v1/health/detailed`
+- `/metrics`
+- `/api/v1/audit`
+- `/api/v1/jobs`
+- `/api/v1/outages`
+- `/api/v1/sla`
+- `/api/v1/sla/disputes`
+- `/api/v1/auth`
+- `/api/v1/payments`
+- `/api/v1/webhooks`
+- `/api/v1/wallets`
 
-### Installation
+Module maturity on the routed runtime:
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/OpSoll/noc-iq-be.git
-   cd noc-iq-be
-   ```
+- strongest and most integration-focused: `outages`, `sla`, `audit`
+- active and functional with lighter implementations: `auth`, `payments`, `wallets`
+- active but operationally dependent on database or worker infrastructure: `jobs`, `webhooks`, `sla disputes`
 
-2. **Create a virtual environment**
-   ```bash
-   # Using venv
-   python -m venv venv
-   
-   # Activate virtual environment
-   # On Windows:
-   venv\Scripts\activate
-   # On macOS/Linux:
-   source venv/bin/activate
-   ```
+Dormant or contributor-only paths:
 
-3. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+- `app/services/outage_store.py` is a legacy helper and not part of the routed runtime
+- local task and webhook support still depend on optional infrastructure like Redis and Celery for full behavior
+- the backend contains both a local SLA execution path and a contract adapter path; `CONTRACT_EXECUTION_MODE` determines which bridge is active at runtime
 
-4. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   ```
+## Outage And SLA Flow
 
-   Edit `.env` with your configuration:
-   ```env
-   # Firebase Configuration
-   FIREBASE_PROJECT_ID=your_project_id
-   FIREBASE_PRIVATE_KEY_ID=your_private_key_id
-   FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-   FIREBASE_CLIENT_EMAIL=your_service_account@project.iam.gserviceaccount.com
-   FIREBASE_CLIENT_ID=your_client_id
-   
-   # Application Settings
-   APP_ENV=development
-   DEBUG=True
-   HOST=0.0.0.0
-   PORT=8000
-   
-   # CORS Settings
-   ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
-   
-   # API Configuration
-   API_V1_PREFIX=/api/v1
-   PROJECT_NAME=NOCIQ API
-   
-   # Rate Limiting
-   RATE_LIMIT_PER_MINUTE=60
-   
-   # Stellar Configuration 🆕
-   STELLAR_NETWORK=testnet
-   STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
-   STELLAR_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
-   
-   # Stellar Wallet Keys 🆕
-   STELLAR_POOL_SECRET_KEY=S...  # Pool wallet secret (keep secure!)
-   STELLAR_POOL_PUBLIC_KEY=G...  # Pool wallet public key
-   
-   # Smart Contract Addresses 🆕
-   SLA_CONTRACT_ID=C...  # Deployed SLA calculator contract ID
-   USDC_TOKEN_ADDRESS=C...  # USDC token contract address
-   NOCIQ_TOKEN_ADDRESS=C...  # NOCIQ token contract address
-   
-   # Payment Settings 🆕
-   AUTO_PAYMENT_ENABLED=true
-   MAX_AUTO_PAYMENT_AMOUNT=10000  # Max auto-payment in USDC
-   PAYMENT_APPROVAL_THRESHOLD=5000  # Require approval above this
-   ```
+The current working backend flow is:
 
-5. **Initialize the database** (if required)
-   ```bash
-   python scripts/init_db.py
-   ```
+1. create or update an outage
+2. resolve the outage with `mttr_minutes`
+3. calculate SLA in the backend
+4. persist the resulting SLA record
+5. return the outage and SLA result to the frontend
 
-6. **Deploy Soroban contracts** (first time setup)
-   ```bash
-   # Navigate to contracts directory
-   cd contracts
-   
-   # Build contracts
-   cargo build --target wasm32-unknown-unknown --release
-   
-   # Deploy to testnet
-   soroban contract deploy \
-     --wasm target/wasm32-unknown-unknown/release/sla_calculator.wasm \
-     --network testnet
-   
-   # Copy the contract ID to your .env file
-   ```
+Key files:
 
-7. **Run the development server**
-   ```bash
-   uvicorn main:app --reload --host 0.0.0.0 --port 8000
-   ```
+- `app/api/v1/endpoints/outages.py`
+- `app/api/v1/endpoints/sla.py`
+- `app/repositories/outage_repository.py`
+- `app/repositories/sla_repository.py`
+- `app/services/sla/sla_calculator.py`
+- `app/services/sla/config.py`
 
-   The API will be available at:
-   - **API**: `http://localhost:8000`
-   - **Interactive Docs**: `http://localhost:8000/docs`
-   - **ReDoc**: `http://localhost:8000/redoc`
+The backend now includes both a local SLA calculator and a contract adapter surface. By default it uses the local adapter mode, but the runtime is structured so contract-backed execution can be enabled through configuration.
 
-### Quick Test
+## Project Structure
 
-```bash
-# Check API health
-curl http://localhost:8000/health
-
-# Expected response:
-# {"status": "healthy", "version": "1.0.0", "stellar_connected": true}
-
-# Test Stellar connection 🆕
-curl http://localhost:8000/api/v1/stellar/status
-
-# Expected response:
-# {
-#   "network": "testnet",
-#   "horizon_url": "https://horizon-testnet.stellar.org",
-#   "pool_address": "G...",
-#   "pool_balance_xlm": 10000.0,
-#   "pool_balance_usdc": 50000.0
-# }
-```
-
-## 📁 Project Structure
-
-```
+```text
 noc-iq-be/
+├── alembic/                 # database migration config and versions
 ├── app/
-│   ├── api/              # API route handlers
-│   │   ├── v1/          # API version 1
-│   │   │   ├── endpoints/
-│   │   │   │   ├── outages.py
-│   │   │   │   ├── rca.py
-│   │   │   │   ├── analytics.py
-│   │   │   │   ├── reports.py
-│   │   │   │   ├── auth.py
-│   │   │   │   ├── stellar_payments.py  # 🆕 Stellar payments
-│   │   │   │   ├── wallets.py           # 🆕 Wallet management
-│   │   │   │   └── sla.py               # 🆕 SLA management
-│   │   │   └── router.py
-│   │   └── deps.py      # Dependencies (auth, db)
-│   ├── core/            # Core application logic
-│   │   ├── config.py    # Configuration settings
-│   │   ├── security.py  # Security utilities
-│   │   └── exceptions.py
-│   ├── models/          # Pydantic models
-│   │   ├── outage.py
-│   │   ├── rca.py
-│   │   ├── user.py
-│   │   ├── response.py
-│   │   ├── stellar.py           # 🆕 Stellar models
-│   │   └── payment.py           # 🆕 Payment models
-│   ├── services/        # Business logic
-│   │   ├── outage_service.py
-│   │   ├── rca_service.py
-│   │   ├── analytics_service.py
-│   │   ├── report_service.py
-│   │   ├── stellar/             # 🆕 Stellar services
-│   │   │   ├── stellar_service.py
-│   │   │   ├── payment_service.py
-│   │   │   ├── wallet_service.py
-│   │   │   ├── soroban_service.py
-│   │   │   └── token_service.py
-│   │   └── sla/                 # 🆕 SLA services
-│   │       ├── sla_calculator.py
-│   │       ├── sla_monitor.py
-│   │       └── penalty_reward_engine.py
-│   ├── db/              # Database utilities
-│   │   ├── firestore.py
-│   │   └── repositories/
-│   ├── utils/           # Utility functions
-│   │   ├── date_utils.py
-│   │   ├── export_utils.py
-│   │   ├── validation.py
-│   │   └── stellar_utils.py     # 🆕 Stellar helpers
-│   └── middleware/      # Custom middleware
-│       ├── auth.py
-│       ├── cors.py
-│       └── rate_limit.py
-├── config/              # Configuration files
-│   └── firebase-credentials.json
-├── contracts/           # 🆕 Soroban smart contracts
-│   ├── sla_calculator/
-│   ├── payment_escrow/
-│   └── multi_party_settlement/
-├── tests/               # Test suite
-│   ├── unit/
-│   ├── integration/
-│   ├── stellar/         # 🆕 Stellar integration tests
-│   └── conftest.py
-├── scripts/             # Utility scripts
-│   ├── init_db.py
-│   ├── seed_data.py
-│   └── deploy_contracts.sh  # 🆕 Contract deployment
-├── .env.example         # Environment variables template
-├── .gitignore
-├── main.py              # Application entry point
-├── requirements.txt     # Python dependencies
+│   ├── api/v1/endpoints/    # FastAPI route handlers
+│   ├── core/                # settings and application config
+│   ├── db/                  # SQLAlchemy base and session setup
+│   ├── models/              # Pydantic and ORM models
+│   ├── repositories/        # DB access layer
+│   ├── services/            # domain logic and utilities
+│   ├── tasks/               # Celery-related modules
+│   └── utils/               # helpers such as exporters
+├── docs/                    # project and integration context
+├── requirements.txt
 └── README.md
 ```
 
-## 🔌 API Endpoints
+## Local Setup
 
-### Authentication
-- `POST /api/v1/auth/login` - User login
-- `POST /api/v1/auth/register` - User registration
-- `POST /api/v1/auth/refresh` - Refresh access token
-- `POST /api/v1/auth/logout` - User logout
+### Prerequisites
 
-### Outages
-- `GET /api/v1/outages` - List all outages (with filters)
-- `GET /api/v1/outages/{id}` - Get outage by ID
-- `POST /api/v1/outages` - Create new outage
-- `PUT /api/v1/outages/{id}` - Update outage
-- `DELETE /api/v1/outages/{id}` - Delete outage
-- `POST /api/v1/outages/bulk-import` - Import multiple outages
-- `GET /api/v1/outages/export` - Export outages (CSV/JSON)
+- Python 3.11+ recommended
+- PostgreSQL
+- pip
+- virtual environment support
 
-### SLA Management 🆕
-- `GET /api/v1/sla/status/{outage_id}` - Get SLA status
-- `POST /api/v1/sla/calculate` - Calculate SLA for resolved outage
-- `POST /api/v1/sla/execute-payment` - Execute SLA-based payment
-- `GET /api/v1/sla/configs` - Get SLA configurations
-- `PUT /api/v1/sla/configs` - Update SLA configuration (admin)
-
-### Stellar Payments 🆕
-- `POST /api/v1/payments/process-sla` - Process SLA payment
-- `GET /api/v1/payments/history` - Get payment history
-- `GET /api/v1/payments/{tx_hash}` - Get payment details
-- `POST /api/v1/payments/manual` - Manual payment (admin)
-- `GET /api/v1/payments/pending` - Get pending payments
-
-### Wallet Management 🆕
-- `POST /api/v1/wallets/create` - Create Stellar wallet
-- `GET /api/v1/wallets/{user_id}` - Get wallet details
-- `GET /api/v1/wallets/{address}/balance` - Get wallet balance
-- `POST /api/v1/wallets/{address}/fund` - Fund wallet (testnet)
-
-### Smart Contracts 🆕
-- `POST /api/v1/contracts/invoke` - Invoke Soroban contract
-- `GET /api/v1/contracts/sla/result/{outage_id}` - Get contract result
-- `GET /api/v1/stellar/status` - Get Stellar network status
-
-### Root Cause Analysis (RCA)
-- `GET /api/v1/rca` - List all RCA records
-- `GET /api/v1/rca/{id}` - Get RCA by ID
-- `POST /api/v1/rca` - Create RCA record
-- `PUT /api/v1/rca/{id}` - Update RCA record
-- `DELETE /api/v1/rca/{id}` - Delete RCA record
-- `POST /api/v1/rca/{id}/store-hash` - 🆕 Store RCA hash on blockchain
-
-### Analytics
-- `GET /api/v1/analytics/mttr` - Calculate MTTR metrics
-- `GET /api/v1/analytics/trends` - Get outage trends
-- `GET /api/v1/analytics/site-performance` - Site-level metrics
-- `GET /api/v1/analytics/heatmap` - Generate heatmap data
-- `GET /api/v1/analytics/dashboard` - Dashboard statistics
-- `GET /api/v1/analytics/payments` - 🆕 Payment analytics
-
-### Reports
-- `POST /api/v1/reports/generate` - Generate custom report
-- `GET /api/v1/reports/{id}` - Download report
-- `GET /api/v1/reports/whatsapp/{id}` - Get WhatsApp-formatted report
-
-### System
-- `GET /health` - Health check
-- `GET /` - API information
-
-**Full API documentation available at `/docs` when the server is running.**
-
-## 🧪 Testing
+### Install
 
 ```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=app --cov-report=html
-
-# Run specific test file
-pytest tests/unit/test_outage_service.py
-
-# Run Stellar integration tests 🆕
-pytest tests/stellar/
-
-# Run with verbose output
-pytest -v
-
-# Run only integration tests
-pytest tests/integration/
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### Stellar Testing on Testnet
+### Configure Environment
 
-```python
-# tests/stellar/test_sla_payment.py
-import pytest
-from app.services.stellar.payment_service import PaymentService
-
-@pytest.mark.asyncio
-async def test_sla_payment_flow():
-    """Test complete SLA payment flow on Stellar testnet"""
-    service = PaymentService(network="testnet")
-    
-    # Create test outage
-    outage = {
-        "severity": "critical",
-        "mttr_minutes": 25,  # Over 15 min threshold
-    }
-    
-    # Calculate SLA
-    sla_result = await service.calculate_sla(outage)
-    assert sla_result["status"] == "violated"
-    assert sla_result["penalty_amount"] > 0
-    
-    # Execute payment (on testnet)
-    payment = await service.execute_payment(sla_result)
-    assert payment["tx_hash"] is not None
-    assert payment["status"] == "confirmed"
-```
-
-## 🔧 Development
-
-### Code Style
-
-We follow PEP 8 and use the following tools:
+Create a `.env` file in the repo root using `.env.example` as a template.
 
 ```bash
-# Format code with black
-black app/
-
-# Sort imports
-isort app/
-
-# Lint with flake8
-flake8 app/
-
-# Type checking with mypy
-mypy app/
+cp .env.example .env
+# Edit .env with your actual configuration values
 ```
 
-## 📦 Dependencies
+**SECURITY WARNING**: Never commit `.env` files to version control. The `.env.example` file shows the required variables with placeholder values.
 
-Key dependencies in `requirements.txt`:
+Startup validation fails fast if critical settings are malformed. In particular:
 
-```txt
-# Core
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-pydantic>=2.5.0
+- `API_V1_PREFIX` must start with `/`
+- `DATABASE_URL` must include a URL scheme
+- `ALLOWED_ORIGINS` must be valid `http` or `https` origins
+- `STELLAR_NETWORK` and `CONTRACT_EXECUTION_MODE` must be supported values
+- when `CELERY_TASK_ALWAYS_EAGER=false`, both Celery URLs must be present
 
-# Firebase
-firebase-admin>=6.4.0
-
-# Data Processing
-pandas>=2.2.0
-numpy>=1.26.0
-
-# Visualization
-matplotlib>=3.8.0
-seaborn>=0.13.0
-plotly>=5.18.0
-folium>=0.15.0
-
-# Stellar Integration 🆕
-stellar-sdk>=9.1.0
-soroban-client>=1.0.0
-
-# Authentication & Security
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
-python-dotenv>=1.0.0
-
-# Testing
-pytest>=7.4.0
-pytest-asyncio>=0.23.0
-pytest-cov>=4.1.0
-httpx>=0.26.0
-```
-
-## 🚀 Deployment
-
-### Using Docker (Recommended)
-
-```dockerfile
-# Dockerfile
-FROM python:3.11-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY . .
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
+### Run Migrations
 
 ```bash
-# Build image
-docker build -t nociq-backend .
-
-# Run container
-docker run -d -p 8000:8000 --env-file .env nociq-backend
+alembic upgrade head
 ```
 
-## 🤝 Contributing
+### Start The API
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md).
+```bash
+uvicorn app.main:app --reload
+```
 
-### Development Workflow
+The backend will be available at:
 
-1. Fork the repository
-2. Create a feature branch: `git checkout -b feature/stellar-escrow`
-3. Write tests for your changes
-4. Make your changes
-5. Run tests: `pytest`
-6. Run linters: `black app/ && flake8 app/`
-7. Commit: `git commit -m "feat: add payment escrow contract"`
-8. Push: `git push origin feature/stellar-escrow`
-9. Open a Pull Request
+- `http://localhost:8000`
+- Swagger docs: `http://localhost:8000/docs`
+- Liveness check: `http://localhost:8000/health/liveness`
+- Readiness check: `http://localhost:8000/health/readiness`
+- Detailed health (DB + Celery broker + worker heartbeat): `http://localhost:8000/api/v1/health/detailed`
+- Prometheus metrics: `http://localhost:8000/metrics`
+- Legacy compatibility: `http://localhost:8000/health`
 
-### Stellar-Specific Guidelines
+## Celery Monitoring
 
-- **Always test on Testnet** before mainnet deployment
-- Include **transaction hashes** in PR descriptions
-- **Document contract changes** in detail
-- Add **unit tests** for all Stellar functions (95%+ coverage)
-- Follow **Stellar SDK best practices**
-- Use proper **key management** (never commit private keys)
+### Flower (web dashboard)
 
-## 📊 Performance
+[Flower](https://flower.readthedocs.io/) provides a real-time web UI for
+inspecting active Celery queues, workers, task rates and failure rates.
 
-- **Requests per second**: 1000+ (with proper setup)
-- **Response time**: <100ms (average for simple queries)
-- **Stellar transaction time**: 3-5 seconds (network confirmation)
-- **Smart contract execution**: <1 second
-- **Concurrent connections**: Handles high load with async/await
+Start it with Docker Compose:
 
-## 🔐 Security
+```bash
+docker compose up -d flower
+```
 
-- JWT token authentication
-- Password hashing with bcrypt
-- CORS protection
-- Rate limiting
-- Input validation with Pydantic
-- **Secure key storage** for Stellar wallets (AWS Secrets Manager/KMS)
-- **Multi-signature support** for high-value transactions
-- **Transaction validation** before execution
-- Regular dependency updates
+The dashboard is exposed at `http://localhost:5555` and protected by basic
+auth. Credentials come from the `FLOWER_USER` / `FLOWER_PASSWORD` environment
+variables (defaults: `admin` / `changeme` — change them in production). The
+port is configurable via `FLOWER_PORT`.
 
+### Prometheus metrics
 
-## 🐛 Bug Reports & Feature Requests
+Celery task execution metrics are exported on the `/metrics` endpoint
+(Prometheus text format):
 
-[Open an issue](https://github.com/OpSoll/noc-iq-be/issues/new) with:
-- Clear description
-- Steps to reproduce (for bugs)
-- Expected vs actual behavior
-- Request/response examples
-- For Stellar issues: Include transaction hash and network
-- Environment details (Python version, OS, etc.)
+- `celery_tasks_total` — total number of Celery tasks that started
+- `celery_task_runtime_seconds` — histogram of task runtimes
+- `celery_tasks_failed` — total number of failed Celery tasks
 
-## 📚 Documentation
+### Worker heartbeat monitor
 
-- [API Documentation](docs/API.md) - Detailed endpoint descriptions
-- [Stellar Integration Guide](docs/STELLAR_INTEGRATION.md) 🆕
-- [Smart Contract Documentation](docs/SMART_CONTRACTS.md) 🆕
-- [Database Schema](docs/DATABASE.md) - Firestore collections structure
-- [Development Guide](docs/DEVELOPMENT.md) - Setup and workflows
-- [Deployment Guide](docs/DEPLOYMENT.md) - Production deployment
-- [Architecture](docs/ARCHITECTURE.md) - System design
+The `ping_celery_workers` beat task runs every 60 seconds and pings the Celery
+worker fleet. If no active worker responds, it raises an error-level log alert
+and (optionally) POSTs a JSON alert to `WORKER_ALERT_WEBHOOK_URL` when that
+variable is configured. The latest worker health status is available at
+`/api/v1/health/detailed` under `dependencies.celery_workers`.
 
-## 📄 License
+## Verification Notes
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+As of the latest stabilization pass:
 
-## 🙏 Acknowledgments
+- Python modules compile cleanly
+- `app.main` imports successfully
+- `/health` returns `200`
 
-- Built with [FastAPI](https://fastapi.tiangolo.com/)
-- Database powered by [Google Firestore](https://firebase.google.com/docs/firestore)
-- Blockchain integration with [Stellar](https://stellar.org/) ⭐
-- Smart contracts on [Soroban](https://soroban.stellar.org/) ⭐
-- Data processing with [Pandas](https://pandas.pydata.org/)
-- Visualization using [Matplotlib](https://matplotlib.org/), [Seaborn](https://seaborn.pydata.org/), and [Plotly](https://plotly.com/)
+To exercise outage and SLA routes meaningfully, you still need a reachable PostgreSQL instance because those routes depend on the database layer.
 
-## 📧 Contact & Support
+A new migration verification helper is available in `tests/test_verify_migrations.py` to validate the Alembic chain and ensure the current database state matches the head revision.
 
-- **Issues**: [GitHub Issues](https://github.com/OpSoll/noc-iq-be/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/OpSoll/noc-iq-be/discussions)
-- **Stellar Questions**: [Stellar Discord](https://discord.gg/stellardev)
+## Current Limitations
 
-## 🗺️ Roadmap
+This backend is stabilized, but not feature-complete.
 
-- [x] Basic Stellar integration
-- [x] SLA smart contract deployment
-- [x] Automated payment processing
-- [x] Wallet management API
-- [ ] Multi-signature transaction support
-- [ ] Payment batching for gas optimization
-- [ ] Advanced smart contract features (escrow, multi-party)
-- [ ] GraphQL API support
-- [ ] Real-time WebSocket notifications
-- [ ] ML-based RCA predictions
-- [ ] Prometheus metrics export
-- [ ] Redis caching layer
-- [ ] Kubernetes deployment configs
+Examples:
 
----
+- `auth` and `wallets` are active but currently backed by lightweight in-memory stores rather than durable identity infrastructure
+- `jobs` and `webhooks` are routed, but they rely on optional worker infrastructure to be fully operational outside eager or local modes
+- the contract path exists, but the default runtime still favors the local adapter mode
+- documentation and contributor expectations should follow the routed API surface, not every helper or legacy module under `app/services`
 
-**Made with ❤️ by the OpSoll Team | Powered by Stellar ⭐**
+## Security Guidelines
 
-**Building on Stellar? Join us in the [Stellar Wave Program](https://www.drips.network/wave/stellar)!**
+### For Contributors
+
+**NEVER commit sensitive information**:
+- API keys, secret keys, or passwords
+- Private keys for any blockchain network
+- Database connection strings with credentials
+- JWT secrets or encryption keys
+- Personal access tokens
+
+**ALWAYS use environment variables** for:
+- Database credentials
+- API keys and secrets
+- Blockchain private keys
+- JWT signing secrets
+- External service credentials
+
+**Documentation examples** should:
+- Use placeholder values clearly marked as examples
+- Never include real credentials or keys
+- Include security warnings where sensitive operations are discussed
+- Show secure patterns (environment variables, secure key management)
+
+### Environment Variables
+
+The application uses the following sensitive environment variables:
+
+```env
+# Database
+DATABASE_URL=postgresql://user:password@localhost:5432/nociq
+
+# Authentication
+JWT_SECRET_KEY=your-jwt-secret-here
+
+# Stellar Blockchain (if enabled)
+STELLAR_POOL_SECRET_KEY=your-stellar-secret-key-here
+
+# External Services
+REDIS_URL=redis://user:password@localhost:6379
+CELERY_BROKER_URL=redis://user:password@localhost:6379/0
+```
+
+**Never commit `.env` files** to version control. Use `.env.example` for documentation.
+
+### Reporting Security Issues
+
+If you discover a security vulnerability:
+1. Do not create a public issue
+2. Email security@noc-iq.com with details
+3. Allow time for the issue to be addressed before public disclosure
