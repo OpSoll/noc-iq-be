@@ -201,6 +201,11 @@ class WebhookReplayRequest(BaseModel):
     limit: int = 50
 
 
+class WebhookDeliverySearchRequest(BaseModel):
+    matcher: Dict[str, Any]
+
+
+
 class WebhookReplayResponse(BaseModel):
     replayed_count: int
     message: str
@@ -232,6 +237,11 @@ class WebhookSLOMetricsResponse(BaseModel):
     burn_indicators: Dict[str, Any]
     per_event: Dict[str, Any]
     per_endpoint: Dict[str, Any]
+
+
+class WebhookDeliveryTimelineResponse(BaseModel):
+    """Normalized audit timeline for a webhook delivery (BE-W5-039)."""
+    timeline: List[Dict[str, Any]]
 
 
 # --------------------------------------------------------------------------- #
@@ -351,7 +361,7 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depend
     return _serialize_webhook(webhook)
 
 
-@router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
     # Invalidate cache before deletion
@@ -625,7 +635,7 @@ def get_webhook_slo_metrics():
 # Issue #300 (BE-W5-039): Webhook delivery audit timeline
 # --------------------------------------------------------------------------- #
 
-@router.get("/{webhook_id}/deliveries/{delivery_id}/timeline")
+@router.get("/{webhook_id}/deliveries/{delivery_id}/timeline", response_model=WebhookDeliveryTimelineResponse)
 def get_webhook_delivery_timeline(
     webhook_id: UUID,
     delivery_id: UUID,
@@ -658,3 +668,52 @@ def get_webhook_delivery_timeline(
         })
         
     return {"timeline": normalized_timeline}
+
+
+def json_contains(target: Any, candidate: Any) -> bool:
+    """Check if target contains candidate (emulating Postgres @> operator)."""
+    if isinstance(candidate, dict):
+        if not isinstance(target, dict):
+            return False
+        return all(
+            k in target and json_contains(target[k], v)
+            for k, v in candidate.items()
+        )
+    elif isinstance(candidate, list):
+        if not isinstance(target, list):
+            return False
+        return all(
+            any(json_contains(t_item, c_item) for t_item in target)
+            for c_item in candidate
+        )
+    else:
+        return target == candidate
+
+
+@router.post("/deliveries/search", response_model=List[WebhookDeliveryResponse])
+def search_webhook_deliveries(
+    payload: WebhookDeliverySearchRequest,
+    db: Session = Depends(get_db)
+):
+    """Search historical webhook deliveries by inner payload values."""
+    from sqlalchemy.dialects.postgresql import JSONB
+    
+    query = db.query(WebhookDelivery)
+    
+    if db.bind.dialect.name == "postgresql":
+        query = query.filter(cast(WebhookDelivery.payload, JSONB).contains(payload.matcher))
+        deliveries = query.all()
+    else:
+        # Fallback for SQLite / unit tests
+        all_deliveries = query.all()
+        deliveries = []
+        for d in all_deliveries:
+            try:
+                payload_dict = json.loads(d.payload)
+                if json_contains(payload_dict, payload.matcher):
+                    deliveries.append(d)
+            except Exception:
+                continue
+                
+    return [_serialize_delivery(d) for d in deliveries]
+

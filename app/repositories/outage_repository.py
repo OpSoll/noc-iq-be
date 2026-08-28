@@ -66,11 +66,18 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        page: int = 1,
-        page_size: int = 20,
+        limit: int = 50,
+        offset: int = 0,
         sort_by: OutageSortField = OutageSortField.detected_at,
         sort_direction: OutageSortDirection = OutageSortDirection.desc,
     ) -> dict:
+        """Return a paginated page of outages (Issue #500).
+
+        ``limit`` caps the number of rows returned (1-100) and ``offset``
+        skips rows, so callers cannot pull tens of thousands of records in a
+        single request. The total matching count is returned alongside the
+        page so clients can compute pagination metadata.
+        """
         query = self.db.query(OutageORM)
         query = query.filter(OutageORM.is_deleted.is_(False))
 
@@ -97,13 +104,13 @@ class OutageRepository:
         query = query.order_by(direction_fn(sort_column), OutageORM.id.asc())
 
         total = query.count()
-        items = query.offset((page - 1) * page_size).limit(page_size).all()
+        items = query.offset(offset).limit(limit).all()
 
         return {
             "items": [_orm_to_pydantic(o) for o in items],
             "total": total,
-            "page": page,
-            "page_size": page_size,
+            "limit": limit,
+            "offset": offset,
             "sort_by": sort_by.value,
             "sort_direction": sort_direction.value,
         }
@@ -358,6 +365,43 @@ class OutageRepository:
         if orm:
             self.db.delete(orm)
             self.db.commit()
+
+    def bulk_resolve(
+        self,
+        outage_ids: List[str],
+        resolution_notes: str = "",
+        mttr_minutes: Optional[int] = None,
+    ) -> dict:
+        """Resolve multiple outages inside a single transaction (Issue #501).
+
+        Each outage ID is validated (exists, open -> resolved transition)
+        before being updated. Missing or invalid IDs are collected as
+        failures without aborting the batch. No commit is issued here - the
+        caller commits once so the whole batch is atomic: either every valid
+        outage is resolved or none are.
+
+        Returns ``{"succeeded": [ids], "failed": [{"id", "reason"}]}``.
+        """
+        succeeded: List[str] = []
+        failed: List[dict] = []
+        for outage_id in outage_ids:
+            orm = self.get_orm_locked(outage_id)
+            if orm is None:
+                failed.append({"id": outage_id, "reason": "not_found"})
+                continue
+            try:
+                self.validate_status_transition(orm.status, OutageStatus.resolved.value)
+            except ValueError as exc:
+                failed.append({"id": outage_id, "reason": str(exc)})
+                continue
+            orm.status = OutageStatus.resolved.value
+            orm.resolved_at = datetime.now(timezone.utc)
+            orm.updated_at = datetime.now(timezone.utc)
+            if mttr_minutes is not None:
+                orm.mttr_minutes = mttr_minutes
+            self.db.flush()
+            succeeded.append(outage_id)
+        return {"succeeded": succeeded, "failed": failed}
 
     def resolve(self, outage_id: str, mttr_minutes: int) -> Optional[Outage]:
         orm = self.get_orm_locked(outage_id)

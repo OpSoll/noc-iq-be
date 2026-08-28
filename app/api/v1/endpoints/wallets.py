@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 
 from app.models.wallet import (
     Wallet,
@@ -16,6 +17,17 @@ from app.core.security import require_engineer
 from app.core.dependencies import get_wallet_registry
 
 router = APIRouter()
+
+
+class PingResponse(BaseModel):
+    message: str = Field(..., description="Service liveness message")
+
+
+class WalletCacheMetrics(BaseModel):
+    cache_hits: int = Field(..., description="Number of cache hits")
+    cache_misses: int = Field(..., description="Number of cache misses")
+    lock_acquisitions: int = Field(..., description="Number of cache lock acquisitions")
+    lock_timeouts: int = Field(..., description="Number of cache lock timeouts")
 
 
 @router.post("/create", response_model=WalletCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -58,12 +70,12 @@ def link_wallet(payload: WalletLinkRequest, current_user=Depends(require_enginee
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
 
-@router.get("/ping")
+@router.get("/ping", response_model=PingResponse)
 def wallets_ping():
     return {"message": "wallets ok"}
 
 
-@router.get("/metrics")
+@router.get("/metrics", response_model=WalletCacheMetrics)
 def wallet_cache_metrics():
     return WalletRegistry.get_cache_metrics()
 

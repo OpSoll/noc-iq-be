@@ -8,33 +8,33 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 
 class Location(BaseModel):
-    latitude: float
-    longitude: float
+    latitude: float = Field(..., description="Latitude coordinate of the affected site")
+    longitude: float = Field(..., description="Longitude coordinate of the affected site")
 
 
 class SLAStatus(BaseModel):
-    status: str  # "in_progress", "met", "violated"
-    mttr_minutes: Optional[int] = None
-    threshold_minutes: int
-    time_remaining_minutes: Optional[int] = None
+    status: str = Field(..., description="SLA outcome: in_progress, met, or violated")
+    mttr_minutes: Optional[int] = Field(None, description="Mean time to resolve in minutes")
+    threshold_minutes: int = Field(..., description="SLA threshold in minutes")
+    time_remaining_minutes: Optional[int] = Field(None, description="Minutes remaining before SLA breach (met only)")
 
 
 class Outage(BaseModel):
     id: str = Field(..., description="Unique outage ID")
-    site_name: str
-    site_id: Optional[str] = None
-    severity: str  # critical, high, medium, low
-    status: str  # active, resolved, investigating
-    detected_at: datetime
-    resolved_at: Optional[datetime] = None
-    description: str
-    affected_services: List[str]
-    affected_subscribers: Optional[int] = None
-    assigned_to: Optional[str] = None
-    created_by: Optional[str] = None
-    location: Optional[Location] = None
-    sla_status: Optional[SLAStatus] = None
-    deleted_at: Optional[datetime] = None
+    site_name: str = Field(..., description="Name of the affected site")
+    site_id: Optional[str] = Field(None, description="Identifier of the affected site")
+    severity: str = Field(..., description="Outage severity: critical, high, medium, low")
+    status: str = Field(..., description="Outage status: open, active, investigating, resolved")
+    detected_at: datetime = Field(..., description="Timestamp the outage was detected")
+    resolved_at: Optional[datetime] = Field(None, description="Timestamp the outage was resolved")
+    description: str = Field(..., description="Human-readable description of the outage")
+    affected_services: List[str] = Field(..., description="List of affected service names")
+    affected_subscribers: Optional[int] = Field(None, description="Number of affected subscribers")
+    assigned_to: Optional[str] = Field(None, description="Owner/assignee of the outage")
+    created_by: Optional[str] = Field(None, description="User or system that created the outage")
+    location: Optional[Location] = Field(None, description="Geographic coordinates of the outage")
+    sla_status: Optional[SLAStatus] = Field(None, description="Computed SLA status for the outage")
+    deleted_at: Optional[datetime] = Field(None, description="Timestamp of soft deletion, if any")
 
     @field_validator("detected_at")
     @classmethod
@@ -80,19 +80,43 @@ class PaginatedOutages(BaseModel):
                     }
                 ],
                 "total": 1,
-                "page": 1,
-                "page_size": 20
+                "limit": 50,
+                "offset": 0
             }
         }
     )
 
-    items: List[Outage]
-    total: int
-    page: int
-    page_size: int
-    sort_by: Optional[str] = "detected_at"
-    sort_direction: Optional[str] = "desc"
+    items: List[Outage] = Field(..., description="Outage records for the current page")
+    total: int = Field(..., description="Total number of matching outage records")
+    limit: int = Field(50, description="Maximum number of records returned (1-100)")
+    offset: int = Field(0, ge=0, description="Number of records skipped before this page")
+    sort_by: Optional[str] = Field("detected_at", description="Sort field used for the result set")
+    sort_direction: Optional[str] = Field("desc", description="Sort direction used for the result set")
 
 
 class ResolveOutageRequest(BaseModel):
-    mttr_minutes: int
+    mttr_minutes: int = Field(..., ge=0, description="Mean time to resolve in minutes used for SLA computation")
+
+
+class BulkResolveOutageRequest(BaseModel):
+    outage_ids: List[str] = Field(
+        ..., min_length=1, description="List of outage IDs to resolve in a single transaction"
+    )
+    resolution_notes: str = Field("", description="Optional notes recorded against each resolved outage")
+
+
+class BulkResolveFailure(BaseModel):
+    id: str = Field(..., description="Outage ID that could not be resolved")
+    reason: str = Field(..., description="Machine-readable reason for the failure")
+
+
+class BulkResolveOutageResponse(BaseModel):
+    succeeded: List[str] = Field(..., description="Outage IDs successfully resolved")
+    failed: List[BulkResolveFailure] = Field(
+        default_factory=list, description="Outage IDs that could not be resolved with reasons"
+    )
+    total: int = Field(..., description="Total number of outage IDs requested")
+    success_count: int = Field(..., description="Number of outages successfully resolved")
+    failure_count: int = Field(..., description="Number of outages that failed to resolve")
+    resolution_notes: str = Field("", description="Resolution notes applied to the batch")
+

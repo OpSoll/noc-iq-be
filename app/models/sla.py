@@ -12,18 +12,18 @@ class SLAState(str, Enum):
 
 
 class SLAStatusResponse(BaseModel):
-    outage_id: str
-    state: SLAState
-    mttr_minutes: Optional[int] = None
-    threshold_minutes: int
-    time_remaining_minutes: Optional[int] = None
-    period_start: Optional[str] = None
-    period_end: Optional[str] = None
+    outage_id: str = Field(..., description="Unique outage ID the SLA status belongs to")
+    state: SLAState = Field(..., description="SLA state: in_progress, met, or violated")
+    mttr_minutes: Optional[int] = Field(None, description="Mean time to resolve in minutes")
+    threshold_minutes: int = Field(..., description="SLA threshold in minutes")
+    time_remaining_minutes: Optional[int] = Field(None, description="Minutes remaining before SLA breach (met only)")
+    period_start: Optional[str] = Field(None, description="Start of the SLA evaluation window")
+    period_end: Optional[str] = Field(None, description="End of the SLA evaluation window")
 
 
 class SLAPreviewRequest(BaseModel):
-    severity: Severity
-    mttr_minutes: int
+    severity: Severity = Field(..., description="Outage severity used for the preview calculation")
+    mttr_minutes: int = Field(..., ge=0, description="Mean time to resolve in minutes to preview")
 
 
 class SLAResult(BaseModel):
@@ -59,46 +59,46 @@ class SLAResult(BaseModel):
 
 
 class SLASeverityConfig(BaseModel):
-    threshold_minutes: int = Field(..., ge=0)
-    penalty_per_minute: int = Field(..., ge=0)
-    reward_base: int = Field(..., ge=0)
+    threshold_minutes: int = Field(..., ge=0, description="SLA threshold in minutes for this severity")
+    penalty_per_minute: int = Field(..., ge=0, description="Penalty amount charged per minute over the threshold")
+    reward_base: int = Field(..., ge=0, description="Base reward amount for meeting the SLA")
 
 
 class SLAConfigUpdateRequest(SLASeverityConfig):
-    pass
+    """Update payload for a severity's SLA configuration."""
 
 
 class SLAPerformanceAggregation(BaseModel):
-    total_outages: int = Field(ge=0)
-    violation_rate: float = Field(ge=0.0, le=1.0)
-    avg_mttr: float = Field(ge=0.0)
-    payout_sum: float
+    total_outages: int = Field(ge=0, description="Total outages in the aggregation window")
+    violation_rate: float = Field(ge=0.0, le=1.0, description="Fraction of outages that violated SLA")
+    avg_mttr: float = Field(ge=0.0, description="Average mean-time-to-resolve in minutes")
+    payout_sum: float = Field(..., description="Net payout across the window")
 
 
 class SLADashboardKPI(BaseModel):
-    total_outages: int = Field(ge=0)
-    total_violations: int = Field(ge=0)
-    total_rewards: float = Field(ge=0.0)
-    total_penalties: float = Field(ge=0.0)
-    net_payout: float
+    total_outages: int = Field(ge=0, description="Total outages in the KPI window")
+    total_violations: int = Field(ge=0, description="Total SLA violations in the window")
+    total_rewards: float = Field(ge=0.0, description="Total reward payouts in the window")
+    total_penalties: float = Field(ge=0.0, description="Total penalty payouts in the window")
+    net_payout: float = Field(..., description="Net payout (rewards minus penalties)")
 
 
 class SLATrendPoint(BaseModel):
-    date: str
-    total_outages: int = Field(ge=0)
-    violations: int = Field(ge=0)
-    rewards: float = Field(ge=0.0)
-    penalties: float = Field(ge=0.0)
+    date: str = Field(..., description="Bucket date (ISO format)")
+    total_outages: int = Field(ge=0, description="Outages in the bucket")
+    violations: int = Field(ge=0, description="SLA violations in the bucket")
+    rewards: float = Field(ge=0.0, description="Reward payouts in the bucket")
+    penalties: float = Field(ge=0.0, description="Penalty payouts in the bucket")
 
 
 class SLAAnalyticsSnapshot(BaseModel):
-    id: Optional[int] = None
-    snapshot_key: str
-    total_outages: int = Field(ge=0)
-    total_violations: int = Field(ge=0)
-    total_rewards: float = Field(ge=0.0)
-    total_penalties: float = Field(ge=0.0)
-    net_payout: float
-    avg_mttr: float = Field(ge=0.0)
-    checksum: str
-    created_at: Optional[str] = None
+    id: Optional[int] = Field(None, description="Snapshot row ID")
+    snapshot_key: str = Field(..., description="Key the snapshot was materialized under")
+    total_outages: int = Field(ge=0, description="Total outages captured in the snapshot")
+    total_violations: int = Field(ge=0, description="Total SLA violations captured in the snapshot")
+    total_rewards: float = Field(ge=0.0, description="Total reward payouts captured in the snapshot")
+    total_penalties: float = Field(ge=0.0, description="Total penalty payouts captured in the snapshot")
+    net_payout: float = Field(..., description="Net payout captured in the snapshot")
+    avg_mttr: float = Field(ge=0.0, description="Average mean-time-to-resolve captured in the snapshot")
+    checksum: str = Field(..., description="Integrity checksum over the snapshot payload")
+    created_at: Optional[str] = Field(None, description="Timestamp the snapshot was created")

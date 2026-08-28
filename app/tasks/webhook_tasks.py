@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+import httpx
+
 from app.tasks.celery_app import celery_app, GuardedTask
 from app.core.config import settings as cfg
 from app.db.session import SessionLocal
@@ -81,18 +83,31 @@ class WebhookDatabaseTask(GuardedTask):
                 db.rollback()
 
 
+def _retry_backoff_countdown(retries: int) -> int:
+    """Exponential backoff delay (seconds) for a webhook dispatch retry.
+
+    Matches the 5s, 15s, 45s, ~2m sequence from issue #535:
+    ``5 * 3 ** retries``, capped at ``retry_backoff_max`` (600s).
+    """
+    return min(5 * (3 ** retries), 600)
+
+
 @celery_app.task(
     bind=True,
     name="app.tasks.webhook_tasks.dispatch_webhook_delivery",
+    autoretry_for=(httpx.RequestError,),
+    retry_backoff=True,
+    retry_backoff_max=600,
     max_retries=5,
-    default_retry_delay=30,
-    rate_limit="100/m",  # Issue #532: webhook_dispatch = 100 tasks per minute
+    default_retry_delay=5,
 )
 def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     """Deliver a single WebhookDelivery record asynchronously.
 
     Issue #302: Delivery is dispatched with partition awareness.
     Backpressure is checked at the service layer before each attempt.
+    Issue #535: Failed dispatches are retried with exponential backoff
+    (5s, 15s, 45s, ~2m), capped at 10 minutes.
     """
     db = SessionLocal()
     try:
@@ -103,6 +118,11 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, error_msg)
+
+        # Exponential backoff delay for this retry attempt (5s, 15s, 45s, ~2m),
+        # capped at 600s (10 minutes) to avoid retry storms (issue #535).
+        countdown = _retry_backoff_countdown(self.request.retries)
+        next_retry_eta = datetime.utcnow() + timedelta(seconds=countdown)
 
         # BE-W5-048: Check if retries are exhausted before raising to Celery
         if self.request.retries >= self.max_retries:
@@ -135,8 +155,17 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
                 )
             return {"delivery_id": delivery_id, "dispatched": False, "dead_lettered": True}
 
-        # Log retry attempt if we have retries left
+        # Log retry attempt number and next retry ETA if we have retries left
         if self.request.retries < self.max_retries:
+            logger.warning(
+                "Retrying webhook delivery %s (attempt %d/%d) in %ds "
+                "(next retry ETA: %s).",
+                delivery_id,
+                self.request.retries + 1,
+                self.max_retries,
+                countdown,
+                next_retry_eta.isoformat(),
+            )
             audit_log.log_event(
                 db,
                 event_type="webhook_retried",
@@ -144,10 +173,12 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
                     "delivery_id": delivery_id,
                     "retry_count": self.request.retries + 1,
                     "error": error_msg,
+                    "retry_delay_seconds": countdown,
+                    "next_retry_eta": next_retry_eta.isoformat(),
                 }
             )
 
-        raise self.retry(exc=exc)
+        raise self.retry(exc=exc, countdown=countdown)
     finally:
         db.close()
 

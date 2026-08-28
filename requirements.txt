@@ -17,6 +17,8 @@ pydantic[email]
 
 # Task queue
 celery==5.5.3
+# Celery web monitoring dashboard (issue #534)
+flower==1.2.0
 
 # Redis
 redis>=5.0

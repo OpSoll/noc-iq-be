@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -27,6 +27,7 @@ from app.services.sla_metric_registry import list_metrics
 from app.services.audit_log import audit_log
 from app.models import SLAResult
 from app.utils.cache import TTLCache
+from app.utils.etag import apply_etag
 from app.utils.analytics_exporter import (
     export_dashboard_kpi,
     export_trends,
@@ -41,6 +42,26 @@ router = APIRouter()
 _dashboard_cache: TTLCache = TTLCache(ttl_seconds=30)
 
 
+# --------------------------------------------------------------------------- #
+# Response schemas (Issue #502: explicit OpenAPI response models)             #
+# --------------------------------------------------------------------------- #
+
+class MetricDefinition(BaseModel):
+    """Authoritative formula registry entry for an SLA dashboard KPI."""
+    name: str = Field(..., description="snake_case key used in API responses")
+    description: str = Field(..., description="human-readable formula explanation")
+    inputs: List[str] = Field(..., description="required input field names")
+    unit: str = Field(..., description="measurement unit (%, minutes, count, currency)")
+
+
+class SLASummaryResponse(BaseModel):
+    """Aggregated SLA telemetry summary with an explicit empty-state contract."""
+    success: bool = Field(..., description="Whether the summary was produced successfully")
+    schema_version: str = Field(..., description="Version of the summary payload schema")
+    data: List[Dict[str, Any]] = Field(..., description="Aggregated SLA metric rows")
+    is_empty: bool = Field(..., description="True when no metric rows matched the window")
+
+
 def _invalidate_analytics_cache() -> None:
     """Invalidate all analytics cache keys after a mutating write (#157)."""
     _dashboard_cache.invalidate_prefix("dashboard_kpis_")
@@ -53,22 +74,32 @@ def get_sla_status(
     outage_id: str,
     severity: str,
     mttr_minutes: int,
+    request: Request,
+    response: Response,
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
-    """Get SLA status with consistent response shape (BE-W5-009)."""
+    """Get SLA status with consistent response shape (BE-W5-009).
+
+    Conditional GET support (Issue #503): the response carries an MD5
+    ``ETag`` and returns ``304 Not Modified`` when the client's
+    ``If-None-Match`` header matches, avoiding redundant payload downloads.
+    """
     result = SLACalculator.calculate(
         outage_id=outage_id,
         severity=severity,
         mttr_minutes=mttr_minutes,
     )
-    return SLAStatusResponse(
+    payload = SLAStatusResponse(
         outage_id=outage_id,
         state=SLAState(result.status),
         mttr_minutes=mttr_minutes,
         threshold_minutes=result.threshold_minutes,
         time_remaining_minutes=max(0, result.threshold_minutes - mttr_minutes) if result.status == "met" else 0,
     )
+    if apply_etag(response, request, payload.model_dump(mode="json")) is None:
+        return Response(status_code=304)
+    return payload
 
 
 class SimulateThresholdRequest(BaseModel):
@@ -78,7 +109,7 @@ class SimulateThresholdRequest(BaseModel):
     current_thresholds: Optional[Dict[str, float]] = None
 
 
-@router.post("/simulate")
+@router.post("/simulate", response_model=dict[str, Any])
 def simulate_sla(
     payload: SimulateThresholdRequest,
     current_user=Depends(require_engineer),
@@ -101,10 +132,24 @@ def simulate_sla(
 
 
 @router.get("/calculate", response_model=SLAResult)
-def calculate_sla(outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", current_user=Depends(require_engineer)):
-    """Calculate SLA result for given outage metrics (BE-009)."""
+def calculate_sla(
+    outage_id: str,
+    severity: str,
+    mttr_minutes: int,
+    request: Request,
+    response: Response,
+    current_user=Depends(require_engineer),
+    policy_version: str = "1.0",
+    threshold_source: str = "config",
+):
+    """Calculate SLA result for given outage metrics (BE-009).
+
+    Conditional GET support (Issue #503): the response carries an MD5
+    ``ETag`` and returns ``304 Not Modified`` when the client's
+    ``If-None-Match`` header matches, avoiding redundant payload downloads.
+    """
     try:
-        return SLACalculator.calculate(
+        result = SLACalculator.calculate(
             outage_id=outage_id,
             severity=severity,
             mttr_minutes=mttr_minutes,
@@ -113,18 +158,22 @@ def calculate_sla(outage_id: str, severity: str, mttr_minutes: int, policy_versi
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    if apply_etag(response, request, result.model_dump(mode="json")) is None:
+        return Response(status_code=304)
+    return result
 
 
-@router.post("/preview")
+@router.post("/preview", response_model=SLAResult)
 def preview_sla(payload: SLAPreviewRequest, current_user=Depends(require_engineer)):
     """Preview SLA calculation without persisting (BE-009)."""
-    result = calculate_sla(
-        outage_id="PREVIEW",
-        severity=payload.severity.value,
-        mttr_minutes=payload.mttr_minutes,
-        current_user=current_user,
-    )
-    return result
+    try:
+        return SLACalculator.calculate(
+            outage_id="PREVIEW",
+            severity=payload.severity.value,
+            mttr_minutes=payload.mttr_minutes,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/config", response_model=dict[str, SLASeverityConfig])
@@ -294,7 +343,7 @@ def rebuild_analytics_snapshot(
     return snapshot
 
 
-@router.get("/analytics/snapshot/reconcile")
+@router.get("/analytics/snapshot/reconcile", response_model=dict[str, Any])
 def reconcile_analytics_snapshot(
     snapshot_key: str = Query(default="global"),
     current_user=Depends(require_admin),
@@ -315,7 +364,7 @@ def reconcile_analytics_snapshot(
     return reconciliation
 
 
-@router.get("/analytics/dashboard/export")
+@router.get("/analytics/dashboard/export", response_model=None)
 def export_dashboard_kpis(
     format: str = Query(default="json", description="Export format: json or csv"),
     severity: str | None = Query(default=None),
@@ -343,7 +392,7 @@ def export_dashboard_kpis(
     return exported
 
 
-@router.get("/analytics/trends/export")
+@router.get("/analytics/trends/export", response_model=None)
 def export_sla_trends(
     format: str = Query(default="json", description="Export format: json or csv"),
     days: int = Query(default=7, ge=1, le=365, description="Number of days to export (max 365 for exports)"),
@@ -380,7 +429,7 @@ def export_sla_trends(
     return exported
 
 
-@router.get("/analytics/performance/export")
+@router.get("/analytics/performance/export", response_model=None)
 def export_performance_aggregation_endpoint(
     format: str = Query(default="json", description="Export format: json or csv"),
     start_date: datetime | None = Query(default=None),
@@ -420,7 +469,7 @@ def export_performance_aggregation_endpoint(
     return exported
 
 
-@router.get("/analytics/snapshot/verify")
+@router.get("/analytics/snapshot/verify", response_model=dict[str, Any])
 def verify_snapshot_integrity(
     snapshot_key: str = Query(default="global"),
     current_user=Depends(require_engineer),
@@ -433,7 +482,7 @@ def verify_snapshot_integrity(
         raise HTTPException(status_code=409, detail=result.get("error", "Invalid snapshot"))
     return result
 
-@router.get("/analytics/export")
+@router.get("/analytics/export", response_model=None)
 def export_analytics_summary_endpoint(
     format: str = Query(default="json", description="Export format: json or csv"),
     days: int = Query(default=7, ge=1, le=365, description="Number of days for trends"),
@@ -478,7 +527,7 @@ def export_analytics_summary_endpoint(
     return exported
 
 
-@router.get("/metrics/definitions")
+@router.get("/metrics/definitions", response_model=List[MetricDefinition])
 def get_metric_definitions(current_user=Depends(require_engineer)):
     """Return the authoritative formula registry for all SLA dashboard KPIs (BE-W5-106).
 
@@ -514,7 +563,7 @@ class MockAnalyticsService:
             return []
         return [{"metric": "uptime_percentage", "value": 99.98}]
 
-@router.get("/summary", status_code=status.HTTP_200_OK)
+@router.get("/summary", response_model=SLASummaryResponse, status_code=status.HTTP_200_OK)
 async def get_sla_summary(
     start_time: datetime = Query(...),
     end_time: datetime = Query(...)
