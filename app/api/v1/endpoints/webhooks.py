@@ -234,6 +234,11 @@ class WebhookSLOMetricsResponse(BaseModel):
     per_endpoint: Dict[str, Any]
 
 
+class WebhookDeliveryTimelineResponse(BaseModel):
+    """Normalized audit timeline for a webhook delivery (BE-W5-039)."""
+    timeline: List[Dict[str, Any]]
+
+
 # --------------------------------------------------------------------------- #
 # Helpers                                                                      #
 # --------------------------------------------------------------------------- #
@@ -351,7 +356,7 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depend
     return _serialize_webhook(webhook)
 
 
-@router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{webhook_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_webhook(webhook_id: UUID, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     webhook = _get_webhook_or_404(db, webhook_id)
     # Invalidate cache before deletion
@@ -625,7 +630,7 @@ def get_webhook_slo_metrics():
 # Issue #300 (BE-W5-039): Webhook delivery audit timeline
 # --------------------------------------------------------------------------- #
 
-@router.get("/{webhook_id}/deliveries/{delivery_id}/timeline")
+@router.get("/{webhook_id}/deliveries/{delivery_id}/timeline", response_model=WebhookDeliveryTimelineResponse)
 def get_webhook_delivery_timeline(
     webhook_id: UUID,
     delivery_id: UUID,

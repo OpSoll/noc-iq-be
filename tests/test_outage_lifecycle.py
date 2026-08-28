@@ -68,8 +68,8 @@ class OutageLifecycleTests(unittest.TestCase):
             def __init__(self, db):
                 self.db = db
 
-            def list(self, severity=None, status=None, search=None, start_date=None, end_date=None, page=1, page_size=20, sort_by=None, sort_direction=None):
-                return {"items": [self_outage], "total": 1, "page": page, "page_size": page_size}
+            def list(self, severity=None, status=None, search=None, start_date=None, end_date=None, limit=50, offset=0, sort_by=None, sort_direction=None):
+                return {"items": [self_outage], "total": 1, "limit": limit, "offset": offset}
 
         self_outage = self.outage
         with patch("app.api.v1.endpoints.outages.OutageRepository", FakeOutageRepo):
