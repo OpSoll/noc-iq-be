@@ -2,7 +2,9 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from datetime import datetime
 from sqlalchemy import text
 from redis import Redis
@@ -89,6 +91,31 @@ app = FastAPI(
 app.add_middleware(PoolSaturationMiddleware)
 
 app.add_middleware(CorrelationMiddleware)
+
+
+# Issue #504: standardize Pydantic request validation error responses to match
+# the custom backend error schema.
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return a consistent error envelope for request validation failures.
+
+    Schema: ``{"code": "VALIDATION_ERROR", "message": "...", "details": [...]}``.
+    """
+    details = []
+    for error in exc.errors():
+        details.append({
+            "loc": list(error.get("loc", [])),
+            "msg": error.get("msg", ""),
+            "type": error.get("type", ""),
+        })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "VALIDATION_ERROR",
+            "message": "Request validation failed",
+            "details": details,
+        },
+    )
 
 app.add_middleware(LatencyLoggingMiddleware)
 
