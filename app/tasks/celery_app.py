@@ -22,6 +22,7 @@ celery_app = Celery(
         "app.tasks.idempotency_tasks",
         "app.tasks.timeout_guard",
         "app.tasks.dead_letter",
+        "app.tasks.worker_health",
     ],
 )
 
@@ -77,6 +78,12 @@ celery_app.conf.update(
             "task": "app.tasks.timeout_guard.revoke_hung_tasks",
             "schedule": 60.0,
         },
+        # Issue #536: worker heartbeat monitor — pings the worker fleet every
+        # 60s, persists status to Redis, alerts when no worker responds.
+        "ping-celery-workers": {
+            "task": "app.tasks.worker_health.ping_celery_workers",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -84,6 +91,11 @@ celery_app.conf.update(
 # permanently failed tasks to the dead-letter queue and persists their
 # payload + traceback for audit. Importing the module wires the signal.
 from app.tasks import dead_letter as _dead_letter  # noqa: E402,F401
+
+# Issue #537: register Celery task Prometheus metrics signal handlers so
+# both the API process (eager mode) and worker processes export metrics on
+# the existing ``/metrics`` endpoint. Importing the module wires the signals.
+import app.metrics.celery_metrics  # noqa: E402,F401  (side-effect import)
 
 
 celery_app.autodiscover_tasks(["app.tasks"])
