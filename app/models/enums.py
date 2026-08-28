@@ -11,3 +11,8 @@ class Severity(str, Enum):
 class OutageStatus(str, Enum):
     open = "open"
     resolved = "resolved"
+
+
+class Role(str, Enum):
+    admin = "admin"
+    engineer = "engineer"

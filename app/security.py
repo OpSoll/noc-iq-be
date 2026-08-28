@@ -1,38 +1,17 @@
-import logging
+import re
 
-logger = logging.getLogger("security")
+SQL_INJECTION_PATTERNS = [
+    re.compile(r"union\s+select", re.IGNORECASE),
+    re.compile(r"or\s+1\s*=\s*1", re.IGNORECASE),
+    re.compile(r"/\*|\*/|--", re.IGNORECASE)
+]
 
-class SecurityHeadersMiddleware:
-    """Injects security-hardening response headers (HSTS, CSP, nosniff)."""
-    def __init__(self, app):
-        self.app = app
+def scan_for_sql_injection(query: str):
+    """Asserts query strings are free of SQL injection structures."""
+    for pattern in SQL_INJECTION_PATTERNS:
+        if pattern.search(query):
+            raise ValueError("SQL injection pattern identified in dynamic query.")
 
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        async def send_wrapper(message):
-            if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
-                headers.append((b"strict-transport-security", b"max-age=63072000; includeSubDomains"))
-                headers.append((b"x-content-type-options", b"nosniff"))
-                headers.append((b"content-security-policy", b"default-src 'self'"))
-                message["headers"] = headers
-            await send(message)
-
-        await self.app(scope, receive, send_wrapper)
-
-class BruteForceProtector:
-    """Maintains IP-specific lockout counters for verification endpoints."""
-    def __init__(self, max_attempts: int = 5):
-        self.max_attempts = max_attempts
-        self.failures = {}
-
-    def log_failure(self, ip_address: str):
-        self.failures[ip_address] = self.failures.get(ip_address, 0) + 1
-        if self.failures[ip_address] >= self.max_attempts:
-            logger.warning(f"IP address {ip_address} locked out due to brute-force attempts.")
-
-    def is_locked_out(self, ip_address: str) -> bool:
-        return self.failures.get(ip_address, 0) >= self.max_attempts
+def validate_cors_origin(origin: str, whitelist: list) -> bool:
+    """Checks origin against client-side domain authorization array."""
+    return origin in whitelist
