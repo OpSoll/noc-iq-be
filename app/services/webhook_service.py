@@ -603,8 +603,10 @@ def _build_headers(
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
     signature_version: int = CURRENT_SIGNATURE_VERSION,
     idempotency_key: Optional[str] = None,
+    delivery_id: Optional[str] = None,
 ) -> Dict[str, str]:
-    """Build webhook delivery headers with explicit signature versioning (BE-087) and idempotency key.
+    """Build webhook delivery headers with explicit signature versioning (BE-087),
+    idempotency key, and custom headers.
 
     Args:
         webhook: Webhook configuration
@@ -612,6 +614,7 @@ def _build_headers(
         event: Webhook event type
         signature_version: Explicit signature algorithm version
         idempotency_key: Deterministic key for receiver-side deduplication
+        delivery_id: Unique UUID per delivery attempt (X-Webhook-Delivery-ID)
 
     Returns:
         Dictionary of headers including:
@@ -619,6 +622,7 @@ def _build_headers(
         - X-Webhook-Event: event type
         - X-Webhook-Timestamp: ISO-formatted UTC timestamp
         - X-Webhook-Idempotency-Key: idempotency key for deduplication
+        - X-Webhook-Delivery-ID: unique UUID per delivery attempt
         - X-Webhook-Signature: signature (if secret configured)
         - X-Webhook-Signature-Version: signature version (if secret configured)
     """
@@ -629,6 +633,8 @@ def _build_headers(
     }
     if idempotency_key:
         headers["X-Webhook-Idempotency-Key"] = idempotency_key
+    if delivery_id:
+        headers["X-Webhook-Delivery-ID"] = delivery_id
     if webhook.secret:
         # HMAC SHA-256 signature with t=,v1= format for outgoing dispatches
         import time as _time
@@ -636,6 +642,16 @@ def _build_headers(
         sig_header = build_signature_header(webhook.secret, payload, sig_timestamp)
         headers["X-Webhook-Signature"] = sig_header
         headers["X-Webhook-Signature-Version"] = str(signature_version)
+
+    # Attach custom headers from webhook configuration
+    from app.utils.header_encryption import decrypt_headers
+    custom = decrypt_headers(getattr(webhook, 'custom_headers_encrypted', None))
+    if custom:
+        # Custom headers are added after system headers; user headers cannot
+        # override system-reserved headers (Content-Type, X-Webhook-*).
+        for key, value in custom.items():
+            headers[key] = value
+
     return headers
 
 

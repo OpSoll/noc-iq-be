@@ -48,6 +48,7 @@ class WebhookCreate(BaseModel):
     events: List[WebhookEvent]
     max_retries: int = 3
     is_active: bool = True
+    custom_headers: Optional[Dict[str, str]] = None
 
     @field_validator("name")
     @classmethod
@@ -92,6 +93,7 @@ class WebhookUpdate(BaseModel):
     events: Optional[List[WebhookEvent]] = None
     max_retries: Optional[int] = None
     is_active: Optional[bool] = None
+    custom_headers: Optional[Dict[str, str]] = None
 
     @field_validator("name")
     @classmethod
@@ -159,6 +161,8 @@ class WebhookResponse(BaseModel):
     last_secret_rotation_at: Optional[str] = None
     # BE-295: Grace-window metadata
     rotation_grace_expires_at: Optional[str] = None
+    # Custom HTTP headers for outgoing dispatches
+    custom_headers: Optional[Dict[str, str]] = None
 
 
 class WebhookDeliveryResponse(BaseModel):
@@ -260,6 +264,10 @@ def _serialize_webhook(webhook: Webhook) -> WebhookResponse:
         events = json.loads(webhook.events)
     except (json.JSONDecodeError, TypeError):
         events = []
+    # Decrypt custom headers if present
+    from app.utils.header_encryption import decrypt_headers
+    custom_headers = decrypt_headers(getattr(webhook, 'custom_headers_encrypted', None))
+
     return WebhookResponse(
         id=webhook.id,
         name=webhook.name,
@@ -270,6 +278,7 @@ def _serialize_webhook(webhook: Webhook) -> WebhookResponse:
         secret_version=webhook.secret_version,
         last_secret_rotation_at=webhook.last_secret_rotation_at.isoformat() if webhook.last_secret_rotation_at else None,
         rotation_grace_expires_at=webhook.rotation_grace_expires_at.isoformat() if webhook.rotation_grace_expires_at else None,
+        custom_headers=custom_headers,
     )
 
 
@@ -297,6 +306,10 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
 
 @router.post("", response_model=WebhookResponse, status_code=status.HTTP_201_CREATED)
 def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
+    # Encrypt custom headers before storage
+    from app.utils.header_encryption import encrypt_headers
+    encrypted_headers = encrypt_headers(payload.custom_headers)
+
     webhook = Webhook(
         name=payload.name,
         url=str(payload.url),
@@ -304,6 +317,7 @@ def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), 
         events=json.dumps([e.value for e in payload.events]),
         max_retries=payload.max_retries,
         is_active=payload.is_active,
+        custom_headers_encrypted=encrypted_headers,
     )
     db.add(webhook)
     db.commit()
@@ -352,6 +366,9 @@ def update_webhook(webhook_id: UUID, payload: WebhookUpdate, current_user=Depend
         webhook.max_retries = payload.max_retries
     if payload.is_active is not None:
         webhook.is_active = payload.is_active
+    if payload.custom_headers is not None:
+        from app.utils.header_encryption import encrypt_headers
+        webhook.custom_headers_encrypted = encrypt_headers(payload.custom_headers)
 
     db.commit()
     db.refresh(webhook)
