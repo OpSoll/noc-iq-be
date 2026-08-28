@@ -32,12 +32,19 @@ _engine_isolation_level = (
     None if _is_sqlite else settings.DB_TRANSACTION_ISOLATION_LEVEL
 )
 
-engine: Engine = create_engine(
-    _DB_URL,
+# Issue #520: configure pool size and overflow to prevent connection exhaustion
+# under high API concurrency.
+_engine_kwargs: dict = dict(
     connect_args=_connect_args,
     pool_pre_ping=True,
     isolation_level=_engine_isolation_level,
 )
+if not _is_sqlite:
+    # SQLite uses StaticPool / NullPool and does not support these options.
+    _engine_kwargs["pool_size"] = 20
+    _engine_kwargs["max_overflow"] = 10
+
+engine: Engine = create_engine(_DB_URL, **_engine_kwargs)
 
 
 @event.listens_for(engine, "connect")
@@ -48,6 +55,38 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.close()
+
+
+# Issue #520: connection pool lifecycle logging and leak detection.
+_CHECKOUT_WARN_THRESHOLD_SECONDS = 5.0
+
+
+@event.listens_for(engine, "checkout")
+def _on_checkout(dbapi_connection, connection_record, connection_proxy):  # type: ignore[no-untyped-def]
+    """Record checkout timestamp for leak detection."""
+    connection_record.info["checkout_at"] = time.monotonic()
+    logger.debug("DB connection checked out (pool id=%s)", id(connection_record))
+
+
+@event.listens_for(engine, "checkin")
+def _on_checkin(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]
+    """Log checkin duration and warn when a connection was held too long."""
+    checkout_at = connection_record.info.pop("checkout_at", None)
+    if checkout_at is None:
+        return
+    duration = time.monotonic() - checkout_at
+    if duration >= _CHECKOUT_WARN_THRESHOLD_SECONDS:
+        logger.warning(
+            "DB connection held for %.2fs (threshold=%.1fs) — possible connection leak",
+            duration,
+            _CHECKOUT_WARN_THRESHOLD_SECONDS,
+        )
+    else:
+        logger.debug(
+            "DB connection checked in after %.3fs (pool id=%s)",
+            duration,
+            id(connection_record),
+        )
 
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -1,6 +1,6 @@
-"""V1 health endpoints (issue #536).
+"""V1 health endpoints (issue #536, #505).
 
-Exposes ``GET /api/v1/health/detailed`` with database, Celery broker and
+Exposes ``GET /api/v1/health/detailed`` with database, Redis and
 Celery worker heartbeat status.
 """
 
@@ -8,6 +8,7 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.config import settings
@@ -39,31 +40,51 @@ def _check_celery_broker() -> bool:
         return False
 
 
-@router.get("/health/detailed")
-def detailed_health() -> dict:
-    """Detailed health probe including Celery worker heartbeat status.
+def _check_redis() -> bool:
+    """Ping the Redis instance configured via REDIS_URL.
 
-    Worker status is normally refreshed every 60 seconds by the
-    ``ping_celery_workers`` beat task (issue #536); a live ping is used as a
-    fallback when the beat task has not reported yet.
+    Issue #505: the detailed health endpoint must explicitly verify Redis
+    connectivity independent of the Celery broker check.
+    """
+    try:
+        from redis import Redis
+
+        redis_url = getattr(settings, "REDIS_URL", None) or settings.CELERY_BROKER_URL
+        Redis.from_url(redis_url).ping()
+        return True
+    except Exception:
+        return False
+
+
+@router.get("/health/detailed")
+def detailed_health() -> JSONResponse:
+    """Detailed health probe: database, Redis and Celery worker heartbeat.
+
+    Returns HTTP 200 when all dependencies are healthy, HTTP 503 when any
+    dependency is down.
+
+    Issue #505: explicitly pings PostgreSQL (SELECT 1) and Redis (PING).
+    Issue #536: includes Celery worker heartbeat status.
     """
     db_ok = _check_database()
+    redis_ok = _check_redis()
     broker_ok = _check_celery_broker()
 
     workers = read_worker_health()
     if workers.get("status") == "unknown":
         workers = check_worker_health()
 
-    status = "ok"
-    if not db_ok or not broker_ok or workers.get("status") == "down":
-        status = "degraded"
+    all_healthy = db_ok and redis_ok and broker_ok and workers.get("status") != "down"
+    status = "ok" if all_healthy else "degraded"
 
-    return {
+    payload = {
         "status": status,
         "timestamp": datetime.utcnow().isoformat(),
         "dependencies": {
             "database": "ok" if db_ok else "down",
+            "redis": "ok" if redis_ok else "down",
             "celery_broker": "ok" if broker_ok else "down",
             "celery_workers": workers,
         },
     }
+    return JSONResponse(status_code=200 if all_healthy else 503, content=payload)
