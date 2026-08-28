@@ -717,3 +717,134 @@ def search_webhook_deliveries(
                 
     return [_serialize_delivery(d) for d in deliveries]
 
+
+# --------------------------------------------------------------------------- #
+# Webhook Dead-Letter Queue (DLQ) endpoints
+# --------------------------------------------------------------------------- #
+
+
+class WebhookDeadLetterResponseItem(BaseModel):
+    id: UUID
+    delivery_id: UUID
+    webhook_id: UUID
+    event: str
+    response_status_code: Optional[int] = None
+    error_message: Optional[str] = None
+    attempt_count: int
+    dead_lettered_at: str
+    created_at: str
+    redelivered: bool = False
+
+    model_config = {"from_attributes": True}
+
+
+class WebhookDeadLetterListResponse(BaseModel):
+    items: List[WebhookDeadLetterResponseItem]
+    total: int
+
+
+@router.get("/dead-letter-queue", response_model=WebhookDeadLetterListResponse)
+def list_webhook_dead_letter_queue(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """List dead-lettered webhook deliveries for audit and investigation.
+
+    Exposes the webhook_dead_letter_queue table for administrative review.
+    """
+    from app.models.orm.webhook_dead_letter import WebhookDeadLetterORM
+
+    query = db.query(WebhookDeadLetterORM).order_by(
+        WebhookDeadLetterORM.dead_lettered_at.desc()
+    )
+    total = query.count()
+    items = query.offset(offset).limit(limit).all()
+
+    return WebhookDeadLetterListResponse(
+        items=[
+            WebhookDeadLetterResponseItem(
+                id=item.id,
+                delivery_id=item.delivery_id,
+                webhook_id=item.webhook_id,
+                event=item.event,
+                response_status_code=item.response_status_code,
+                error_message=item.error_message,
+                attempt_count=item.attempt_count,
+                dead_lettered_at=item.dead_lettered_at.isoformat() if item.dead_lettered_at else None,
+                created_at=item.created_at.isoformat() if item.created_at else None,
+                redelivered=bool(item.redelivered),
+            )
+            for item in items
+        ],
+        total=total,
+    )
+
+
+@router.post("/dead-letter-queue/{delivery_id}/redeliver")
+def redeliver_dead_lettered_webhook(
+    delivery_id: UUID,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Redeliver a dead-lettered webhook delivery.
+
+    Resets the delivery status and requeues it for dispatch.
+    Acceptance Criteria: Expose administrative redelivery API endpoint.
+    """
+    from app.models.orm.webhook_dead_letter import WebhookDeadLetterORM
+
+    dlq_entry = (
+        db.query(WebhookDeadLetterORM)
+        .filter(WebhookDeadLetterORM.delivery_id == delivery_id)
+        .first()
+    )
+    if not dlq_entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Dead-letter entry not found for this delivery_id.",
+        )
+
+    # Reset the original delivery for redelivery
+    delivery = db.query(WebhookDelivery).filter(WebhookDelivery.id == delivery_id).first()
+    if not delivery:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original delivery not found.",
+        )
+
+    if delivery.status != WebhookDeliveryStatus.DEAD_LETTER:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Delivery is not in dead-letter status.",
+        )
+
+    # Mark as pending for redelivery
+    delivery.status = WebhookDeliveryStatus.PENDING
+    delivery.attempt_count = 0
+    delivery.next_retry_at = None
+    delivery.dead_lettered_at = None
+    delivery.error_message = None
+    delivery.response_status_code = None
+    delivery.response_body = None
+    delivery.delivered_at = None
+    delivery.updated_at = datetime.utcnow()
+
+    # Update DLQ entry
+    dlq_entry.redelivered = 1
+    dlq_entry.redelivered_at = datetime.utcnow()
+
+    db.commit()
+
+    # Dispatch the redelivery
+    from app.services.webhook_service import dispatch_delivery
+    dispatch_delivery(db, delivery.id)
+    db.refresh(delivery)
+
+    return {
+        "success": True,
+        "message": f"Delivery {delivery_id} redelivered.",
+        "delivery_id": str(delivery_id),
+    }
+

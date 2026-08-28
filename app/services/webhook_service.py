@@ -19,8 +19,10 @@ from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, 
 from app.models.job import Job, JobType
 from app.services.webhook_signing import (
     CURRENT_SIGNATURE_VERSION,
+    build_signature_header,
     sign_payload,
     verify_signature,
+    verify_signature_header,
 )
 from app.core.config import settings
 from app.utils.cache import TTLCache
@@ -448,6 +450,57 @@ def get_slo_metrics() -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- #
+# Webhook Dead-Letter Queue (DLQ) routing (Issue #530 pattern)
+# --------------------------------------------------------------------------- #
+
+
+def _route_to_dead_letter_queue(
+    db: Session,
+    delivery: WebhookDelivery,
+    webhook: Webhook,
+) -> None:
+    """Route a permanently failed webhook delivery to the DLQ table.
+
+    Records the final HTTP response status code and error message for
+    audit and administrative redelivery purposes.
+
+    Acceptance Criteria:
+    - Route failed webhooks to webhook_dead_letter_queue table after 5 retries.
+    - Record final HTTP response status code and error message.
+    """
+    from app.models.orm.webhook_dead_letter import WebhookDeadLetterORM
+
+    try:
+        dlq_entry = WebhookDeadLetterORM(
+            delivery_id=delivery.id,
+            webhook_id=webhook.id,
+            event=delivery.event.value if hasattr(delivery.event, 'value') else str(delivery.event),
+            payload=delivery.payload,
+            response_status_code=delivery.response_status_code,
+            response_body=delivery.response_body,
+            error_message=delivery.error_message,
+            attempt_count=delivery.attempt_count,
+            last_attempt_at=delivery.updated_at or datetime.utcnow(),
+            dead_lettered_at=datetime.utcnow(),
+            created_at=datetime.utcnow(),
+        )
+        db.add(dlq_entry)
+        db.commit()
+        logger.info(
+            "Webhook delivery %s routed to DLQ (webhook=%s, event=%s, status=%s, error=%s).",
+            delivery.id, webhook.id,
+            delivery.event.value if hasattr(delivery.event, 'value') else str(delivery.event),
+            delivery.response_status_code,
+            delivery.error_message,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to route webhook delivery %s to DLQ.", delivery.id
+        )
+        db.rollback()
+
+
+# --------------------------------------------------------------------------- #
 # Original code below (preserved and extended)
 # --------------------------------------------------------------------------- #
 
@@ -577,8 +630,11 @@ def _build_headers(
     if idempotency_key:
         headers["X-Webhook-Idempotency-Key"] = idempotency_key
     if webhook.secret:
-        sig_hex, _ = sign_payload(webhook.secret, payload, signature_version)
-        headers["X-Webhook-Signature"] = f"sha256={sig_hex}"
+        # HMAC SHA-256 signature with t=,v1= format for outgoing dispatches
+        import time as _time
+        sig_timestamp = int(_time.time())
+        sig_header = build_signature_header(webhook.secret, payload, sig_timestamp)
+        headers["X-Webhook-Signature"] = sig_header
         headers["X-Webhook-Signature-Version"] = str(signature_version)
     return headers
 
@@ -778,6 +834,8 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
                     "Webhook delivery %s failed with terminal status %d. Dead-lettered immediately.",
                     delivery.id, delivery.response_status_code,
                 )
+                # Route to DLQ table for audit and administrative redelivery
+                _route_to_dead_letter_queue(db, delivery, webhook)
                 delivery.updated_at = datetime.utcnow()
                 db.commit()
                 record_partition_metrics(partition_id, success=True, latency_ms=latency_ms)
@@ -807,6 +865,8 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
                 "Webhook delivery %s permanently failed after %d attempts. Marked as dead-letter.",
                 delivery.id, delivery.attempt_count,
             )
+            # Route to DLQ table for audit and administrative redelivery
+            _route_to_dead_letter_queue(db, delivery, webhook)
 
     delivery.updated_at = datetime.utcnow()
     db.commit()
