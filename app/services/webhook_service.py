@@ -19,8 +19,10 @@ from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, 
 from app.models.job import Job, JobType
 from app.services.webhook_signing import (
     CURRENT_SIGNATURE_VERSION,
+    build_signature_header,
     sign_payload,
     verify_signature,
+    verify_signature_header,
 )
 from app.core.config import settings
 from app.utils.cache import TTLCache
@@ -577,8 +579,11 @@ def _build_headers(
     if idempotency_key:
         headers["X-Webhook-Idempotency-Key"] = idempotency_key
     if webhook.secret:
-        sig_hex, _ = sign_payload(webhook.secret, payload, signature_version)
-        headers["X-Webhook-Signature"] = f"sha256={sig_hex}"
+        # HMAC SHA-256 signature with t=,v1= format for outgoing dispatches
+        import time as _time
+        sig_timestamp = int(_time.time())
+        sig_header = build_signature_header(webhook.secret, payload, sig_timestamp)
+        headers["X-Webhook-Signature"] = sig_header
         headers["X-Webhook-Signature-Version"] = str(signature_version)
     return headers
 
