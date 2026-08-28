@@ -19,6 +19,8 @@ from app.services.webhook_service import search_webhook_payloads, _json_contains
 
 def _make_delivery(db, webhook, payload_dict, created_at=None):
     """Helper to create a WebhookDelivery with a JSON payload."""
+    import uuid
+    now = created_at or datetime.utcnow()
     delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=WebhookEvent.SLA_VIOLATION,
@@ -26,7 +28,9 @@ def _make_delivery(db, webhook, payload_dict, created_at=None):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
-        created_at=created_at or datetime.utcnow(),
+        idempotency_key=f"key-{uuid.uuid4()}",
+        event_timestamp=now,
+        created_at=now,
     )
     db.add(delivery)
     db.commit()

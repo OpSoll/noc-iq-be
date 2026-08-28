@@ -6,6 +6,7 @@ Covers:
 - Purge logs number of purged rows
 - Configurable retention period
 """
+import uuid
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
@@ -14,8 +15,16 @@ import pytest
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
 
 
+def _cleanup_deliveries(db):
+    """Delete all existing webhook deliveries to avoid UNIQUE constraint conflicts."""
+    db.query(WebhookDelivery).delete()
+    db.query(Webhook).delete()
+    db.commit()
+
+
 def test_purge_old_webhook_logs_deletes_old_deliveries(client, db):
     """Delivery logs older than retention period are deleted."""
+    _cleanup_deliveries(db)
     webhook = Webhook(
         name="purge-test-webhook",
         url="https://example.com/webhook",
@@ -36,6 +45,8 @@ def test_purge_old_webhook_logs_deletes_old_deliveries(client, db):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
+        idempotency_key=f"old-key-{uuid.uuid4()}",
+        event_timestamp=now - timedelta(days=31),
         created_at=now - timedelta(days=31),
     )
     # Recent delivery (<30 days)
@@ -46,6 +57,8 @@ def test_purge_old_webhook_logs_deletes_old_deliveries(client, db):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
+        idempotency_key="recent-key",
+        event_timestamp=now - timedelta(days=5),
         created_at=now - timedelta(days=5),
     )
     db.add_all([old_delivery, recent_delivery])
@@ -67,6 +80,7 @@ def test_purge_old_webhook_logs_deletes_old_deliveries(client, db):
 
 def test_purge_old_webhook_logs_no_old_deliveries(client, db):
     """Purge returns 0 purged when no old deliveries exist."""
+    _cleanup_deliveries(db)
     webhook = Webhook(
         name="purge-noop-webhook",
         url="https://example.com/webhook",
@@ -85,6 +99,8 @@ def test_purge_old_webhook_logs_no_old_deliveries(client, db):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
+        idempotency_key=f"recent-key-{uuid.uuid4()}",
+        event_timestamp=now - timedelta(days=5),
         created_at=now - timedelta(days=5),
     )
     db.add(recent_delivery)
@@ -105,6 +121,7 @@ def test_purge_old_webhook_logs_no_old_deliveries(client, db):
 
 def test_purge_old_webhook_logs_custom_retention(client, db):
     """Purge respects custom retention period."""
+    _cleanup_deliveries(db)
     webhook = Webhook(
         name="purge-custom-retention-webhook",
         url="https://example.com/webhook",
@@ -125,6 +142,8 @@ def test_purge_old_webhook_logs_custom_retention(client, db):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
+        idempotency_key=f"five-day-key-{uuid.uuid4()}",
+        event_timestamp=now - timedelta(days=5),
         created_at=now - timedelta(days=5),
     )
     db.add(five_day_old)
@@ -144,6 +163,7 @@ def test_purge_old_webhook_logs_custom_retention(client, db):
 
 def test_purge_old_webhook_logs_batch_deletion(client, db):
     """Purge handles large batches correctly."""
+    _cleanup_deliveries(db)
     webhook = Webhook(
         name="purge-batch-webhook",
         url="https://example.com/webhook",
@@ -165,9 +185,11 @@ def test_purge_old_webhook_logs_batch_deletion(client, db):
             status=WebhookDeliveryStatus.SUCCESS,
             attempt_count=1,
             response_status_code=200,
+            idempotency_key=f"batch-key-{i}",
+            event_timestamp=now - timedelta(days=40),
             created_at=now - timedelta(days=40),
         )
-        for _ in range(5)
+        for i in range(5)
     ]
     db.add_all(old_deliveries)
     db.commit()
@@ -186,6 +208,7 @@ def test_purge_old_webhook_logs_batch_deletion(client, db):
 
 def test_purge_old_webhook_logs_respects_cutoff(client, db):
     """Deliveries exactly at the retention boundary are not purged."""
+    _cleanup_deliveries(db)
     webhook = Webhook(
         name="purge-boundary-webhook",
         url="https://example.com/webhook",
@@ -198,7 +221,7 @@ def test_purge_old_webhook_logs_respects_cutoff(client, db):
 
     now = datetime.utcnow()
 
-    # Delivery at exactly 30 days old (should be kept - purged only if strictly < cutoff)
+    # Delivery at 29 days old (just inside the retention window, should be kept)
     boundary_delivery = WebhookDelivery(
         webhook_id=webhook.id,
         event=WebhookEvent.SLA_VIOLATION,
@@ -206,7 +229,9 @@ def test_purge_old_webhook_logs_respects_cutoff(client, db):
         status=WebhookDeliveryStatus.SUCCESS,
         attempt_count=1,
         response_status_code=200,
-        created_at=now - timedelta(days=30),
+        idempotency_key=f"boundary-key-{uuid.uuid4()}",
+        event_timestamp=now - timedelta(days=29),
+        created_at=now - timedelta(days=29),
     )
     db.add(boundary_delivery)
     db.commit()

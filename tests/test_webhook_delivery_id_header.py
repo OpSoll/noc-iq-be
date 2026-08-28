@@ -7,6 +7,7 @@ Covers:
 - Headers are documented in webhook metadata endpoint
 """
 import json
+import uuid
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -99,6 +100,8 @@ def test_attempt_delivery_generates_unique_delivery_id(client, db):
         payload='{"test": true}',
         status=WebhookDeliveryStatus.PENDING,
         attempt_count=0,
+        idempotency_key=f"test-idempotency-key-{uuid.uuid4()}",
+        event_timestamp=datetime.utcnow(),
     )
     db.add(delivery)
     db.commit()
@@ -119,7 +122,6 @@ def test_attempt_delivery_generates_unique_delivery_id(client, db):
     delivery_id_value = sent_headers.get("X-Webhook-Delivery-ID")
     assert delivery_id_value is not None
     # Should be a valid UUID format
-    import uuid
     uuid.UUID(delivery_id_value)  # Will raise if not valid UUID
 
 
@@ -141,6 +143,8 @@ def test_delivery_id_changes_on_redelivery(client, db):
         payload='{"test": true}',
         status=WebhookDeliveryStatus.PENDING,
         attempt_count=0,
+        idempotency_key=f"redelivery-idempotency-key-{uuid.uuid4()}",
+        event_timestamp=datetime.utcnow(),
     )
     db.add(delivery)
     db.commit()

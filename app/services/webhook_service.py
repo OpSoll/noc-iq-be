@@ -650,7 +650,8 @@ def _build_headers(
         # Custom headers are added after system headers; user headers cannot
         # override system-reserved headers (Content-Type, X-Webhook-*).
         for key, value in custom.items():
-            headers[key] = value
+            if key not in headers:
+                headers[key] = value
 
     return headers
 

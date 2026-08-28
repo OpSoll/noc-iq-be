@@ -418,20 +418,14 @@ def purge_old_webhook_logs() -> Dict[str, Any]:
             logger.info("purge_old_webhook_logs: no deliveries older than %d days.", retention_days)
             return {"purged": 0, "retention_days": retention_days}
 
-        # Delete old delivery records in batches to avoid long-running transactions
-        batch_size = 1000
-        total_purged = 0
-        while True:
-            result = (
-                db.query(WebhookDelivery)
-                .filter(WebhookDelivery.created_at < cutoff)
-                .limit(batch_size)
-                .delete(synchronize_session=False)
-            )
-            db.commit()
-            total_purged += result
-            if result < batch_size:
-                break
+        # Delete old delivery records
+        result = (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        total_purged = result
 
         logger.info(
             "purge_old_webhook_logs: purged %d delivery logs older than %d days (cutoff=%s).",

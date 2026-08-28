@@ -6,6 +6,7 @@ Covers:
 - Custom headers are decrypted and returned in API responses
 - System headers cannot be overridden by custom headers
 """
+import uuid
 from datetime import datetime
 from unittest.mock import Mock, patch
 
@@ -71,6 +72,8 @@ def test_custom_headers_attached_to_outgoing_request(client, db):
         payload='{"test": true}',
         status=WebhookDeliveryStatus.PENDING,
         attempt_count=0,
+        idempotency_key=f"test-idempotency-key-{uuid.uuid4()}",
+        event_timestamp=datetime.utcnow(),
     )
     db.add(delivery)
     db.commit()

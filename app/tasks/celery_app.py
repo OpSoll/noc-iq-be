@@ -81,14 +81,13 @@ celery_app.conf.update(
         # pin workers indefinitely.
         "revoke-hung-tasks": {
             "task": "app.tasks.timeout_guard.revoke_hung_tasks",
+            "schedule": 60.0,
         },
         # Delivery log retention purging: delete webhook delivery logs
         # older than WEBHOOK_DELIVERY_LOG_RETENTION_DAYS (default 30 days).
         "purge-old-webhook-logs": {
             "task": "app.tasks.webhook_tasks.purge_old_webhook_logs",
             "schedule": 86400.0,  # every 24 hours
-        },
-            "schedule": 60.0,
         },
         # Issue #536: worker heartbeat monitor — pings the worker fleet every
         # 60s, persists status to Redis, alerts when no worker responds.
