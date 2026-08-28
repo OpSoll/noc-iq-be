@@ -291,16 +291,15 @@ def _redact_payload(data: Any, depth: int = 0) -> Any:
     return data
 
 
-def build_redacted_payload(sla_data: Dict[str, Any], event: WebhookEvent) -> Dict[str, Any]:
+def build_redacted_payload(sla_data: Dict[str, Any], event: WebhookEvent, schema_version: str, event_timestamp: str) -> Dict[str, Any]:
     """Build a webhook payload with sensitive fields redacted.
 
     The outer structure (schema_version, event, timestamp, data) is preserved,
     only the inner `data` section is recursively redacted.
     """
-    event_timestamp = datetime.utcnow().isoformat()
     redacted_data = _redact_payload(sla_data)
     return {
-        "schema_version": WEBHOOK_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "event": event.value,
         "timestamp": event_timestamp,
         "data": redacted_data,
@@ -603,7 +602,7 @@ def _build_headers(
     event: WebhookEvent = WebhookEvent.SLA_VIOLATION,
     signature_version: int = CURRENT_SIGNATURE_VERSION,
     idempotency_key: Optional[str] = None,
-    delivery_id: Optional[str] = None,
+    schema_version: str = "1",
 ) -> Dict[str, str]:
     """Build webhook delivery headers with explicit signature versioning (BE-087),
     idempotency key, and custom headers.
@@ -614,7 +613,7 @@ def _build_headers(
         event: Webhook event type
         signature_version: Explicit signature algorithm version
         idempotency_key: Deterministic key for receiver-side deduplication
-        delivery_id: Unique UUID per delivery attempt (X-Webhook-Delivery-ID)
+        schema_version: The schema version of the payload.
 
     Returns:
         Dictionary of headers including:
@@ -625,11 +624,13 @@ def _build_headers(
         - X-Webhook-Delivery-ID: unique UUID per delivery attempt
         - X-Webhook-Signature: signature (if secret configured)
         - X-Webhook-Signature-Version: signature version (if secret configured)
+        - X-Webhook-Version: The schema version of the payload.
     """
     headers = {
         "Content-Type": "application/json",
         "X-Webhook-Event": event.value,
         "X-Webhook-Timestamp": datetime.utcnow().isoformat(),
+        "X-Webhook-Version": schema_version,
     }
     if idempotency_key:
         headers["X-Webhook-Idempotency-Key"] = idempotency_key
@@ -767,12 +768,8 @@ def create_delivery(
 
 def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_str = delivery.payload
-
-    # Generate a unique delivery_id (UUID) for this specific delivery attempt.
-    # X-Webhook-Delivery-ID changes with each attempt, enabling receivers to
-    # identify duplicate redeliveries of the same underlying event.
-    import uuid as _uuid
-    delivery_id = str(_uuid.uuid4())
+    payload_data = json.loads(payload_str)
+    schema_version = payload_data.get("schema_version", "1")
 
     headers = _build_headers(
         webhook,
@@ -780,7 +777,7 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         delivery.event,
         delivery.signature_version,
         idempotency_key=delivery.idempotency_key,
-        delivery_id=delivery_id,
+        schema_version=schema_version,
     )
 
     # Issue #303: SSRF redirect protection - limit redirects
@@ -930,10 +927,15 @@ def trigger_sla_violation_webhooks(
     # Timestamp is captured once and reused across all retries (idempotency support)
     event_timestamp = datetime.utcnow().isoformat()
 
-    # Issue #304: Build payload with redaction
-    payload = build_redacted_payload(sla_data, event)
-
     for webhook in webhooks:
+        # Issue #304: Build payload with redaction and correct schema version
+        payload = build_redacted_payload(
+            sla_data,
+            event,
+            schema_version=webhook.schema_version,
+            event_timestamp=event_timestamp
+        )
+
         # Issue #303: Validate webhook URL for SSRF at dispatch time (full DNS check)
         is_valid_url, url_reason = validate_webhook_url(webhook.url)
         if not is_valid_url:
