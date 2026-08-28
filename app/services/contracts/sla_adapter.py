@@ -167,17 +167,27 @@ class SLAAdapter:
         self,
         address: str,
         asset_code: str,
-        asset_issuer: str,
+        asset_issuer: str | None,
     ) -> TrustlineResult:
         """Return trustline readiness for *address*/*asset_code*.
 
         Non-destructive — only reads from Horizon.
         """
+        # Native (XLM) asset doesn't have a trustline in the same way.
+        # The presence of the account on the ledger is sufficient.
+        if asset_code == "XLM" and asset_issuer is None:
+            return TrustlineResult(
+                status=TrustlineStatus.READY,
+                asset_code=asset_code,
+                asset_issuer=asset_issuer,
+            )
+
         url = f"{self._horizon}/accounts/{address}"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
+            account_data = resp.json()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return TrustlineResult(
@@ -198,6 +208,32 @@ class SLAAdapter:
                 asset_code=asset_code,
                 asset_issuer=asset_issuer,
             )
+
+        for balance in account_data.get("balances", []):
+            if balance.get("asset_code") == asset_code and balance.get("asset_issuer") == asset_issuer:
+                limit = balance.get("limit")
+                if limit and float(limit) > 0:
+                    return TrustlineResult(
+                        status=TrustlineStatus.READY,
+                        asset_code=asset_code,
+                        asset_issuer=asset_issuer,
+                        balance=balance.get("balance"),
+                        limit=limit,
+                    )
+                else:
+                    return TrustlineResult(
+                        status=TrustlineStatus.LIMIT_ZERO,
+                        asset_code=asset_code,
+                        asset_issuer=asset_issuer,
+                        balance=balance.get("balance"),
+                        limit=limit,
+                    )
+
+        return TrustlineResult(
+            status=TrustlineStatus.MISSING,
+            asset_code=asset_code,
+            asset_issuer=asset_issuer,
+        )
 
         data: dict[str, Any] = resp.json()
         balances: list[dict[str, Any]] = data.get("balances", [])

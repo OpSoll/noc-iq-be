@@ -104,6 +104,7 @@ class PaymentTransaction(BaseModel):
     type: str
     amount: float
     asset_code: str
+    asset_issuer: Optional[str] = None
     from_address: str
     to_address: str
     status: str

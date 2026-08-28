@@ -56,12 +56,16 @@ class SLAResult(BaseModel):
     threshold_source: Optional[str] = Field("config", description="Source of threshold values (e.g., 'config', 'contract')")
     reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
     decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
+    asset_code: Optional[str] = Field(None, description="Asset code for payment (e.g., XLM, USDC)")
+    asset_issuer: Optional[str] = Field(None, description="Asset issuer for non-native assets")
 
 
 class SLASeverityConfig(BaseModel):
     threshold_minutes: int = Field(..., ge=0, description="SLA threshold in minutes for this severity")
     penalty_per_minute: int = Field(..., ge=0, description="Penalty amount charged per minute over the threshold")
     reward_base: int = Field(..., ge=0, description="Base reward amount for meeting the SLA")
+    asset_code: str = Field("XLM", description="Asset code for payment (e.g., XLM, USDC)")
+    asset_issuer: Optional[str] = Field(None, description="Asset issuer for non-native assets")
 
 
 class SLAConfigUpdateRequest(SLASeverityConfig):
