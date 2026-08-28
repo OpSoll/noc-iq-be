@@ -12,6 +12,10 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Issue #529: retry DB connection on startup when PostgreSQL is still initializing.
+DB_CONNECT_MAX_RETRIES = 10
+DB_CONNECT_BACKOFF_SECONDS = 2.0
+
 import os
 
 _DB_URL = os.getenv("DATABASE_URL") or os.getenv("SQLALCHEMY_DATABASE_URI") or ("sqlite:///./test_nociq.db" if os.getenv("TESTING") or os.getenv("PYTEST_CURRENT_TEST") else "sqlite:///./nociq.db")
@@ -93,14 +97,63 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def _attempt_db_connection() -> None:
+    """Verify the database is reachable with a lightweight probe query."""
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+
+
+def connect_db_with_retry(
+    max_retries: int = DB_CONNECT_MAX_RETRIES,
+    base_backoff: float = DB_CONNECT_BACKOFF_SECONDS,
+) -> None:
+    """Retry database connection on startup with exponential backoff.
+
+    Issue #529: tolerates slow PostgreSQL container initialization by retrying
+    up to ``max_retries`` times with delays of ``base_backoff * 2**(n-1)`` seconds.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(
+                "Database connection attempt %d/%d",
+                attempt,
+                max_retries,
+            )
+            _attempt_db_connection()
+            logger.info(
+                "Database connection established on attempt %d/%d",
+                attempt,
+                max_retries,
+            )
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                logger.error(
+                    "Database connection failed after %d attempts: %s",
+                    max_retries,
+                    exc,
+                )
+                raise
+            delay = base_backoff * (2 ** (attempt - 1))
+            logger.warning(
+                "Database connection attempt %d/%d failed: %s. Retrying in %.1fs...",
+                attempt,
+                max_retries,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+
+    if last_exc is not None:
+        raise last_exc
+
+
 def warmup_db_pool() -> None:
-    """Eagerly create a connection to fail fast on misconfiguration."""
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        logger.info("Database pool warmed up successfully")
-    except Exception:
-        logger.exception("Failed to warm up database pool")
+    """Eagerly create a connection, retrying until the database is ready."""
+    connect_db_with_retry()
+    logger.info("Database pool warmed up successfully")
 
 
 def shutdown_db_pool() -> None:
