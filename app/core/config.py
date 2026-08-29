@@ -62,6 +62,21 @@ class Settings(BaseSettings):
     # ── Secrets (must be overridden in production) ────────────────────────
     SECRET_KEY: str = _DEFAULT_SECRET
     JWT_SECRET_KEY: str = _DEFAULT_SECRET
+    API_KEY: str = _DEFAULT_SECRET
+
+    # ── JWT ───────────────────────────────────────────────────────────────
+    ALGORITHM: str = "RS256"
+    API_AUDIENCE: str = "https://api.nociq.com"
+
+    @property
+    def PUBLIC_KEY(self) -> str:
+        with open("auth/public_key.pem", "r") as f:
+            return f.read()
+
+    @property
+    def PRIVATE_KEY(self) -> str:
+        with open("auth/private_key.pem", "r") as f:
+            return f.read()
 
     # ── Celery ────────────────────────────────────────────────────────────
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
