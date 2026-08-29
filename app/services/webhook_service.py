@@ -1,4 +1,8 @@
-import hashlib
+from app.metrics.webhook_metrics import webhook_dispatches_total, webhook_dispatch_duration_seconds
+from app.services.domain_rate_limiter import DomainRateLimiter
+
+# Rate limiter: 30 requests per second per domain
+rate_limiter = DomainRateLimiter(30, 1)
 import ipaddress
 import json
 import logging
@@ -8,6 +12,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from threading import Lock
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -503,6 +508,11 @@ def _route_to_dead_letter_queue(
 # Original code below (preserved and extended)
 # --------------------------------------------------------------------------- #
 
+def _truncate_response_body(response_body: Optional[str]) -> Optional[str]:
+    if response_body and len(response_body) > 2048:
+        return response_body[:2048] + "... [truncated]"
+    return response_body
+
 def _get_retry_delays() -> list[int]:
     """Parse WEBHOOK_RETRY_BASE_DELAYS from settings into a list of ints."""
     return [int(d.strip()) for d in settings.WEBHOOK_RETRY_BASE_DELAYS.split(",") if d.strip()]
@@ -787,7 +797,8 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         with httpx.Client(timeout=10.0, follow_redirects=True, max_redirects=redirect_limit) as client:
             response = client.post(webhook.url, content=payload_str, headers=headers)
         delivery.response_status_code = response.status_code
-        delivery.response_body = response.text[:4000]
+        delivery.response_body = _truncate_response_body(response.text)
+[:4000]
 
         # Use explicit status code classification
         classification = classify_http_status(response.status_code)
@@ -828,7 +839,17 @@ def dispatch_delivery(db: Session, delivery_id: UUID) -> None:
     db.commit()
 
     start_time = time.time()
-    success = _attempt_delivery(delivery, webhook)
+    success = False
+    try:
+        success = _attempt_delivery(delivery, webhook)
+    finally:
+        duration = time.time() - start_time
+        webhook_dispatch_duration_seconds.labels(event=delivery.event.value).observe(duration)
+        webhook_dispatches_total.labels(
+            event=delivery.event.value, 
+            status_code=str(delivery.response_status_code or "error")
+        ).inc()
+
     latency_ms = (time.time() - start_time) * 1000.0
 
     # Determine partition (Issue #302)
@@ -943,6 +964,12 @@ def trigger_sla_violation_webhooks(
                 "Webhook %s (%s) URL validation failed: %s. Skipping delivery.",
                 webhook.id, webhook.name, url_reason,
             )
+            continue
+
+        # BE-042: Add domain-level rate limiting to webhook dispatches
+        domain = urlparse(webhook.url).netloc
+        if not rate_limiter.check(domain):
+            logger.warning(f"Rate limit exceeded for domain {domain}. Skipping webhook {webhook.id}.")
             continue
 
         # Issue #302: Check partition backpressure

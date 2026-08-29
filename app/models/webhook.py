@@ -46,6 +46,7 @@ class Webhook(Base):
     # Custom HTTP headers for outgoing webhook dispatches
     # Stored encrypted at rest (Fernet AES-128-CBC + HMAC-SHA256)
     custom_headers_encrypted = Column(Text, nullable=True)  # Encrypted JSON dict
+    verify_ssl = Column(Boolean, default=True, nullable=False)
 
     deliveries = relationship("WebhookDelivery", back_populates="webhook", cascade="all, delete-orphan")
 
