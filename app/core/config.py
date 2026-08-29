@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     # ── Secrets (must be overridden in production) ────────────────────────
     SECRET_KEY: str = _DEFAULT_SECRET
     JWT_SECRET_KEY: str = _DEFAULT_SECRET
+    API_KEY: str = _DEFAULT_SECRET
 
     # ── JWT ───────────────────────────────────────────────────────────────
     ALGORITHM: str = "RS256"
