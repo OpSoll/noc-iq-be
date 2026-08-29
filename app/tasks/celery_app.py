@@ -56,6 +56,13 @@ celery_app.conf.update(
             "task": "app.tasks.payment_tasks.verify_payment_transactions",
             "schedule": 300.0,  # every 5 minutes
         },
+        # Operator wallet balance threshold monitor: reads XLM/USDC balances
+        # every 15 minutes and alerts before a drained settlement wallet
+        # starts failing SLA payouts.
+        "monitor-wallet-balances": {
+            "task": "app.tasks.payment_tasks.monitor_wallet_balances",
+            "schedule": float(settings.WALLET_BALANCE_CHECK_INTERVAL_SECONDS),
+        },
         "webhook-autoscale-check": {
             "task": "app.tasks.webhook_autoscaler.periodic_autoscale_check",
             "schedule": 30.0,

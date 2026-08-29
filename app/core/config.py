@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 VALID_STELLAR_NETWORKS = {"testnet", "mainnet", "futurenet", "standalone"}
 VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
+# Supported at-rest encryption schemes for Stellar secret keys.
+VALID_KEY_ENCRYPTION_SCHEMES = {"fernet", "aesgcm"}
 
 # SQL transaction isolation levels supported by PostgreSQL. Values must use
 # the exact SQL names (spaces, not underscores) accepted by
@@ -97,11 +99,65 @@ class Settings(BaseSettings):
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
     PAYMENT_ASSET_ISSUER: str = ""
 
+    # ── Friendbot auto-faucet (testnet only) ──────────────────────────────
+    # Friendbot funds brand-new testnet accounts with XLM. Testnet resets
+    # wipe balances, so operator wallets are re-funded automatically instead
+    # of by hand.
+    STELLAR_FRIENDBOT_ENABLED: bool = True
+    STELLAR_FRIENDBOT_URL: str = ""          # empty -> derived from network
+    STELLAR_FRIENDBOT_TIMEOUT_SECONDS: float = 30.0
+
+    # ── Operator wallet secret key encryption at rest ─────────────────────
+    # Scheme used to encrypt Stellar secret keys: "fernet" (AES-128-CBC +
+    # HMAC-SHA256) or "aesgcm" (AES-256-GCM). Keys are only ever decrypted
+    # in memory for the duration of a signing operation.
+    STELLAR_KEY_ENCRYPTION_SCHEME: str = "fernet"
+    # Optional dedicated 32-byte url-safe base64 key. When empty the key is
+    # derived from SECRET_KEY via PBKDF2-HMAC-SHA256.
+    STELLAR_KEY_ENCRYPTION_KEY: str = ""
+    # Encrypted operator/pool secret key (ciphertext, never plaintext).
+    STELLAR_OPERATOR_SECRET_ENCRYPTED: str = ""
+
+    # ── Wallet balance threshold monitor ──────────────────────────────────
+    WALLET_BALANCE_MONITOR_ENABLED: bool = True
+    # Beat interval: every 15 minutes.
+    WALLET_BALANCE_CHECK_INTERVAL_SECONDS: int = 900
+    WALLET_MIN_XLM_BALANCE: float = 50.0
+    WALLET_MIN_USDC_BALANCE: float = 500.0
+    # Wallet monitored by default; falls back to PAYMENT_FROM_ADDRESS.
+    WALLET_MONITOR_ADDRESS: str = ""
+    # Optional: POST a JSON alert here when a monitored balance is below its
+    # operational threshold.
+    WALLET_ALERT_WEBHOOK_URL: str = ""
+
     @property
     def horizon_url(self) -> str:
         if self.STELLAR_NETWORK == "mainnet":
             return "https://horizon.stellar.org"
         return "https://horizon-testnet.stellar.org"
+
+    @property
+    def friendbot_url(self) -> str:
+        """Friendbot faucet URL for the configured network.
+
+        Friendbot only exists on the test networks; ``supports_friendbot``
+        gates callers before this is used.
+        """
+        if self.STELLAR_FRIENDBOT_URL:
+            return self.STELLAR_FRIENDBOT_URL.rstrip("/")
+        if self.STELLAR_NETWORK == "futurenet":
+            return "https://friendbot-futurenet.stellar.org"
+        return "https://friendbot.stellar.org"
+
+    @property
+    def supports_friendbot(self) -> bool:
+        """True only on networks that run a Friendbot faucet."""
+        return self.STELLAR_NETWORK in {"testnet", "futurenet"}
+
+    @property
+    def monitored_wallet_address(self) -> str:
+        """Address watched by the balance threshold monitor."""
+        return (self.WALLET_MONITOR_ADDRESS or self.PAYMENT_FROM_ADDRESS).strip()
 
     # ── Auth throttling ───────────────────────────────────────────────────
     AUTH_MAX_FAILED_ATTEMPTS: int = 5
@@ -306,6 +362,17 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_jwt_secret_key(cls, v: str) -> str:
         return validate_min_length(v, 32, "JWT_SECRET_KEY")
+
+    @field_validator("STELLAR_KEY_ENCRYPTION_SCHEME")
+    @classmethod
+    def _validate_key_encryption_scheme(cls, v: str) -> str:
+        scheme = v.strip().lower()
+        if scheme not in VALID_KEY_ENCRYPTION_SCHEMES:
+            raise ValueError(
+                f"{v!r} is not a supported secret-key encryption scheme. "
+                f"Supported: {sorted(VALID_KEY_ENCRYPTION_SCHEMES)}"
+            )
+        return scheme
 
 
 settings = Settings()
