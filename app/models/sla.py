@@ -58,6 +58,8 @@ class SLAResult(BaseModel):
     decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
     asset_code: Optional[str] = Field(None, description="Asset code for payment (e.g., XLM, USDC)")
     asset_issuer: Optional[str] = Field(None, description="Asset issuer for non-native assets")
+    deducted_maintenance_minutes: int = Field(0, description="Minutes of overlapping maintenance window deducted from MTTR")
+    config_version_hash: Optional[str] = Field(None, description="SHA-256 hash of the canonical SLA config used for this calculation")
 
 
 class SLASeverityConfig(BaseModel):

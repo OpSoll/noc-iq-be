@@ -1017,6 +1017,37 @@ def trigger_sla_violation_webhooks(
     return deliveries
 
 
+def trigger_sla_warning_webhooks(
+    db: Session,
+    sla_data: Dict[str, Any],
+    signature_version: int = CURRENT_SIGNATURE_VERSION,
+) -> List[WebhookDelivery]:
+    """Trigger ``sla.warning`` webhook deliveries to configured receivers.
+
+    Issue #549: dispatches an SLA breach warning when outage duration reaches
+    a warning threshold (e.g. 80% of the SLA threshold). Reuses the existing
+    webhook pipeline with the ``WebhookEvent.SLA_WARNING`` event type.
+
+    Args:
+        db: Database session
+        sla_data: Event data to include in webhook payload
+        signature_version: Signature algorithm version
+
+    Returns:
+        List of created WebhookDelivery records
+    """
+    logger.warning(
+        "SLA breach warning triggered for outage %s (outage duration reached warning threshold).",
+        sla_data.get("outage_id") if isinstance(sla_data, dict) else sla_data,
+    )
+    return trigger_sla_violation_webhooks(
+        db,
+        sla_data,
+        event=WebhookEvent.SLA_WARNING,
+        signature_version=signature_version,
+    )
+
+
 def retry_pending_deliveries(db: Session) -> int:
     now = datetime.utcnow()
     due_deliveries = (
