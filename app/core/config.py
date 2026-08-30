@@ -108,6 +108,8 @@ class Settings(BaseSettings):
     SLA_CONTRACT_ADDRESS: str = "local-sla-calculator"
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
+    SLA_CONTRACT_SPEC_PATH: str = ""
+    XLM_PRICE_FEED_URL: str = "https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd,eur"
     PAYMENT_WEBHOOK_SECRET: str = ""
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
