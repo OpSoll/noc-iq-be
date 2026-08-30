@@ -23,6 +23,7 @@ class SLAResultORM(Base):
     is_latest = Column(Boolean, nullable=False, default=False)
     reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
     decision_trace = Column(Text, nullable=True)          # Machine-readable decision trace
+    penalty_capped = Column(Boolean, nullable=False, default=False)  # #555: penalty capped by monthly contract fee
 
     disputes = relationship("SLADispute", primaryjoin="SLAResultORM.id == SLADispute.sla_result_id", foreign_keys="[SLADispute.sla_result_id]", back_populates="sla_result")
 

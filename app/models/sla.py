@@ -56,6 +56,7 @@ class SLAResult(BaseModel):
     threshold_source: Optional[str] = Field("config", description="Source of threshold values (e.g., 'config', 'contract')")
     reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
     decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
+    penalty_capped: bool = Field(False, description="Whether the penalty was capped at the monthly contract fee limit (#555)")
     asset_code: Optional[str] = Field(None, description="Asset code for payment (e.g., XLM, USDC)")
     asset_issuer: Optional[str] = Field(None, description="Asset issuer for non-native assets")
 

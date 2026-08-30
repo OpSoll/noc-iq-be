@@ -30,6 +30,7 @@ def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
         threshold_source=orm.threshold_source,
         reason_code=orm.reason_code,
         decision_trace=orm.decision_trace,
+        penalty_capped=bool(orm.penalty_capped or False),
     )
 
 
@@ -74,6 +75,7 @@ class SLARepository:
             is_latest=True,
             reason_code=payload.get("reason_code"),
             decision_trace=payload.get("decision_trace"),
+            penalty_capped=payload.get("penalty_capped", False),
         )
         self.db.add(orm)
         self.db.commit()
