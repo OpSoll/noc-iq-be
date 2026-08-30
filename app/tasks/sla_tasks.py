@@ -191,6 +191,45 @@ class DatabaseTask(GuardedTask):
                 job.progress_details = details
             db.commit()
 
+    def _publish_progress(
+        self,
+        current: int,
+        total: int,
+        stage: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish a Celery ``PROGRESS`` state update (issue #543).
+
+        Mirrors the DB-side Job progression to the result backend via
+        ``self.update_state(state="PROGRESS", ...)`` so callers reading the
+        task's ``AsyncResult`` see ``current``/``total`` plus a rounded
+        ``progress_percentage`` in its meta.
+
+        Guarded with try/except: eager mode (``task_always_eager=True``) and
+        unavailable result backends must never break the task itself.
+        """
+        if not total:
+            return
+        percent = (float(current) / float(total)) * 100.0
+        meta: Dict[str, Any] = {
+            "current": current,
+            "total": total,
+            "progress_percentage": round(percent, 2),
+        }
+        if stage:
+            meta["stage"] = stage
+        if extra:
+            for key, value in extra.items():
+                meta.setdefault(key, value)
+        try:
+            self.update_state(state="PROGRESS", meta=meta)
+        except Exception:  # pragma: no cover - eager/pool safety net
+            logger.debug(
+                "update_state(PROGRESS) unavailable — ignoring (task_id=%s)",
+                getattr(self.request, "id", None),
+                exc_info=True,
+            )
+
     def _add_partial_result(self, db, celery_task_id: str, item_id: str, result: Any):
         """Add a partial result for bulk operations."""
         job = self._get_job(db, celery_task_id)
@@ -266,7 +305,8 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
-        
+        self._publish_progress(current=30, total=100, stage="data_collection")
+
         result = compute_device_sla(db, device_id=device_id, period=period)
         
         self._update_progress(db, self.request.id, 70.0, {
@@ -275,6 +315,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "period": period,
             "is_violated": result.get("is_violated", False)
         })
+        self._publish_progress(
+            current=70,
+            total=100,
+            stage="sla_computation_complete",
+            extra={"is_violated": result.get("is_violated", False)},
+        )
 
         # Check for violations and dispatch webhooks
         if result.get("is_violated"):
@@ -284,6 +330,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
                 "period": period,
                 "violation_detected": True
             })
+            self._publish_progress(
+                current=85,
+                total=100,
+                stage="triggering_webhooks",
+                extra={"violation_detected": True},
+            )
             
             from app.services.webhook_service import trigger_sla_violation_webhooks
             trigger_sla_violation_webhooks(
@@ -301,6 +353,7 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
+        self._publish_progress(current=95, total=100, stage="finalizing")
 
         self._mark_success(db, self.request.id, result)
         logger.info("SLA computation complete for device=%s", device_id)
@@ -411,6 +464,21 @@ def compute_sla_chunk(
                     "progress_percentage": round(progress, 2),
                 })
 
+            # Issue #543: publish per-item counters to the result backend so
+            # AsyncResult readers see PROGRESS with current/total percentages.
+            if total:
+                self._publish_progress(
+                    current=idx,
+                    total=total,
+                    stage="processing_chunk",
+                    extra={
+                        "current_device": device_id,
+                        "processed_count": processed_count,
+                        "error_count": error_count,
+                        "chunk_size": total,
+                    },
+                )
+
         return {
             "total": total,
             "violations": len(violations),
@@ -451,6 +519,7 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "total_devices": total,
             "period": period
         })
+        self._publish_progress(current=5, total=100, stage="initialization")
 
         # Issue #538: chunk large batches into parallel tasks of at most
         # SLA_BULK_CHUNK_SIZE (50) devices so a single worker is never
@@ -468,6 +537,15 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                 "chunk_count": len(device_chunks),
                 "period": period,
             })
+            self._publish_progress(
+                current=10,
+                total=100,
+                stage="dispatching_chunks",
+                extra={
+                    "chunk_size": SLA_BULK_CHUNK_SIZE,
+                    "chunk_count": len(device_chunks),
+                },
+            )
             logger.info(
                 "Bulk SLA computation chunking %d devices into %d chunks "
                 "of %d (period=%s)",
@@ -510,6 +588,15 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                 "violations_found": len(violations),
                 "chunk_count": len(device_chunks),
             })
+            self._publish_progress(
+                current=95,
+                total=100,
+                stage="finalizing",
+                extra={
+                    "chunk_count": len(device_chunks),
+                    "violations_found": len(violations),
+                },
+            )
 
             summary = {
                 "total": total,
@@ -576,6 +663,19 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                 "progress_percentage": round(progress, 2)
             })
 
+            # Issue #543: publish per-item counters to the result backend.
+            self._publish_progress(
+                current=idx,
+                total=total,
+                stage="processing_devices",
+                extra={
+                    "current_device": device_id,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "violations_found": len(violations),
+                },
+            )
+
         # Final summary with structured progress
         self._update_progress(db, self.request.id, 95.0, {
             "stage": "finalizing",
@@ -584,6 +684,12 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "error_count": error_count,
             "violations_found": len(violations)
         })
+        self._publish_progress(
+            current=95,
+            total=100,
+            stage="finalizing",
+            extra={"violations_found": len(violations)},
+        )
         
         summary = {
             "total": total,

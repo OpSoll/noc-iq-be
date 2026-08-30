@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     CELERY_DEAD_LETTER_QUEUE: str = "celery_dead_letter"
     CELERY_DEAD_LETTER_ENABLED: bool = True
 
+    # ── Celery worker pool tuning (issue #544) ────────────────────────────
+    # I/O-bound webhook tasks run in an eventlet/greenlet pool with a high
+    # concurrency so blocking HTTP deliveries do not starve the CPU, while
+    # CPU-bound SLA/contract calculations use a small prefork pool to bound
+    # memory and DB contention. Consumed by ``app.tasks.concurrency_config``.
+    CELERY_IO_CONCURRENCY: int = 50
+    CELERY_CPU_CONCURRENCY: int = 4
+    CELERY_WEBHOOK_POOL: str = "eventlet"
+    CELERY_CALC_POOL: str = "prefork"
+
     # ── DB transaction isolation (issue #526) ─────────────────────────────
     # Applied to the engine for all transactions (PostgreSQL only).
     DB_TRANSACTION_ISOLATION_LEVEL: str = "READ COMMITTED"
@@ -361,6 +371,13 @@ class Settings(BaseSettings):
     def _validate_celery_time_limits(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("Celery time limits must be positive integers")
+        return v
+
+    @field_validator("CELERY_IO_CONCURRENCY", "CELERY_CPU_CONCURRENCY")
+    @classmethod
+    def _validate_celery_concurrency(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Celery worker concurrency must be a positive integer")
         return v
 
     @field_validator("CELERY_BROKER_URL")
