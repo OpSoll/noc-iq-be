@@ -112,6 +112,66 @@ class PaymentRepository:
             return None
         return _orm_to_pydantic(orm)
 
+    def get_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> Optional[PaymentTransaction]:
+        """Return the stored payment for ``idempotency_key``, if any.
+
+        Issue #560: used to reject duplicate settlement attempts. Returns the
+        active payment row (if any) without raising, so callers decide how to
+        handle the duplicate.
+        """
+        if not idempotency_key:
+            return None
+        orm = (
+            self.db.query(PaymentTransactionORM)
+            .filter(PaymentTransactionORM.idempotency_key == idempotency_key)
+            .first()
+        )
+        if not orm:
+            return None
+        return _orm_to_pydantic(orm)
+
+    def generate_idempotency_key(
+        self, outage_id: str, amount: float, recipient: str
+    ) -> str:
+        """Deterministic Stellar payment idempotency key (issue #560)."""
+        from app.services.stellar_payments import generate_payment_idempotency_key
+
+        return generate_payment_idempotency_key(
+            outage_id=outage_id, amount=amount, recipient=recipient
+        )
+
+    def ensure_unique_idempotency_key(
+        self,
+        outage_id: str,
+        amount: float,
+        recipient: str,
+        existing_key: str | None = None,
+    ) -> str:
+        """Compute a unique idempotency key or reject an active duplicate.
+
+        Issue #560: derives the deterministic key from
+        ``(outage_id, amount, recipient)`` and, when one is already in use by
+        an active payment row, raises :class:`PaymentIdempotencyError` instead
+        of allowing a second identical payout to be created. When an explicit
+        ``existing_key`` is supplied (legacy SLA path), that key is used
+        verbatim as long as it is not already active.
+
+        Returns:
+            The idempotency key to store on the new payment row.
+        """
+        from app.models.payment import PaymentIdempotencyError
+
+        key = existing_key or self.generate_idempotency_key(
+            outage_id=outage_id, amount=amount, recipient=recipient
+        )
+
+        dup = self.get_by_idempotency_key(key)
+        if dup is not None:
+            raise PaymentIdempotencyError(key)
+        return key
+
     def get_by_sla_result(self, sla_result_id: int, for_update: bool = False) -> Optional[PaymentTransaction]:
         query = (
             self.db.query(PaymentTransactionORM)
@@ -297,6 +357,17 @@ class PaymentRepository:
         time_bounds = TimeBounds.default_for_transaction()
 
         normalized_amount = abs(float(sla_result.amount))
+        # Issue #560: deterministic idempotency key from (outage, amount,
+        # recipient) — sha256(f"{outage_id}:{amount}:{recipient}"). The
+        # recipient is the configured settlement address. Before inserting,
+        # reject any existing payment that already holds the same active key
+        # so two identical payouts cannot both be created.
+        idempotency_key = self.ensure_unique_idempotency_key(
+            outage_id=outage_id,
+            amount=normalized_amount,
+            recipient=settings.PAYMENT_TO_ADDRESS,
+        )
+
         transaction = PaymentTransaction(
             id=f"pay_{uuid4().hex[:12]}",
             transaction_hash=f"sla-{sla_result.id}-{sla_result.payment_type}",
@@ -310,7 +381,7 @@ class PaymentRepository:
             sla_result_id=sla_result.id,
             created_at=datetime.now(timezone.utc),
             confirmed_at=None,
-            idempotency_key=f"sla_result_{sla_result.id}_{sla_result.payment_type}",
+            idempotency_key=idempotency_key,
             time_bounds_min=time_bounds.min_time,
             time_bounds_max=time_bounds.max_time,
         )

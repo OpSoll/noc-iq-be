@@ -41,6 +41,24 @@ VALID_TRANSITIONS: Dict[PaymentStatus, FrozenSet[PaymentStatus]] = {
 }
 
 
+class PaymentIdempotencyError(ValueError):
+    """Raised when a duplicate payment attempt matches an active idempotency key.
+
+    Issue #560: deterministic Stellar payment idempotency keys are used to
+    reject duplicate payouts for the same (outage, amount, recipient) tuple
+    before a second row can be inserted (the DB unique constraint is the
+    final backstop).
+    """
+
+    def __init__(self, idempotency_key: str, message: str | None = None) -> None:
+        self.idempotency_key = idempotency_key
+        super().__init__(
+            message
+            or f"Duplicate payment attempt rejected for idempotency key "
+            f"'{idempotency_key}'"
+        )
+
+
 class PaymentTransitionError(ValueError):
     """Raised when a payment status transition is not allowed.
 
