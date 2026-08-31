@@ -60,6 +60,7 @@ class JobResponse(BaseModel):
     job_type: JobType
     status: JobStatus
     progress: float
+    progress_percentage: Optional[float] = None
     progress_details: Optional[dict] = None
     partial_results: Optional[dict] = None
     per_item_errors: Optional[dict] = None
@@ -204,6 +205,20 @@ class DeadLetterSummary(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _job_progress_percentage(job: Job) -> float:
+    """Derive a single progress percentage for a Job (issue #543).
+
+    Prefers the fine-grained ``progress_percentage`` written into
+    ``progress_details`` by the tasks; falls back to the ``progress``
+    column so the field is always populated for FE progress bars.
+    """
+    details = job.progress_details or {}
+    value = details.get("progress_percentage")
+    if value is None:
+        value = job.progress or 0.0
+    return float(value)
+
+
 def _build_error_detail(job: Job) -> Optional[JobErrorDetail]:
     """Build a typed error detail from a Job record for BE-W5-050."""
     if job.error_code:
@@ -237,6 +252,7 @@ def _serialize_job(job: Job) -> JobResponse:
         job_type=job.job_type,
         status=job.status,
         progress=job.progress,
+        progress_percentage=_job_progress_percentage(job),
         progress_details=job.progress_details,
         partial_results=job.partial_results,
         per_item_errors=job.per_item_errors,
@@ -469,6 +485,7 @@ class JobProgressResponse(BaseModel):
     id: UUID
     status: JobStatus
     progress: float
+    progress_percentage: Optional[float] = None
     progress_details: Optional[dict] = None
     partial_results: Optional[dict] = None
     per_item_errors: Optional[dict] = None
@@ -489,6 +506,7 @@ def get_job_progress(
         id=job.id,
         status=job.status,
         progress=job.progress,
+        progress_percentage=_job_progress_percentage(job),
         progress_details=job.progress_details,
         partial_results=job.partial_results,
         per_item_errors=job.per_item_errors,

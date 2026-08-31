@@ -139,6 +139,14 @@ import app.metrics.celery_metrics  # noqa: E402,F401  (side-effect import)
 celery_app.autodiscover_tasks(["app.tasks"])
 
 
+# Issue #544: dedicated worker pools per task type. I/O-bound webhook tasks
+# run on an eventlet worker (high concurrency); CPU-bound SLA/contract
+# calculations run on a small prefork worker. Startup commands:
+#   celery -A app.tasks.celery_app worker --pool=eventlet --concurrency=50 -Q webhooks
+#   celery -A app.tasks.celery_app worker --pool=prefork --concurrency=4 -Q celery
+# See ``app.tasks.concurrency_config.get_task_pool_config`` for the resolver.
+
+
 def _mark_job_timed_out(task_id: str, code: str) -> None:
     """Mark the tracked ``Job`` row for ``task_id`` as failed on time limit.
 

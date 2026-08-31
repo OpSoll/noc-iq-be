@@ -379,6 +379,13 @@ class Settings(BaseSettings):
             raise ValueError("Celery time limits must be positive integers")
         return v
 
+    @field_validator("CELERY_IO_CONCURRENCY", "CELERY_CPU_CONCURRENCY")
+    @classmethod
+    def _validate_celery_concurrency(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Celery worker concurrency must be a positive integer")
+        return v
+
     @field_validator("CELERY_BROKER_URL")
     @classmethod
     def _validate_celery_broker_url(cls, v: str) -> str:
