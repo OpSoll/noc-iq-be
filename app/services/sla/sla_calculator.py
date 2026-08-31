@@ -53,6 +53,61 @@ def compute_uptime_percentage(available_minutes: int, total_minutes: int) -> str
     return f"{uptime}%"
 
 
+# --------------------------------------------------------------------------- #
+# Issue #551: Maintenance window time deduction helper
+# --------------------------------------------------------------------------- #
+
+def deduct_maintenance_window(mttr_minutes: int, maintenance_minutes: int = 0) -> tuple:
+    """Deduct overlapping maintenance window minutes from MTTR.
+
+    Returns ``(adjusted_mttr, deducted)`` where ``deducted`` is capped at the
+    MTTR value so the adjusted MTTR never goes negative.
+    """
+    maintenance_minutes = max(0, maintenance_minutes or 0)
+    mttr_minutes = max(0, mttr_minutes or 0)
+    deducted = min(maintenance_minutes, mttr_minutes)
+    return mttr_minutes - deducted, deducted
+
+
+# --------------------------------------------------------------------------- #
+# Issue #550: SLA config version hash collision resistance helper
+# --------------------------------------------------------------------------- #
+
+def compute_config_version_hash(config=None) -> str:
+    """Compute a SHA-256 digest over the canonical JSON of an SLA config.
+
+    Canonicalisation uses sorted keys and compact separators (matching the
+    existing ``_hash_job_payload`` pattern) so the same config always produces
+    the same hash regardless of key ordering or whitespace.
+    """
+    if config is None:
+        payload = dict(SLA_CONFIG)
+    elif hasattr(config, "model_dump"):
+        payload = config.model_dump()
+    elif isinstance(config, dict):
+        payload = dict(config)
+    else:
+        payload = vars(config)
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Issue #549: SLA breach warning threshold helper (80% of threshold)
+# --------------------------------------------------------------------------- #
+
+def sla_warning_threshold_reached(mttr_minutes: int, threshold_minutes: int, warning_fraction: float = 0.8) -> bool:
+    """Return True when MTTR reaches the warning fraction of the threshold.
+
+    The warning fires when ``mttr >= threshold * warning_fraction`` but strictly
+    before an actual breach (``mttr < threshold``), so a value at/above the
+    threshold is treated as a violation rather than a warning.
+    """
+    if warning_fraction >= 1.0 or threshold_minutes <= 0:
+        return False
+    return threshold_minutes * warning_fraction <= mttr_minutes < threshold_minutes
+
+
 class SLACalculator:
     @staticmethod
     def validate_config(config=None) -> dict[str, SLASeverityConfig]:
@@ -121,14 +176,14 @@ class SLACalculator:
 
         # Case 1: SLA violated → penalty
         # Deterministic boundary handling: use >= for violation check to handle exact threshold edges
-        if mttr_minutes > threshold:
-            overtime = mttr_minutes - threshold
+        if adjusted_mttr > threshold:
+            overtime = adjusted_mttr - threshold
             penalty = overtime * config.penalty_per_minute
 
             return SLAResult(
                 outage_id=outage_id,
                 status="violated",
-                mttr_minutes=mttr_minutes,
+                mttr_minutes=adjusted_mttr,
                 threshold_minutes=threshold,
                 amount=-penalty,
                 payment_type="penalty",
@@ -137,14 +192,16 @@ class SLACalculator:
                 threshold_source=threshold_source,
                 is_offline_fallback=is_offline_fallback,
                 reason_code="mttr_exceeded",
-                decision_trace=f"MTTR {mttr_minutes} > threshold {threshold} (overtime {overtime} minutes)",
+                decision_trace=f"MTTR {adjusted_mttr} > threshold {threshold} (overtime {overtime} minutes)",
                 asset_code=asset_code,
                 asset_issuer=asset_issuer,
+                deducted_maintenance_minutes=deducted_maintenance,
+                config_version_hash=config_version_hash,
             )
 
         # Case 2: SLA met → reward
         # Deterministic boundary handling: use <= for met check to handle exact threshold edges
-        performance_ratio = 0 if threshold == 0 else (mttr_minutes * 100) // threshold
+        performance_ratio = 0 if threshold == 0 else (adjusted_mttr * 100) // threshold
 
         if performance_ratio < 50:
             multiplier = 200
@@ -164,7 +221,7 @@ class SLACalculator:
         return SLAResult(
             outage_id=outage_id,
             status="met",
-            mttr_minutes=mttr_minutes,
+            mttr_minutes=adjusted_mttr,
             threshold_minutes=threshold,
             amount=reward,
             payment_type="reward",
@@ -173,7 +230,9 @@ class SLACalculator:
             threshold_source=threshold_source,
             is_offline_fallback=is_offline_fallback,
             reason_code=reason_code,
-            decision_trace=f"MTTR {mttr_minutes} <= threshold {threshold}, performance ratio {performance_ratio}%, rating {rating}",
+            decision_trace=f"MTTR {adjusted_mttr} <= threshold {threshold}, performance ratio {performance_ratio}%, rating {rating}",
             asset_code=asset_code,
             asset_issuer=asset_issuer,
+            deducted_maintenance_minutes=deducted_maintenance,
+            config_version_hash=config_version_hash,
         )

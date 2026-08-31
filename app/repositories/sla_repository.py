@@ -31,6 +31,8 @@ def _orm_to_pydantic(orm: SLAResultORM) -> SLAResult:
         is_offline_fallback=orm.is_offline_fallback,
         reason_code=orm.reason_code,
         decision_trace=orm.decision_trace,
+        deducted_maintenance_minutes=orm.deducted_maintenance_minutes,
+        config_version_hash=orm.config_version_hash,
     )
 
 
@@ -76,6 +78,8 @@ class SLARepository:
             is_latest=True,
             reason_code=payload.get("reason_code"),
             decision_trace=payload.get("decision_trace"),
+            deducted_maintenance_minutes=payload.get("deducted_maintenance_minutes", 0),
+            config_version_hash=payload.get("config_version_hash"),
         )
         self.db.add(orm)
         self.db.commit()

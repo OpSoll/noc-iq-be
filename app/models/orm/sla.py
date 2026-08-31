@@ -24,6 +24,8 @@ class SLAResultORM(Base):
     is_latest = Column(Boolean, nullable=False, default=False)
     reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
     decision_trace = Column(Text, nullable=True)          # Machine-readable decision trace
+    deducted_maintenance_minutes = Column(Integer, nullable=False, default=0)  # Maintenance minutes deducted
+    config_version_hash = Column(String(64), nullable=True)                    # SHA-256 of canonical SLA config
 
     disputes = relationship("SLADispute", primaryjoin="SLAResultORM.id == SLADispute.sla_result_id", foreign_keys="[SLADispute.sla_result_id]", back_populates="sla_result")
 
