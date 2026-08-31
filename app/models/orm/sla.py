@@ -19,6 +19,7 @@ class SLAResultORM(Base):
     rating = Column(String(20), nullable=False)           # "exceptional" | "excellent" | "good" | "poor"
     policy_version = Column(String(50), nullable=False, default="1.0")
     threshold_source = Column(String(50), nullable=False, default="config")
+    is_offline_fallback = Column(Boolean, nullable=False, default=False)  # computed off-chain when Soroban RPC is unreachable
     created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
     is_latest = Column(Boolean, nullable=False, default=False)
     reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
