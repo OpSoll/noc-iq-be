@@ -2,12 +2,40 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Issue #560 — Deterministic payment idempotency key
+# ---------------------------------------------------------------------------
+
+def generate_payment_idempotency_key(
+    outage_id: str, amount: float, recipient: str
+) -> str:
+    """Deterministically derive a Stellar payment idempotency key.
+
+    Issue #560: ``sha256(outage_id:amount:recipient)`` so identical payouts
+    (same outage, amount and recipient) always produce the same key. The key
+    is stored in ``payment_transactions.idempotency_key`` (UNIQUE) and used
+    to reject duplicate settlement attempts.
+
+    Args:
+        outage_id:  Identifier of the outage being settled.
+        amount:     Payment amount (numeric, normalized by the caller).
+        recipient:  Payee address / settlement wallet.
+
+    Returns:
+        Hex SHA-256 digest of the canonical ``outage_id:amount:recipient``
+        seed string.
+    """
+    seed = f"{outage_id}:{amount}:{recipient}"
+    return hashlib.sha256(seed.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
