@@ -93,6 +93,20 @@ class Settings(BaseSettings):
     CELERY_DEAD_LETTER_QUEUE: str = "celery_dead_letter"
     CELERY_DEAD_LETTER_ENABLED: bool = True
 
+    # ── Celery queue routing (issue #540) ─────────────────────────────────
+    # Priority task queues. Urgent webhook dispatches are routed to the
+    # ``high_priority`` queue; the default and bulk queues serve the rest.
+    CELERY_TASK_QUEUES: str = "high_priority,default,bulk"
+    # The queue Celery uses when a task does not declare one explicitly.
+    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    # Comma-separated list of queue names that MUST be bound to active
+    # workers at boot (BE-W5-051). Empty means the probe is a no-op.
+    CELERY_REQUIRED_QUEUES: str = ""
+    # Seconds to wait for the queue-binding probe to hear from workers.
+    CELERY_QUEUE_PROBE_TIMEOUT_SECONDS: float = 5.0
+    # When True the worker fails fast if a required queue is not bound.
+    CELERY_STRICT_QUEUE_BINDINGS: bool = True
+
     # ── DB transaction isolation (issue #526) ─────────────────────────────
     # Applied to the engine for all transactions (PostgreSQL only).
     DB_TRANSACTION_ISOLATION_LEVEL: str = "READ COMMITTED"
@@ -108,6 +122,8 @@ class Settings(BaseSettings):
     SLA_CONTRACT_ADDRESS: str = "local-sla-calculator"
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
+    SLA_CONTRACT_SPEC_PATH: str = ""
+    XLM_PRICE_FEED_URL: str = "https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd,eur"
     PAYMENT_WEBHOOK_SECRET: str = ""
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"

@@ -54,11 +54,14 @@ class SLAResult(BaseModel):
     rating: Literal["exceptional", "excellent", "good", "poor"]
     policy_version: Optional[str] = Field("v1.0", description="Version of SLA policy used for this calculation")
     threshold_source: Optional[str] = Field("config", description="Source of threshold values (e.g., 'config', 'contract')")
+    is_offline_fallback: bool = Field(False, description="True when the result was computed by the offline fallback calculator (on-chain Soroban RPC unreachable)")
     reason_code: Optional[str] = Field(None, description="Machine-readable reason code for the decision")
     decision_trace: Optional[str] = Field(None, description="Machine-readable decision trace for audit")
     penalty_capped: bool = Field(False, description="Whether the penalty was capped at the monthly contract fee limit (#555)")
     asset_code: Optional[str] = Field(None, description="Asset code for payment (e.g., XLM, USDC)")
     asset_issuer: Optional[str] = Field(None, description="Asset issuer for non-native assets")
+    deducted_maintenance_minutes: int = Field(0, description="Minutes of overlapping maintenance window deducted from MTTR")
+    config_version_hash: Optional[str] = Field(None, description="SHA-256 hash of the canonical SLA config used for this calculation")
 
 
 class SLASeverityConfig(BaseModel):

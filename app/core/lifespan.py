@@ -94,6 +94,21 @@ async def _check_stellar_network() -> None:
         logger.warning("Stellar network check skipped: %s", exc)
 
 
+def _verify_sla_contract_abi() -> None:
+    """Fail startup if the Soroban SLA ABI cannot match local calculations."""
+    if settings.CONTRACT_EXECUTION_MODE != "soroban_rpc":
+        return
+    if not settings.SLA_CONTRACT_SPEC_PATH:
+        from app.services.sla.contract_spec import ContractSpecMismatchError
+
+        raise ContractSpecMismatchError(
+            "SLA_CONTRACT_SPEC_PATH is required when CONTRACT_EXECUTION_MODE=soroban_rpc."
+        )
+    from app.services.sla.contract_spec import verify_sla_contract_spec_file
+
+    verify_sla_contract_spec_file(settings.SLA_CONTRACT_SPEC_PATH)
+
+
 @asynccontextmanager
 async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # --- startup ---
@@ -103,6 +118,7 @@ async def app_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     warmup_db_pool()
     await _startup_redis()
     _check_celery()
+    _verify_sla_contract_abi()
     await _check_stellar_network()
 
     yield
