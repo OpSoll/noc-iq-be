@@ -108,6 +108,46 @@ def sla_warning_threshold_reached(mttr_minutes: int, threshold_minutes: int, war
     return threshold_minutes * warning_fraction <= mttr_minutes < threshold_minutes
 
 
+# Exceptional uptime threshold for the reward credit tier (issue #552)
+EXCEPTIONAL_UPTIME_PCT = 99.99
+
+# Fields compared when auditing historical SLA recalculation diffs (issue #553)
+COMPARISON_FIELDS = (
+    "outage_id",
+    "status",
+    "mttr_minutes",
+    "threshold_minutes",
+    "amount",
+    "payment_type",
+    "rating",
+    "policy_version",
+    "threshold_source",
+    "reason_code",
+    "decision_trace",
+    "asset_code",
+    "asset_issuer",
+    "penalty_capped",
+)
+
+
+def deduplicate_outage_ids(outage_ids):
+    """Deduplicate a batch outage ID list preserving first-occurrence order (issue #554).
+
+    Returns a tuple of ``(unique_ids, skipped_ids)`` where ``skipped_ids`` is the
+    list of duplicate outage IDs that were skipped so callers can emit a warning.
+    """
+    unique_ids = []
+    skipped_ids = []
+    seen = set()
+    for outage_id in outage_ids:
+        if outage_id in seen:
+            skipped_ids.append(outage_id)
+        else:
+            seen.add(outage_id)
+            unique_ids.append(outage_id)
+    return unique_ids, skipped_ids
+
+
 class SLACalculator:
     @staticmethod
     def validate_config(config=None) -> dict[str, SLASeverityConfig]:
@@ -179,6 +219,20 @@ class SLACalculator:
         if adjusted_mttr > threshold:
             overtime = adjusted_mttr - threshold
             penalty = overtime * config.penalty_per_minute
+
+            # Penalty cap per billing period: capped at 100% of the site's
+            # monthly contract fee (issue #555). Fall back to max_penalty when
+            # provided, otherwise to monthly_contract_fee; no cap when neither
+            # is supplied so existing behavior is preserved.
+            penalty_capped = False
+            cap = max_penalty if max_penalty is not None else monthly_contract_fee
+            if cap is not None and penalty > cap:
+                penalty = cap
+                penalty_capped = True
+
+            decision_trace = f"MTTR {mttr_minutes} > threshold {threshold} (overtime {overtime} minutes)"
+            if penalty_capped:
+                decision_trace += f" | penalty capped at {cap} (100% of monthly contract fee)"
 
             return SLAResult(
                 outage_id=outage_id,
