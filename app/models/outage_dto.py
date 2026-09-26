@@ -1,8 +1,9 @@
+import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, List, Optional
+from typing import Any, Annotated, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, Path, UUID4, field_validator, model_validator, ValidationError
 
 from app.models.enums import OutageStatus, Severity
 from app.core.config import settings
@@ -21,6 +22,33 @@ class OutageSortField(str, Enum):
 class OutageSortDirection(str, Enum):
     asc = "asc"
     desc = "desc"
+
+
+# --- #776: strict UUID path parameter validation ---
+
+UUID_V4_PATTERN = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+
+UUID_V4_REGEX = re.compile(UUID_V4_PATTERN, re.IGNORECASE)
+
+
+def validate_uuid_path_param(value: str) -> str:
+    """Validate a UUID v4 path parameter before it reaches the database.
+
+    Raises ``ValueError`` when ``value`` is not a canonical v4 UUID so the
+    request is rejected up front, instead of letting a malformed id reach the
+    DB driver and surface as a type-mismatch error.
+    """
+    if not UUID_V4_REGEX.match(value or ""):
+        raise ValueError(
+            f"'{value}' is not a valid UUID v4. Expected 8-4-4-4-12 hexadecimal characters."
+        )
+    return value
+
+
+UUIDPathParam = Annotated[
+    UUID4,
+    Path(..., description="Canonical UUID v4 identifier.", pattern=UUID_V4_PATTERN),
+]
 
 
 class OutageCreate(BaseModel):
@@ -118,6 +146,23 @@ class OutageCreate(BaseModel):
         return v
 
 class OutageUpdate(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "resolved",
+                "site_name": "Site A",
+                "severity": "high",
+                "resolved_at": "2026-01-01T02:00:00Z",
+                "description": "Example outage affecting core API.",
+                "affected_services": ["core-api"],
+                "affected_subscribers": 50,
+                "assigned_to": "oncall@example.com",
+                "created_by": "reporter@example.com",
+                "location": {"latitude": 40.7128, "longitude": -74.0060},
+            }
+        }
+    )
+
     status: Optional[OutageStatus] = None
     site_name: Optional[str] = None
     severity: Optional[Severity] = None
@@ -172,6 +217,16 @@ class BulkOutageCreate(BaseModel):
 
 class ImportFieldError(BaseModel):
     """A single field-level validation error within an import row."""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "field": "severity",
+                "type": "enum",
+                "message": "Input should be 'low', 'medium' or 'high'",
+            }
+        }
+    )
+
     field: Optional[str] = None
     type: Optional[str] = None
     message: str
@@ -179,6 +234,27 @@ class ImportFieldError(BaseModel):
 
 class ImportRowResult(BaseModel):
     """Machine-readable result for a single import row."""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "row": 2,
+                "id": "outage-002",
+                "status": "error",
+                "errors": [
+                    {
+                        "field": "severity",
+                        "type": "enum",
+                        "message": "Input should be 'low', 'medium' or 'high'",
+                    }
+                ],
+                "outage_id": None,
+                "persisted": False,
+                "duplicate": False,
+                "existing_id": None,
+            }
+        }
+    )
+
     row: int
     id: Optional[str] = None
     status: str  # "ok" | "error"
@@ -191,6 +267,38 @@ class ImportRowResult(BaseModel):
 
 class ImportResponse(BaseModel):
     """Top-level response for the import endpoint."""
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mode": "dry_run",
+                "consistency": "atomic",
+                "total_rows": 2,
+                "persisted": 0,
+                "validated": 1,
+                "error_count": 1,
+                "errors": [
+                    {
+                        "row": 2,
+                        "id": "outage-002",
+                        "status": "error",
+                        "errors": [
+                            {
+                                "field": "severity",
+                                "type": "enum",
+                                "message": "Input should be 'low', 'medium' or 'high'",
+                            }
+                        ],
+                        "outage_id": None,
+                        "persisted": False,
+                        "duplicate": False,
+                        "existing_id": None,
+                    }
+                ],
+                "rows": [],
+            }
+        }
+    )
+
     mode: str  # "dry_run" | "import"
     consistency: ImportConsistency
     total_rows: int
