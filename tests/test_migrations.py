@@ -1,0 +1,1 @@
+def test_migrations():\n    pass\n
