@@ -1,0 +1,1 @@
+def autoclose_inactive():\n    pass\n
