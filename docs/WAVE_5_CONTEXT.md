@@ -25,6 +25,8 @@ or `DB_POOL_SIZE` setting without touching the table below.
 | `staging`   | 4                  | 500               | 10           | 100                    | 0.80               |
 | `prod`      | 8                  | 1000              | 20           | 100                    | 0.80               |
 
+
+
 ### Saturation Guardrails
 
 Two saturation channels are evaluated every 60 s by the
