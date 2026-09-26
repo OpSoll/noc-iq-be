@@ -1,13 +1,16 @@
 import logging
+import time
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import Counter, Histogram
 from datetime import datetime
 from sqlalchemy import text
 from redis import Redis
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
 from app.api.v1.router import api_router
 from app.core.config import settings, validate_env_schema, validate_critical_settings
@@ -71,6 +74,101 @@ async def check_worker_queue_bindings() -> dict:
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Request timing metrics (#775)
+# ---------------------------------------------------------------------------
+#
+# These collectors live on prometheus_client's default registry, which the
+# existing ``metrics_router`` already exposes via ``GET /metrics``, so the
+# series below are exported in Prometheus text format with no new endpoint.
+
+REQUEST_DURATION_SECONDS = Histogram(
+    "noc_iq_http_request_duration_seconds",
+    "HTTP request duration in seconds, labelled by method, route and status class.",
+    labelnames=["method", "route", "status_class"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+)
+
+REQUEST_COUNT = Counter(
+    "noc_iq_http_requests_total",
+    "HTTP requests handled, labelled by method, route and status code.",
+    labelnames=["method", "route", "status_code"],
+)
+
+
+def _route_label(request: Request) -> str:
+    """Prefer the matched route template over the raw path.
+
+    Using the template keeps label cardinality bounded — ``/outages/{id}``
+    rather than one series per outage id.
+    """
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or request.url.path
+
+
+class RequestTimingMetricsMiddleware(BaseHTTPMiddleware):
+    """Record request duration and status distribution for every API route."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed = time.perf_counter() - started
+
+        status_code = response.status_code
+        route = _route_label(request)
+        status_class = f"{status_code // 100}xx"
+
+        REQUEST_DURATION_SECONDS.labels(request.method, route, status_class).observe(elapsed)
+        REQUEST_COUNT.labels(request.method, route, str(status_code)).inc()
+
+        response.headers["X-Process-Time-Ms"] = f"{elapsed * 1000:.2f}"
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Content-Type enforcement (#774)
+# ---------------------------------------------------------------------------
+
+
+class ContentTypeEnforcementMiddleware(BaseHTTPMiddleware):
+    """Reject mutation requests that do not declare a supported Content-Type.
+
+    ``POST``/``PUT``/``PATCH`` must send ``application/json``, except on the
+    designated upload routes which may also send ``multipart/form-data``. A
+    missing or unsupported header is answered with ``415 Unsupported Media
+    Type`` so it fails as a client error at the edge, instead of surfacing
+    later as an unhandled body-parsing error.
+    """
+
+    MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH"})
+    JSON_CONTENT_TYPE = "application/json"
+    UPLOAD_CONTENT_TYPE = "multipart/form-data"
+    UPLOAD_PATH_PREFIXES = ("/upload",)
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.method in self.MUTATING_METHODS:
+            raw = request.headers.get("content-type") or ""
+            content_type = raw.split(";", 1)[0].strip().lower()
+
+            is_upload = request.url.path.startswith(self.UPLOAD_PATH_PREFIXES)
+            allowed = (
+                (self.JSON_CONTENT_TYPE, self.UPLOAD_CONTENT_TYPE)
+                if is_upload
+                else (self.JSON_CONTENT_TYPE,)
+            )
+
+            if content_type not in allowed:
+                return JSONResponse(
+                    status_code=415,
+                    content={
+                        "detail": "Unsupported Media Type. "
+                        f"Expected one of: {', '.join(allowed)}."
+                    },
+                )
+
+        return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_env_schema()
@@ -89,6 +187,12 @@ app = FastAPI(
 )
 
 app.add_middleware(PoolSaturationMiddleware)
+
+# Issue #774: reject mutation requests with a missing/unsupported Content-Type.
+app.add_middleware(ContentTypeEnforcementMiddleware)
+
+# Issue #775: per-route request duration and status distribution metrics.
+app.add_middleware(RequestTimingMetricsMiddleware)
 
 app.add_middleware(CorrelationMiddleware)
 
