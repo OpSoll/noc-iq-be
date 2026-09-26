@@ -1,0 +1,1 @@
+def verify_wasm_hash():\n    pass\n
