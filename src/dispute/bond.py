@@ -1,0 +1,1 @@
+def calculate_bond():\n    pass\n
