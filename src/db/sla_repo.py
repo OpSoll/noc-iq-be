@@ -1,0 +1,1 @@
+class SLARepository:\n    pass\n
