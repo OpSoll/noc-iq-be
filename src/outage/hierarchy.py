@@ -1,0 +1,1 @@
+def propagate_outage_hierarchy():\n    pass\n

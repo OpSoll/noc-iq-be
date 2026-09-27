@@ -1,0 +1,1 @@
+def batch_update_outages():\n    pass\n
