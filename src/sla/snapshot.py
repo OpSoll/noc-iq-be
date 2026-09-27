@@ -1,0 +1,1 @@
+def create_monthly_snapshot():\n    pass\n
