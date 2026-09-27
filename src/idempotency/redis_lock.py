@@ -1,0 +1,1 @@
+def acquire_distributed_lock():\n    pass\n
