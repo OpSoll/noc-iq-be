@@ -438,13 +438,57 @@ cargo test -- --nocapture
 
 ## 🔒 Security Guidelines
 
-- **Never commit secrets** (API keys, private keys, passwords)
-- Use **environment variables** for sensitive data
-- Follow **principle of least privilege**
-- **Validate all inputs**
-- Use **prepared statements** for database queries
-- **Sanitize user inputs**
-- Keep **dependencies updated**
+**CRITICAL: Security is everyone's responsibility. Follow these guidelines strictly.**
+
+### Secret Management
+- **Never commit secrets** (API keys, private keys, passwords, tokens) to version control
+- Use **environment variables** or a secrets manager (AWS Secrets Manager, HashiCorp Vault) for sensitive data
+- **Never log secrets** or include them in error messages, stack traces, or documentation
+- Use **separate secrets** for each environment (dev/staging/prod)
+- **Rotate secrets** regularly and immediately after any suspected compromise
+
+### Authentication & Authorization
+- Always use **bcrypt** for password hashing (never plaintext or weak hashes)
+- Implement **rate limiting** on auth endpoints to prevent brute force attacks
+- Use **token rotation** for refresh tokens to detect replay attacks
+- Follow the **principle of least privilege** for all API endpoints
+- Validate **role-based access** on every protected endpoint
+
+### Input Validation & Sanitization
+- **Validate all inputs** using Pydantic models with strict type checking
+- Enforce **payload size limits** to prevent abuse (see MAX_REQUEST_BODY_SIZE_BYTES)
+- **Sanitize user inputs** before storage or processing
+- Use **parameterized queries** for database operations (SQLAlchemy handles this)
+- Implement **CORS policies** that restrict allowed origins
+
+### Blockchain & Wallet Security
+- **NEVER expose Stellar secret keys** (starting with 'S') in code, logs, or docs
+- Only use **public keys** (starting with 'G') for wallet linking and balance queries
+- **Separate testnet and mainnet keys** - never reuse across environments
+- Use **hardware security modules (HSM)** or secure enclaves for production key storage
+- Implement **transaction validation** before submission (amount, destination, asset type)
+
+### Webhook Security
+- Always **verify webhook signatures** using HMAC-SHA256 before processing
+- Implement **idempotency** to prevent duplicate webhook processing
+- Use **HTTPS** for all webhook endpoints
+- Validate **webhook payload structure** before acting on events
+
+### Audit Logging (BE-010)
+- **Never log sensitive data** (passwords, tokens, secret keys)
+- Include **actor attribution** (user ID/email) in all audit events
+- Add **correlation IDs** to track requests across services
+- Audit logs are **immutable** - never modify or delete audit entries
+- Redact sensitive fields automatically using the audit service's sanitization logic
+
+### Code Review Security Checklist
+Before approving any PR, verify:
+- [ ] No secrets or credentials in code or comments
+- [ ] All user inputs are validated and sanitized
+- [ ] Auth checks are present on protected endpoints
+- [ ] Error messages don't leak sensitive information
+- [ ] Dependencies are up-to-date and free of known vulnerabilities
+- [ ] Audit logging captures security-relevant events
 
 
 ## 🐛 Reporting Bugs
@@ -471,15 +515,128 @@ Use the GitHub issue template and include:
 - **Additional context** (mockups, examples, etc.)
 
 
-## 📞 Getting Help
+---
 
-- **GitHub Issues**: For bugs and feature requests
-- **Discord**: [Join our server] (link TBD)
-- **Stellar Discord**: For Stellar-specific questions
+## 🔁 CI Pipeline
 
-## 📜 License
+NOCIQ uses a **multi-stage GitHub Actions CI pipeline** designed for fast, actionable feedback.  All stages cache pip dependencies using `actions/cache` and upload stage-specific artifacts.
 
-By contributing to NOCIQ, you agree that your contributions will be licensed under the MIT License.
+### Stage Dependency Graph
+
+```
+lint ──┬──► tests ─────────────┐
+       └──► contract-checks ───┴──► integration-checks
+
+release-drift-check  (push to main / release/**)
+benchmarks           (push to main / release/**)
+```
+
+### Stage Summary
+
+| Stage | Job name | What it checks | Artifact |
+|-------|----------|---------------|----------|
+| 1 | `lint` | flake8 + mypy type checks | — |
+| 2a | `tests` | Unit & integration tests (excludes contract/stellar) | `unit-test-results/` (14 days) |
+| 2b | `contract-checks` | Contract parity (`test_contract_parity.py`) | `contract-check-results/` (14 days) |
+| 3 | `integration-checks` | Stellar Wave integration (`test_stellar_wave_issues.py`) | `integration-check-results/` (14 days) |
+| — | `benchmarks` | Analytics export latency benchmarks | `benchmark-results-<sha>/` (30 days) |
+| — | `release-drift-check` | docs/router/config synchronisation drift | `release-drift-report-<sha>.json` (30 days) |
+
+### Fail-fast behaviour
+
+Each stage gate **fails fast** and blocks dependent stages:
+- **`lint` fails** → `tests` and `contract-checks` are skipped immediately.
+- **`tests` or `contract-checks` fails** → `integration-checks` is skipped.
+- **`release-drift-check` exits 1** → workflow fails; the JSON drift report is still uploaded.
+
+### Reproducing locally
+
+```bash
+# Stage 1 — Lint & type check
+flake8 app/ --max-line-length=120 --extend-ignore=E203,W503
+mypy app/ --ignore-missing-imports --no-strict-optional
+
+# Stage 2a — Unit & integration tests
+pytest tests/ \
+  --ignore=tests/test_contract_parity.py \
+  --ignore=tests/test_stellar_wave_issues.py \
+  --ignore=tests/test_analytics_benchmarks.py \
+  -v
+
+# Stage 2b — Contract checks
+pytest tests/test_contract_parity.py -v
+
+# Stage 3 — Integration checks
+pytest tests/test_stellar_wave_issues.py -v
+
+# Benchmarks
+pytest tests/test_analytics_benchmarks.py -v
+
+# Release drift check
+python scripts/check_release_drift.py
+```
+
+### Analytics Benchmark Thresholds
+
+The benchmark suite (`tests/test_analytics_benchmarks.py`) asserts:
+- **Aggregation operations** complete in < `AGGREGATION_LATENCY_THRESHOLD_MS` (default 200 ms).
+- **Export operations** complete in < `EXPORT_LATENCY_THRESHOLD_MS` (default 500 ms).
+
+CI relaxes thresholds via env vars:
+```bash
+AGGREGATION_LATENCY_THRESHOLD_MS=500 EXPORT_LATENCY_THRESHOLD_MS=1000 \
+  pytest tests/test_analytics_benchmarks.py
+```
+
+Benchmark results are written to `tests/benchmark-results.json` and uploaded as a named artifact per commit SHA, enabling trend comparison across releases.
+
+### Release Drift Check
+
+`scripts/check_release_drift.py` cross-checks three sources for synchronisation:
+
+1. **API docs vs router**: Every path documented in `docs/API.md` must be reachable via a registered prefix in `app/api/v1/router.py`.
+2. **Config vs `.env.example`**: Every `Settings` field in `app/core/config.py` should have an entry in `.env.example`.
+3. **Router vs filesystem**: Every module imported in `router.py` must exist on disk.
+
+Drift findings are categorised as `critical`, `warning`, or `info`.  **Critical findings cause a CI failure** (exit code 1).
+
+### Verifying the database schema
+
+After changing a SQLAlchemy model, make sure a matching Alembic migration is
+present. Run the schema verification command to detect model/migration drift:
+
+```bash
+DATABASE_URL=postgresql://user:pass@host:5432/nociq \
+  python scripts/verify_db_schema.py
+```
+
+The script runs `alembic check` and **fails (exit code 1) when the models have
+drifted from the current migration head**, so it can be wired into CI to gate
+merges. If drift is reported, generate the missing migration with:
+
+```bash
+alembic revision --autogenerate -m 'describe change'
+alembic upgrade head
+```
+
+then re-run the verification.
+
+### Database backup & restore drill
+
+Before relying on a backup in production, verify restore integrity with the
+automated drill script:
+
+```bash
+DATABASE_URL=postgresql://user:pass@host:5432/nociq \
+  ./scripts/verify_db_backup.sh
+```
+
+The script executes `pg_dump`, restores the dump into a temporary database,
+and compares row counts for the core tables (`outages`, `sla_results`,
+`payment_transactions`) between the source and the restored database. It logs
+each step and exits non-zero if any row count mismatches.
+
+---
 
 ## 🙏 Thank You!
 

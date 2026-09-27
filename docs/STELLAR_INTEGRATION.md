@@ -147,11 +147,11 @@ STELLAR_NETWORK=testnet
 STELLAR_HORIZON_URL=https://horizon-testnet.stellar.org
 STELLAR_SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
 
-# Pool Wallet (keep secret key secure!)
-STELLAR_POOL_SECRET_KEY=SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+# Pool Wallet - NEVER commit secret keys to version control!
+# Generate these using: stellar-sdk Keypair.random()
 STELLAR_POOL_PUBLIC_KEY=GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
-# Smart Contract IDs
+# Smart Contract IDs - obtained after contract deployment
 SLA_CONTRACT_ID=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
 USDC_TOKEN_ADDRESS=CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
 NOCIQ_TOKEN_ADDRESS=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
@@ -161,19 +161,30 @@ AUTO_PAYMENT_ENABLED=true
 MAX_AUTO_PAYMENT_AMOUNT=10000
 ```
 
+> **SECURITY WARNING**: Never commit secret keys to version control. Use environment variables or secure key management systems. The `STELLAR_POOL_SECRET_KEY` should be stored securely and never exposed in logs, documentation, or code examples.
+
 ### 2. Create Stellar Accounts
+
+**SECURITY CRITICAL**: Handle secret keys with extreme care. Never expose them in logs, documentation, or share them electronically.
 
 **Using Stellar Laboratory (Testnet):**
 
 1. Go to [Stellar Laboratory](https://laboratory.stellar.org/#account-creator?network=test)
 2. Click "Generate keypair"
-3. Save the **Secret Key** securely (starts with 'S')
-4. Copy the **Public Key** (starts with 'G')
+3. **IMMEDIATELY SAVE the Secret Key securely** (starts with 'S') - store in password manager or hardware security module
+4. Copy the **Public Key** (starts with 'G') for configuration
 5. Click "Fund account" to get testnet XLM from Friendbot
 
-**Create two accounts:**
-- **Pool Account**: For holding and distributing funds
-- **Operator Account**: For testing penalty payments
+**Create accounts with clear purposes:**
+- **Pool Account**: For holding and distributing funds (highest security requirement)
+- **Operator Account**: For testing penalty payments (medium security)
+
+**NEVER**:
+- Commit secret keys to version control
+- Log secret keys in application logs
+- Include secret keys in documentation examples
+- Share secret keys via email, chat, or unencrypted channels
+- Use the same keys for testnet and mainnet
 
 ### 3. Establish Trustlines (USDC)
 
@@ -225,10 +236,13 @@ cargo build --target wasm32-unknown-unknown --release
 
 **Deploy to testnet:**
 ```bash
+# SECURITY: Use environment variable for secret key, never hardcode
+export STELLAR_DEPLOYER_SECRET="your-actual-secret-key-here"
+
 soroban contract deploy \
   --wasm target/wasm32-unknown-unknown/release/sla_calculator.wasm \
   --network testnet \
-  --source-account SXXX...
+  --source-account "$STELLAR_DEPLOYER_SECRET"
 ```
 
 **Initialize contract:**
@@ -236,7 +250,7 @@ soroban contract deploy \
 soroban contract invoke \
   --id CCCC... \
   --network testnet \
-  --source-account SXXX... \
+  --source-account "$STELLAR_DEPLOYER_SECRET" \
   -- initialize \
   --admin GXXX... \
   --usdc_token CBBB... \
@@ -276,14 +290,32 @@ async function connectWallet() {
 from stellar_sdk import Keypair
 
 def create_wallet():
-    """Create a new Stellar keypair"""
+    """Create a new Stellar keypair for a user"""
     keypair = Keypair.random()
-    
+
+    # SECURITY: Never return or log the secret key
+    # Only return the public key for wallet linking
     return {
         "public_key": keypair.public_key,
-        "secret_key": keypair.secret  # Store securely!
+        "secret_key": "[REDACTED - Store securely server-side or use hardware security module]"
+    }
+
+# CORRECT implementation - only expose public key
+def create_wallet_secure():
+    """Create a new Stellar keypair"""
+    keypair = Keypair.random()
+
+    # Store secret key securely (database with encryption, HSM, etc.)
+    # NEVER return it in API responses
+    store_secret_key_securely(keypair.secret)
+
+    return {
+        "public_key": keypair.public_key,
+        "message": "Wallet created. Secret key stored securely."
     }
 ```
+
+> **SECURITY WARNING**: The above example shows what NOT to do. Secret keys should never be returned in API responses. Use secure key management systems and only expose public keys for wallet operations.
 
 ### Check Balance
 
@@ -420,18 +452,25 @@ async def process_outage_resolution(outage_id: str):
 ### Invoking Contract (Backend)
 
 ```python
-from stellar_sdk import SorobanServer, TransactionBuilder
+import os
+from stellar_sdk import SorobanServer, TransactionBuilder, Network
 from stellar_sdk.soroban_rpc import GetTransactionStatus
 
 async def invoke_sla_contract(outage_id: str, severity: str, mttr: int):
     """Invoke SLA calculator contract"""
-    
+
     soroban_server = SorobanServer("https://soroban-testnet.stellar.org")
-    source_keypair = Keypair.from_secret(os.getenv("STELLAR_POOL_SECRET_KEY"))
-    
+
+    # SECURITY: Load secret from environment, never hardcode
+    source_secret = os.getenv("STELLAR_POOL_SECRET_KEY")
+    if not source_secret:
+        raise ValueError("STELLAR_POOL_SECRET_KEY environment variable not set")
+
+    source_keypair = Keypair.from_secret(source_secret)
+
     # Build contract invocation
     source_account = server.load_account(source_keypair.public_key)
-    
+
     transaction = (
         TransactionBuilder(source_account, Network.TESTNET_NETWORK_PASSPHRASE, base_fee=100)
         .append_invoke_contract_function_op(
@@ -446,27 +485,29 @@ async def invoke_sla_contract(outage_id: str, severity: str, mttr: int):
         .set_timeout(30)
         .build()
     )
-    
+
     # Simulate first
     simulated = soroban_server.simulate_transaction(transaction)
-    
+
     # Prepare and sign
     prepared = soroban_server.prepare_transaction(transaction, simulated)
     prepared.sign(source_keypair)
-    
+
     # Submit
     response = soroban_server.send_transaction(prepared)
-    
+
     # Wait for confirmation
     while True:
         status = soroban_server.get_transaction(response.hash)
         if status.status != GetTransactionStatus.NOT_FOUND:
             break
         await asyncio.sleep(1)
-    
+
     # Parse result
     return parse_contract_result(status.return_value)
 ```
+
+> **SECURITY NOTE**: Always load sensitive keys from environment variables or secure key management systems. Never hardcode or log secret keys.
 
 ---
 
@@ -496,8 +537,12 @@ from app.services.stellar.payment_service import PaymentService
 
 service = PaymentService(network="testnet")
 
+# SECURITY: Load from environment, never pass as parameter
+import os
+source_secret = os.getenv("TEST_PAYMENT_SECRET_KEY")
+
 result = await service.create_payment(
-    source_secret="SXXX...",
+    source_secret=source_secret,  # Only use for testing with testnet keys
     destination="GXXX...",
     amount="10.00",
     asset_code="USDC"
@@ -506,6 +551,8 @@ result = await service.create_payment(
 print(f"Transaction hash: {result['tx_hash']}")
 print(f"View on explorer: https://stellar.expert/explorer/testnet/tx/{result['tx_hash']}")
 ```
+
+> **SECURITY WARNING**: Only use testnet keys for testing. Never use mainnet keys in test scripts. Consider using dedicated test accounts with minimal funds.
 
 ### 4. Test SLA Flow
 
@@ -590,7 +637,74 @@ Transfer sufficient USDC to your pool account to cover expected payments.
 
 ---
 
-## API Reference
+## Security Best Practices
+
+### Key Management
+
+**NEVER**:
+- Commit secret keys to version control
+- Log secret keys in application logs
+- Include secret keys in documentation or examples
+- Share secret keys via email, chat, or unencrypted channels
+- Use the same keys for testnet and mainnet
+
+**ALWAYS**:
+- Use environment variables or secure key management systems (AWS KMS, HashiCorp Vault, etc.)
+- Rotate keys regularly, especially after any suspected compromise
+- Use hardware security modules (HSM) for production keys
+- Implement proper access controls and audit logging for key operations
+- Use separate accounts/keys for different environments (dev/testnet/mainnet)
+
+### API Security
+
+**Wallet Operations**:
+- Never return secret keys in API responses
+- Only expose public keys for wallet linking and balance checks
+- Implement proper authentication and authorization for wallet operations
+- Use rate limiting to prevent abuse
+
+**Payment Operations**:
+- Validate all payment amounts and destinations
+- Implement idempotency to prevent duplicate payments
+- Log all payment operations for audit purposes
+- Use transaction monitoring and alerting
+
+### Smart Contract Security
+
+**Contract Deployment**:
+- Audit contracts before mainnet deployment
+- Use multisig for critical contract operations
+- Implement proper access controls in contracts
+- Test extensively on testnet before mainnet
+
+**Contract Invocation**:
+- Validate all inputs before sending to contracts
+- Handle contract errors gracefully
+- Implement retry logic with exponential backoff
+- Monitor contract gas usage and costs
+
+### Environment Separation
+
+**Testnet vs Mainnet**:
+- Never reuse keys between environments
+- Use different contract addresses for each environment
+- Implement environment-specific configuration validation
+- Test all operations on testnet before mainnet deployment
+
+### Monitoring and Alerting
+
+**Implement monitoring for**:
+- Failed transactions
+- Unusual payment amounts
+- Contract errors
+- Key access patterns
+- Balance changes
+
+**Set up alerts for**:
+- Large payment attempts
+- Contract failures
+- Key compromise indicators
+- Balance anomalies
 
 ### Payments
 
@@ -751,3 +865,194 @@ A: Soroban contract invocations cost a few cents in XLM, much cheaper than other
 ---
 
 **Need help?** Open an issue on GitHub or join our Discord community!
+
+---
+
+## Asset-Code and Issuer Validation (BE-364)
+
+Before any payout is submitted to the Stellar network the backend validates the
+configured asset metadata to prevent wrong-asset settlements.
+
+### Validated fields
+
+| Field | Env var | Rules |
+|---|---|---|
+| Asset code | `PAYMENT_ASSET_CODE` | Non-empty, alphanumeric, ≤ 12 chars |
+| Asset issuer | `PAYMENT_ASSET_ISSUER` | Non-empty, 56-char Stellar G-address |
+
+### Behavior on failure
+
+When validation fails the adapter raises `AssetValidationError` with
+`error_code = "INVALID_ASSET_CONFIG"`. This error is **non-retryable** and
+blocks execution immediately — no transaction is ever submitted with a
+misconfigured asset.
+
+### Configuration
+
+```env
+PAYMENT_ASSET_CODE=USDC
+# Circle USDC issuer on testnet:
+PAYMENT_ASSET_ISSUER=GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5
+```
+
+In `local_adapter` mode `PAYMENT_ASSET_ISSUER` may be left empty.
+In `soroban_rpc` mode it **must** be a valid G-address — startup validation
+will reject an empty or malformed value.
+
+---
+
+## Payment Operations Services (`app/services/stellar/`)
+
+Four operational concerns around Stellar settlement live in
+`app/services/stellar/`: faucet funding, memo auditing, key custody and
+balance monitoring.
+
+### 1. Friendbot auto-faucet funding
+
+`app/services/stellar/friendbot.py`
+
+Testnet resets wipe operator wallets, which previously meant hitting
+Friendbot by hand before payouts could resume.
+
+```python
+from app.services.stellar import friendbot_service
+
+# Explicit request
+result = await friendbot_service.request_friendbot_funding(address)
+
+# Auto-trigger: only requests funding when the XLM balance is 0
+result = await friendbot_service.fund_if_unfunded(address)
+```
+
+- A missing account on Horizon (404) reads as a 0 XLM balance — exactly the
+  state a testnet reset leaves behind — so it is re-funded.
+- Every response is logged: a summary at INFO (`hash`, `ledger`,
+  `status_code`), the raw body at DEBUG, failures at ERROR.
+- Friendbot only exists on the test networks: a request on `mainnet`, or
+  with `STELLAR_FRIENDBOT_ENABLED=false`, raises `FriendbotError` before any
+  HTTP call is made. `FriendbotError.retryable` distinguishes a transport
+  failure from a configuration one.
+- Friendbot's `op_already_exists` response means the account is already on
+  the ledger and is reported as `outcome="already_funded"`, not a failure.
+
+The 15-minute balance monitor calls `fund_if_unfunded` automatically when a
+monitored testnet wallet breaches its threshold.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `STELLAR_FRIENDBOT_ENABLED` | `true` | Master switch |
+| `STELLAR_FRIENDBOT_URL` | *(derived)* | Override the faucet URL |
+| `STELLAR_FRIENDBOT_TIMEOUT_SECONDS` | `30` | Faucet request timeout |
+
+### 2. SLA result ID transaction memos
+
+`app/services/stellar/memo.py`
+
+Every settlement transaction carries the SLA result it pays out for, so an
+auditor can walk from a ledger entry back to the SLA record.
+
+```python
+from app.services.stellar import build_sla_memo, verify_transaction_memo
+
+memo = build_sla_memo(sla_result.id)        # validated on construction
+builder.add_memo(memo.to_stellar_memo())    # requires stellar-sdk
+...
+verify_transaction_memo(confirmed_tx, memo)  # raises MemoMismatchError
+```
+
+- `build_sla_memo` picks `MEMO_ID` for a numeric SLA result ID (exact, no
+  length limit) and `MEMO_TEXT` (`SLA:<id>`) for UUID-style IDs. Pass
+  `memo_type="text"` or `"id"` to force one.
+- Validation runs *before* the envelope is built: MEMO_TEXT is capped at 28
+  UTF-8 **bytes** and MEMO_ID at the unsigned 64-bit range. A memo rejected
+  here costs nothing; one rejected by Horizon burns a sequence number.
+- `verify_transaction_memo` checks the memo on the confirmed transaction and
+  raises `MemoMismatchError` on a missing, mistyped or mismatched memo.
+  `verify_sla_result_id` is the non-raising form for reconciliation sweeps.
+- `to_stellar_memo()` imports `stellar_sdk` lazily — construction,
+  validation and verification all work without the SDK installed.
+
+### 3. Secret key encryption at rest
+
+`app/services/stellar/keystore.py`
+
+An operator secret key in a plaintext env var is one `cat` away from
+draining the settlement wallet. Keys are stored encrypted and decrypted only
+inside the process, for the duration of a signing call.
+
+```python
+from app.services.stellar import encrypt_secret_key, operator_signing_key
+
+# One-off, to produce the value for STELLAR_OPERATOR_SECRET_ENCRYPTED:
+print(encrypt_secret_key("S..."))
+
+# At signing time — the plaintext is scrubbed when the block exits:
+with operator_signing_key() as secret:
+    transaction.sign(Keypair.from_secret(secret))
+```
+
+- Schemes: `fernet` (default; AES-128-CBC + HMAC-SHA256, via
+  `cryptography.fernet`) and `aesgcm` (AES-256-GCM). Tokens are
+  self-describing (`stellar.v1.<scheme>.<payload>`), so a stored key stays
+  readable after the configured scheme changes.
+- The data key comes from `STELLAR_KEY_ENCRYPTION_KEY` (url-safe base64,
+  32 bytes) or is derived from `SECRET_KEY` with PBKDF2-HMAC-SHA256
+  (480,000 iterations).
+- Both schemes are authenticated: a tampered ciphertext or a wrong key
+  raises `SecretKeyEncryptionError` rather than returning garbage. Error
+  messages never contain key material.
+- `signing_key()` zeroes its plaintext buffer on exit, including when the
+  block raises. `load_operator_secret_token()` fails closed when
+  `STELLAR_OPERATOR_SECRET_ENCRYPTED` is unset — there is no plaintext
+  fallback.
+
+### 4. Wallet balance threshold monitor
+
+`app/services/stellar/balance_monitor.py`
+
+If the settlement wallet runs dry, every SLA payout fails. The
+`monitor-wallet-balances` Celery beat runs every 15 minutes
+(`WALLET_BALANCE_CHECK_INTERVAL_SECONDS=900`) and:
+
+1. reads XLM and the settlement asset (USDC) balance from Horizon;
+2. alerts when XLM < 50 or USDC < $500 — an ERROR log line always, plus a
+   JSON POST to `WALLET_ALERT_WEBHOOK_URL` when configured;
+3. re-funds a drained testnet wallet through Friendbot;
+4. caches the snapshot in Redis (`stellar:wallet:balance:health`, 30-minute
+   TTL) for the health endpoint.
+
+`GET /api/v1/health/detailed` reports the cached snapshot under `wallet`:
+
+```json
+{
+  "status": "ok",
+  "dependencies": { "database": "ok", "redis": "ok", "celery_broker": "ok" },
+  "wallet": {
+    "address": "GA...",
+    "status": "low",
+    "healthy": false,
+    "checked_at": "2026-08-28T12:00:00+00:00",
+    "balances": { "XLM": "12.5000000", "USDC": "900.0000000" },
+    "thresholds": { "XLM": "50.0", "USDC": "500.0" },
+    "breaches": [
+      {"asset_code": "XLM", "balance": "12.5000000", "threshold": "50.0", "shortfall": "37.5000000"}
+    ],
+    "error": null
+  }
+}
+```
+
+The endpoint reads only the cached snapshot — it never calls Horizon on the
+request path — and a low balance does **not** flip the endpoint to 503: the
+API itself is healthy, and the breach is alerted on by the monitor. A
+`status` of `unknown` means no check has been recorded yet (or Horizon was
+unreachable), never that balances are fine.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `WALLET_BALANCE_MONITOR_ENABLED` | `true` | Master switch |
+| `WALLET_BALANCE_CHECK_INTERVAL_SECONDS` | `900` | Beat interval (15 min) |
+| `WALLET_MIN_XLM_BALANCE` | `50` | XLM alert threshold |
+| `WALLET_MIN_USDC_BALANCE` | `500` | Settlement asset alert threshold |
+| `WALLET_MONITOR_ADDRESS` | *(`PAYMENT_FROM_ADDRESS`)* | Wallet to watch |
+| `WALLET_ALERT_WEBHOOK_URL` | *(empty)* | Optional alert sink |

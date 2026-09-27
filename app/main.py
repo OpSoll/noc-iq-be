@@ -1,27 +1,378 @@
-from fastapi import FastAPI
-from app.api.v1.router import api_router
+import logging
+import time
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import Counter, Histogram
+from datetime import datetime
+from sqlalchemy import text
+from redis import Redis
+from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
-app = FastAPI(
-    title="NOCIQ API",
-    version="1.0.0",
-    description="NOCIQ Backend API"
+from app.api.v1.router import api_router
+from app.core.config import settings, validate_env_schema, validate_critical_settings
+from app.api.v2.router import api_v2_router
+from app.core.config import settings, validate_critical_settings
+from app.core.session_hygiene import debug_router as session_debug_router
+from app.core.dependencies import di_router
+from app.db.session import engine
+from app.middleware.body_size_limiter import BodySizeLimitMiddleware
+from app.middleware.correlation import CorrelationMiddleware
+from app.middleware.deprecation import DeprecationHeaderMiddleware
+from app.middleware.payload_size import PayloadSizeMiddleware
+from app.middleware.pool_saturation import PoolSaturationMiddleware
+from app.middleware.latency import LatencyLoggingMiddleware
+from app.metrics.database_metrics import router as metrics_router, setup_db_metrics
+
+validate_critical_settings(settings)
+
+async def check_database() -> bool:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            conn.commit()
+        return True
+    except Exception:
+        return False
+
+async def check_celery() -> bool:
+    try:
+        r = Redis.from_url(settings.CELERY_BROKER_URL)
+        r.ping()
+        return True
+    except Exception:
+        return False
+
+
+async def check_worker_queue_bindings() -> dict:
+    """Probe Celery queue bindings for orchestration readiness gates.
+
+    BE-W5-051: Health signals are exposed for orchestration readiness gates.
+    Returns a non-strict probe result suitable for liveness/readiness checks.
+    Never raises — failures are reported in the response payload.
+    """
+    try:
+        from app.tasks.celery_app import verify_queue_bindings
+        probe = verify_queue_bindings(strict=False)
+        return probe
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "ok": False,
+            "error": str(exc),
+            "required": [],
+            "observed": [],
+            "missing": [],
+            "workers_seen": 0,
+            "timeout_seconds": getattr(
+                settings, "CELERY_QUEUE_PROBE_TIMEOUT_SECONDS", 5.0
+            ),
+        }
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Request timing metrics (#775)
+# ---------------------------------------------------------------------------
+#
+# These collectors live on prometheus_client's default registry, which the
+# existing ``metrics_router`` already exposes via ``GET /metrics``, so the
+# series below are exported in Prometheus text format with no new endpoint.
+
+REQUEST_DURATION_SECONDS = Histogram(
+    "noc_iq_http_request_duration_seconds",
+    "HTTP request duration in seconds, labelled by method, route and status class.",
+    labelnames=["method", "route", "status_class"],
+    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
 )
 
+REQUEST_COUNT = Counter(
+    "noc_iq_http_requests_total",
+    "HTTP requests handled, labelled by method, route and status code.",
+    labelnames=["method", "route", "status_code"],
+)
+
+
+def _route_label(request: Request) -> str:
+    """Prefer the matched route template over the raw path.
+
+    Using the template keeps label cardinality bounded — ``/outages/{id}``
+    rather than one series per outage id.
+    """
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or request.url.path
+
+
+class RequestTimingMetricsMiddleware(BaseHTTPMiddleware):
+    """Record request duration and status distribution for every API route."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        started = time.perf_counter()
+        response = await call_next(request)
+        elapsed = time.perf_counter() - started
+
+        status_code = response.status_code
+        route = _route_label(request)
+        status_class = f"{status_code // 100}xx"
+
+        REQUEST_DURATION_SECONDS.labels(request.method, route, status_class).observe(elapsed)
+        REQUEST_COUNT.labels(request.method, route, str(status_code)).inc()
+
+        response.headers["X-Process-Time-Ms"] = f"{elapsed * 1000:.2f}"
+        return response
+
+
+# ---------------------------------------------------------------------------
+# Content-Type enforcement (#774)
+# ---------------------------------------------------------------------------
+
+
+class ContentTypeEnforcementMiddleware(BaseHTTPMiddleware):
+    """Reject mutation requests that do not declare a supported Content-Type.
+
+    ``POST``/``PUT``/``PATCH`` must send ``application/json``, except on the
+    designated upload routes which may also send ``multipart/form-data``. A
+    missing or unsupported header is answered with ``415 Unsupported Media
+    Type`` so it fails as a client error at the edge, instead of surfacing
+    later as an unhandled body-parsing error.
+    """
+
+    MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH"})
+    JSON_CONTENT_TYPE = "application/json"
+    UPLOAD_CONTENT_TYPE = "multipart/form-data"
+    UPLOAD_PATH_PREFIXES = ("/upload",)
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.method in self.MUTATING_METHODS:
+            raw = request.headers.get("content-type") or ""
+            content_type = raw.split(";", 1)[0].strip().lower()
+
+            is_upload = request.url.path.startswith(self.UPLOAD_PATH_PREFIXES)
+            allowed = (
+                (self.JSON_CONTENT_TYPE, self.UPLOAD_CONTENT_TYPE)
+                if is_upload
+                else (self.JSON_CONTENT_TYPE,)
+            )
+
+            if content_type not in allowed:
+                return JSONResponse(
+                    status_code=415,
+                    content={
+                        "detail": "Unsupported Media Type. "
+                        f"Expected one of: {', '.join(allowed)}."
+                    },
+                )
+
+        return await call_next(request)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    validate_env_schema()
+    setup_db_metrics()
+    yield
+
+from app.api.v1.router import api_router
+from app.core.lifespan import app_lifespan
+from app.core.rate_limiter import RateLimiterMiddleware
+
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="NOCIQ Backend API",
+    lifespan=app_lifespan,
+)
+
+app.add_middleware(PoolSaturationMiddleware)
+
+# Issue #774: reject mutation requests with a missing/unsupported Content-Type.
+app.add_middleware(ContentTypeEnforcementMiddleware)
+
+# Issue #775: per-route request duration and status distribution metrics.
+app.add_middleware(RequestTimingMetricsMiddleware)
+
+app.add_middleware(CorrelationMiddleware)
+
+
+# Issue #504: standardize Pydantic request validation error responses to match
+# the custom backend error schema.
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Return a consistent error envelope for request validation failures.
+
+    Schema: ``{"code": "VALIDATION_ERROR", "message": "...", "details": [...]}``.
+    """
+    details = []
+    for error in exc.errors():
+        details.append({
+            "loc": list(error.get("loc", [])),
+            "msg": error.get("msg", ""),
+            "type": error.get("type", ""),
+        })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "code": "VALIDATION_ERROR",
+            "message": "Request validation failed",
+            "details": details,
+        },
+    )
+
+app.add_middleware(LatencyLoggingMiddleware)
+
+
+app.add_middleware(PayloadSizeMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3001", "http://localhost:3000"],
+    allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Issue #514: cache preflight responses for 24h so browsers stop reissuing
+    # OPTIONS before every API fetch.
+    max_age=86400,
 )
+app.add_middleware(RateLimiterMiddleware)
+
+# Issue #509: gzip-compress API responses larger than 1 KB.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
-# Health check
+# ---------------------------------------------------------------------------
+# API version header middleware (#414)
+# ---------------------------------------------------------------------------
+
+@app.middleware("http")
+async def add_api_version_header(request, call_next):
+    response = await call_next(request)
+    response.headers["X-API-Version"] = settings.VERSION
+    return response
+
+app.add_middleware(BodySizeLimitMiddleware)
+
+# Issue #511: RFC 8594 deprecation headers for legacy /api/v0/* routes.
+app.add_middleware(DeprecationHeaderMiddleware)
+
+
+# Health checks
+@app.get("/health/liveness")
+def liveness():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/health/readiness")
+async def readiness():
+    db_ok = await check_database()
+    celery_ok = await check_celery()
+    queue_probe = await check_worker_queue_bindings()
+    overall_ok = db_ok and celery_ok and bool(queue_probe.get("ok"))
+    status = "ok" if overall_ok else "degraded"
+    payload = {
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "dependencies": {
+            "database": "ok" if db_ok else "down",
+            "celery": "ok" if celery_ok else "down",
+            "queue_bindings": "ok" if queue_probe.get("ok") else "missing",
+        },
+        "queue_bindings": queue_probe,
+    }
+    # Return 503 when degraded so orchestrators can fail readiness gates.
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=200 if overall_ok else 503, content=payload)
+
+
+@app.get("/health/worker")
+async def worker_health():
+    """Celery worker queue-bindings health probe.
+
+    BE-W5-051: Health signals are exposed for orchestration readiness gates.
+    Returns 200 when all required queues are bound to active workers, else
+    503 with a breakdown of missing/observed queue names.
+    """
+    queue_probe = await check_worker_queue_bindings()
+    from fastapi.responses import JSONResponse
+    status_code = 200 if queue_probe.get("ok") else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if queue_probe.get("ok") else "missing_queues",
+            "timestamp": datetime.utcnow().isoformat(),
+            **queue_probe,
+        },
+    )
+
+
+@app.get("/health/concurrency")
+async def concurrency_health():
+    """Per-environment concurrency profile + live DB/broker saturation.
+
+    BE-W5-055: Worker concurrency settings are profiled and documented per
+    environment; DB pool and broker connections stay within safe limits;
+    guardrail alerts fire before saturation failures.
+    """
+    concurrency_guardrails_payload: dict = {}
+    try:
+        from app.services.concurrency_guardrails import guardrails_dict
+        from app.tasks.celery_app import celery_app as _celery_app
+        concurrency_guardrails_payload = guardrails_dict(_celery_app)
+    except Exception as exc:  # pragma: no cover - defensive
+        # Never let this endpoint 500 — degrade gracefully.
+        concurrency_guardrails_payload = {"error": str(exc)}
+
+    live = concurrency_guardrails_payload.get("live_metrics", {}) or {}
+    alerts_active = bool(live.get("alerts_active"))
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ok" if not alerts_active else "guardrail_alert",
+            "timestamp": datetime.utcnow().isoformat(),
+            **concurrency_guardrails_payload,
+        },
+    )
+
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
 
+# Startup optimisation (#355)
+from app.core.startup_optimizer import startup_router, run_startup_optimization
+
+# Queue analysis (#356)
+from app.tasks.queue_analyzer import queue_analysis_router
+
+# Run startup optimisation
+run_startup_optimization()
+
+# Health / metrics routers mounted at root (outside api_router prefix)
+app.include_router(startup_router)
+app.include_router(queue_analysis_router)
+
 # API routes
+
+# Debug / dependency-injection routers (admin only)
+app.include_router(session_debug_router)
+app.include_router(di_router)
+
+# Deprecation header for v1 endpoints (#414)
+@app.middleware("http")
+async def add_v1_deprecation_header(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith(settings.API_V1_PREFIX):
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = "2027-01-01T00:00:00Z"
+    return response
+
+# API v1 routes
+app.include_router(api_router, prefix=settings.API_V1_PREFIX)
+
+# API v2 routes
+app.include_router(api_v2_router, prefix=settings.API_V2_PREFIX)
 app.include_router(api_router, prefix="/api/v1")
+
+# Metrics routes
+app.include_router(metrics_router)

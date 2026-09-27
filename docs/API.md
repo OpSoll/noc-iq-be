@@ -18,6 +18,50 @@ Base URL: `http://localhost:8000` (development) | `https://api.nociq.com` (produ
 
 ---
 
+## Payload Size and Input Guardrails
+
+The API enforces strict limits on request payloads and input data to prevent abuse and ensure system stability:
+
+### Request Body Limits
+- **Maximum request body size**: 10 MB for all endpoints
+- **Error response**: `413 Payload Too Large` with message "Request body too large. Maximum allowed size is 10485760 bytes."
+
+### File Upload Limits
+- **Maximum file upload size**: 10 MB (applies to `/api/v1/outages/import`)
+- **Error response**: `413 Payload Too Large` with message "File exceeds 10 MB limit"
+
+### Data Structure Limits
+- **Bulk operations**: Maximum 1000 items per bulk request
+- **Affected services**: Maximum 100 services per outage
+- **Site name**: Maximum 255 characters
+- **Description**: Maximum 5000 characters
+- **Webhook name**: Maximum 255 characters
+- **Webhook URL**: Maximum 2048 characters
+- **Webhook events**: Maximum 50 events per webhook
+
+### Validation Behavior
+- Oversized inputs are rejected with `400 Bad Request` and descriptive error messages
+- File uploads exceeding size limits fail fast during upload
+- All limits are configurable via environment variables
+- Validation occurs at both middleware and model levels for defense in depth
+
+---
+
+This document mixes current runtime endpoints with some roadmap-style descriptions. For contributor onboarding, use the following status guide first:
+
+- active and routed: `auth`, `audit`, `jobs`, `outages`, `payments`, `sla`, `sla disputes`, `wallets`, `webhooks`
+- strongest current domains: `outages`, `sla`, `audit`, analytics under `/api/v1/sla/*`
+- active but lighter-weight domains: `auth`, `payments`, `wallets`
+- active but operationally dependent: `jobs`, `webhooks`, `sla disputes`
+- not part of the routed runtime: legacy helpers such as `app/services/outage_store.py`
+
+Important:
+
+- if code and this document disagree, treat the router and endpoint modules as source of truth
+- some sections below still describe aspirational production behavior; they should not be read as proof that every subfeature is live today
+
+---
+
 ## Authentication
 
 All authenticated endpoints require a bearer token in the Authorization header:
@@ -30,29 +74,46 @@ Authorization: Bearer <token>
 
 Authenticate user and receive access token.
 
+Current status:
+
+- active and routed
+- currently backed by the lightweight `AuthStore` service rather than a full external auth provider
+
 **Request Body:**
 ```json
 {
   "email": "user@example.com",
-  "password": "securePassword123"
+  "password": "[REDACTED - See password policy]"
 }
 ```
+
+> **SECURITY NOTE**: Never use plaintext passwords in documentation, logs, or version control. The example above shows the field structure only. Always use strong, unique passwords meeting the policy requirements (min 8 chars, uppercase, lowercase, digit, special char).
 
 **Response (200 OK):**
 ```json
 {
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+  "access_token": "[JWT TOKEN - Expires in 3600s]",
+  "refresh_token": "[JWT TOKEN - Rotates on use]",
   "token_type": "bearer",
   "expires_in": 3600,
   "user": {
     "id": "user123",
     "email": "user@example.com",
     "role": "engineer",
-    "stellar_wallet": "GXXX..."
+    "stellar_wallet": "[Stellar Public Key - G...]"
   }
 }
 ```
+
+> **SECURITY NOTE**: Tokens shown above are placeholders for documentation purposes only. Real tokens are cryptographically secure, expire according to configured TTL, and should never be logged or shared. Store tokens securely on the client side (e.g., httpOnly cookies or secure storage). Never commit tokens to version control.
+
+**Rate Limiting & Security:**
+- **IP-based Rate Limiting**: Maximum 10 login attempts per IP address within a 5-minute window
+- **Account Lockout**: After 5 consecutive failed login attempts, the account is locked for 15 minutes
+- **Error Responses**:
+  - `429 Too Many Requests`: Rate limit exceeded
+  - `401 Unauthorized`: Invalid credentials or account locked
+- **Lockout Reset**: Successful login resets the failed attempt counter
 
 ### POST `/api/v1/auth/register`
 
@@ -62,11 +123,13 @@ Register new user account.
 ```json
 {
   "email": "newuser@example.com",
-  "password": "securePassword123",
+  "password": "[REDACTED - See password policy]",
   "full_name": "John Doe",
   "role": "engineer"
 }
 ```
+
+> **SECURITY NOTE**: Passwords must meet policy requirements. Never log, store in plaintext, or transmit passwords insecurely. The backend hashes passwords using bcrypt before storage.
 
 **Response (201 Created):**
 ```json
@@ -79,9 +142,48 @@ Register new user account.
 }
 ```
 
+### POST `/api/v1/auth/refresh`
+
+Refresh access token using refresh token.
+
+**Request Body:**
+```json
+{
+  "refresh_token": "[REFRESH TOKEN - Rotates on use]"
+}
+```
+
+> **SECURITY NOTE**: Refresh tokens rotate on each use. If a refresh token is reused (replay attack), the entire session family is invalidated for security.
+
+**Response (200 OK):**
+```json
+{
+  "access_token": "[JWT TOKEN - Rotated]",
+  "refresh_token": "[JWT TOKEN - New rotation]",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "user": {
+    "id": "user123",
+    "email": "user@example.com",
+    "role": "engineer",
+    "stellar_wallet": "[Stellar Public Key - G...]"
+  }
+}
+```
+
+**Rate Limiting & Security:**
+- Same IP-based rate limiting as login (10 requests per 5-minute window)
+- Account lockout also applies to refresh attempts for locked accounts
+- Returns `429 Too Many Requests` when rate limit exceeded
+
 ---
 
 ## Outages
+
+Current status:
+
+- active and strongest current domain
+- primary bridge for SLA execution and payout generation
 
 ### GET `/api/v1/outages`
 
@@ -252,6 +354,12 @@ Update an existing outage.
 ---
 
 ## SLA Management
+
+Current status:
+
+- active and strongest current domain
+- analytics endpoints under `/api/v1/sla/analytics/*` and `/api/v1/sla/performance/aggregation` are live
+- runtime can execute through local adapter mode or the contract bridge depending on config
 
 ### GET `/api/v1/sla/status/{outage_id}`
 
@@ -473,17 +581,29 @@ Create a new Stellar wallet for a user.
 
 Get wallet details for a user.
 
+**Query Parameters:**
+- `refresh` (optional, default=false): Force a live re-fetch instead of returning cached data
+
 **Response (200 OK):**
 ```json
 {
   "user_id": "user123",
-  "public_key": "GXXX...",
+  "public_key": "[Stellar Public Key - G...]",
   "created_at": "2026-01-16T10:00:00Z",
   "last_updated": "2026-01-16T11:00:00Z",
   "funded": true,
-  "active": true
+  "active": true,
+  "trustline_ready": true,
+  "cached_at": "2026-01-16T11:00:00Z",
+  "cache_status": "fresh"
 }
 ```
+
+> **Cache Behavior (BE-033)**: Wallet endpoints return cache metadata to help frontend make informed polling decisions:
+> - `cache_status`: "fresh" (within TTL), "stale" (exceeded TTL), or "live" (just refreshed)
+> - `cached_at`: Timestamp when data was last cached
+> - Default TTL: 60 seconds (configurable via `WALLET_CACHE_TTL_SECONDS`)
+> - Use `refresh=true` to force a live re-fetch
 
 ### GET `/api/v1/wallets/{address}/balance`
 
@@ -492,7 +612,7 @@ Get balance for a Stellar address.
 **Response (200 OK):**
 ```json
 {
-  "address": "GXXX...",
+  "address": "[Stellar Public Key - G...]",
   "balances": {
     "XLM": {
       "balance": "1000.0000000",
@@ -502,16 +622,13 @@ Get balance for a Stellar address.
       "balance": "5000.0000000",
       "asset_type": "credit_alphanum4",
       "asset_code": "USDC",
-      "asset_issuer": "GBBD..."
-    },
-    "NOCIQ": {
-      "balance": "500.0000000",
-      "asset_type": "credit_alphanum12",
-      "asset_code": "NOCIQ",
-      "asset_issuer": "GNOC..."
+      "asset_issuer": "[USDC Issuer - G...]"
     }
   },
-  "last_updated": "2026-01-16T11:05:00Z"
+  "last_updated": "2026-01-16T11:05:00Z",
+  "cache_status": "fresh",
+  "cache_ttl_seconds": 45,
+  "cached_at": "2026-01-16T11:05:00Z"
 }
 ```
 
@@ -742,4 +859,206 @@ https://github.com/OpSoll/noc-iq-be/blob/main/postman/NOCIQ-API.json
 
 ---
 
+---
+
+## Jobs & Async Tasks
+
+Status: active and routed.  Background job tracking, retry governance, lease
+heartbeat, and retention tiering.
+
+### Job Status Values
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Job enqueued, awaiting worker pickup |
+| `started` | Job is actively executing |
+| `success` | Job completed successfully |
+| `failure` | Job failed with retries remaining |
+| `revoked` | Job was cancelled by an operator |
+| `quarantined` | Job moved to quarantine after exhausting all retries (BE-W5-054) |
+| `dead_letter` | Job reached terminal dead-letter after max retries (BE-W5-048) |
+
+### Job Result Envelope (BE-W5-050)
+
+Every job endpoint returns a standardised envelope:
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "celery_task_id": "abc123...",
+  "job_type": "sla_computation",
+  "status": "success",
+  "progress": 100.0,
+  "result": { "mttr_minutes": 12, "is_violated": false },
+  "error": {
+    "code": "SLA_TIMEOUT",
+    "message": "Contract execution timed out",
+    "retryable": true,
+    "details": { "timeout_ms": 5000 }
+  },
+  "retry_count": 2,
+  "max_retries": 3,
+  "retry_class": "exponential_backoff",
+  "started_at": "2026-07-29T10:00:00Z",
+  "finished_at": "2026-07-29T10:00:45Z",
+  "created_at": "2026-07-29T09:59:55Z",
+  "worker_id": "worker-01",
+  "lease_expires_at": "2026-07-29T10:02:00Z",
+  "under_investigation": false,
+  "under_dispute": false,
+  "audit_critical": false
+}
+```
+
+The `error` field uses a typed `JobErrorDetail` with:
+- `code`: Machine-readable error code (e.g. `"SLA_TIMEOUT"`, `"DEAD_LETTER"`)
+- `message`: Human-readable description
+- `retryable`: Whether the job can be retried
+- `details`: Optional contextual payload
+
+### GET `/api/v1/jobs`
+
+List all jobs with optional filters.
+
+**Query Parameters:**
+- `job_type`: Filter by type (`sla_computation`, `webhook_dispatch`, `bulk_sla_computation`, `webhook_dr_replay`)
+- `status`: Filter by status
+- `limit` (default=50, max=200): Number of results
+
+### GET `/api/v1/jobs/{job_id}`
+
+Get a single job's status.  Syncs from Celery for in-progress jobs.
+
+### GET `/api/v1/jobs/{job_id}/envelope`
+
+Get a single job wrapped in the standardised result envelope (BE-W5-050).
+
+### GET `/api/v1/jobs/{job_id}/progress`
+
+Lightweight polling endpoint returning only progress fields.
+
+### POST `/api/v1/jobs/sla-computation`
+
+Enqueue an async SLA computation for a single device.
+
+**Request Body:**
+```json
+{ "device_id": "dev-001", "period": "2026-07" }
+```
+
+### POST `/api/v1/jobs/sla-computation/bulk`
+
+Enqueue an async bulk SLA computation.
+
+**Request Body:**
+```json
+{ "device_ids": ["dev-001", "dev-002"], "period": "2026-07" }
+```
+
+### POST `/api/v1/jobs/{job_id}/retry`
+
+Retry a failed, revoked, or dead-letter job (BE-041, BE-W5-048).
+
+**Retry Taxonomy Governance (BE-W5-048):**
+- `at_most_once`: Cannot be retried (manual inspection only)
+- `at_least_once`: Retries until success with capped backoff
+- `exponential_backoff`: Progressive backoff with jitter
+
+Exhausted jobs are dead-lettered (`dead_letter` status) when
+`JOB_RETRY_DEAD_LETTER_ENABLED` is `True`.
+
+### GET `/api/v1/jobs/retry-policies`
+
+List configured retry taxonomy policies per job type (BE-W5-048).
+
+### GET `/api/v1/jobs/dead-letter`
+
+List jobs in `dead_letter` status (BE-W5-048).  Admin only.
+
+### POST `/api/v1/jobs/{job_id}/heartbeat`
+
+Record a lease heartbeat for a running job (BE-W5-047).
+Internal endpoint used by workers to extend their lease.
+
+**Query Parameters:**
+- `worker_id` (required): Worker identifier
+
+### POST `/api/v1/jobs/reclaim-stale-leases`
+
+Reclaim jobs with expired worker leases (BE-W5-047).
+
+**Request Body:**
+```json
+{
+  "timeout_seconds": 120,
+  "batch_size": 50,
+  "dry_run": false
+}
+```
+
+### GET `/api/v1/jobs/retention-stats`
+
+Get job retention statistics with protection-flag counts (BE-W5-052).
+
+### POST `/api/v1/jobs/cleanup`
+
+Clean up old jobs using retention tiering (BE-W5-052).
+
+Protected records (under investigation, under dispute, audit-critical)
+are excluded from standard cleanup sweeps.
+
+**Request Body:**
+```json
+{
+  "retention_days": { "success": 30, "failure": 90 },
+  "dry_run": true,
+  "batch_size": 1000
+}
+```
+
+### POST `/api/v1/jobs/cleanup-audit-critical`
+
+Clean up audit-critical jobs past their extended retention window (BE-W5-052).
+
+### PATCH `/api/v1/jobs/{job_id}/protection-flags`
+
+Toggle investigation or dispute flags to protect a job from cleanup (BE-W5-052).
+
+**Request Body:**
+```json
+{ "under_investigation": true, "under_dispute": false }
+```
+
+### GET `/api/v1/jobs/quarantined`
+
+List quarantined poison-message jobs (BE-W5-054).  Admin only.
+
+### POST `/api/v1/jobs/{job_id}/release-from-quarantine`
+
+Release a quarantined job back into the retry pipeline (BE-W5-054).
+
+---
+
 For more information, visit our [GitHub repository](https://github.com/OpSoll/noc-iq-be)
+
+# Analytics & SLA Error Handling Semantics
+
+Downstream API consumer integrations must expect and handle the following explicit data availability scenarios when hitting `/api/v1/sla/summary`.
+
+## Response State Matrix
+
+| Scenario | HTTP Code | Payload Indicator / Error Structure | Client Action |
+| :--- | :--- | :--- | :--- |
+| **Healthy Data** | `200 OK` | `"data": [...], "is_empty": false` | Render charts and visualization blocks normally. |
+| **No Records Found** | `200 OK` | `"data": [], "is_empty": true` | Render empty-state illustrations. **Do not treat as a system breakdown.** |
+| **Backend Down** | `503 Service Unavailable` | `"error_code": "ANALYTICS_SERVICE_UNAVAILABLE"` | Display a "Service Interrupted" banner and invoke back-off retry logic. |
+
+### Example 503 Error Payload
+```json
+{
+  "detail": {
+    "error_code": "ANALYTICS_SERVICE_UNAVAILABLE",
+    "message": "The analytics calculation engine is temporarily offline. Please retry your request shortly.",
+    "retryable": true
+  }
+}

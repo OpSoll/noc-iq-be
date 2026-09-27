@@ -1,0 +1,1 @@
+def check_etag():\n    pass\n

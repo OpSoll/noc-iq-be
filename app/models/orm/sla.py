@@ -1,6 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import relationship
 
 from app.db.base import Base
 
@@ -16,4 +17,18 @@ class SLAResultORM(Base):
     amount = Column(Float, nullable=False)
     payment_type = Column(String(20), nullable=False)     # "reward" | "penalty"
     rating = Column(String(20), nullable=False)           # "exceptional" | "excellent" | "good" | "poor"
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    policy_version = Column(String(50), nullable=False, default="1.0")
+    threshold_source = Column(String(50), nullable=False, default="config")
+    is_offline_fallback = Column(Boolean, nullable=False, default=False)  # computed off-chain when Soroban RPC is unreachable
+    created_at = Column(DateTime(timezone=True), nullable=False, default=datetime.now(timezone.utc))
+    is_latest = Column(Boolean, nullable=False, default=False)
+    reason_code = Column(String(50), nullable=True)       # e.g., "mttr_exceeded", "met_exceptional"
+    decision_trace = Column(Text, nullable=True)          # Machine-readable decision trace
+    deducted_maintenance_minutes = Column(Integer, nullable=False, default=0)  # Maintenance minutes deducted
+    config_version_hash = Column(String(64), nullable=True)                    # SHA-256 of canonical SLA config
+
+    disputes = relationship("SLADispute", primaryjoin="SLAResultORM.id == SLADispute.sla_result_id", foreign_keys="[SLADispute.sla_result_id]", back_populates="sla_result")
+
+    __table_args__ = (
+        Index("ix_sla_results_outage_latest", "outage_id", "is_latest"),
+    )
