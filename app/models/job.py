@@ -67,6 +67,13 @@ class JobResultEnvelope(PydanticBaseModel):
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     created_at: Optional[str] = None
+    # BE-W5-047: lease heartbeat
+    worker_id: Optional[str] = None
+    lease_expires_at: Optional[str] = None
+    # BE-W5-052: retention-tier protection flags
+    under_investigation: bool = False
+    under_dispute: bool = False
+    audit_critical: bool = False
 
 
 class Job(Base):
