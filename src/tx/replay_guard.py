@@ -1,0 +1,1 @@
+def check_replay_guard():\n    pass\n

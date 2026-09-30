@@ -56,6 +56,109 @@ def sign_payload_v1(secret: str, payload: str) -> str:
     return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
 
 
+def sign_payload_v1_with_timestamp(secret: str, payload: str, timestamp: int) -> str:
+    """Generate HMAC-SHA256 signature with timestamp for webhook dispatch.
+
+    Computes HMAC SHA-256 of the request body using the endpoint signing secret.
+    The signed payload includes the timestamp for replay protection.
+
+    Args:
+        secret: Endpoint signing secret (will be encoded to UTF-8)
+        payload: JSON request body string (will be encoded to UTF-8)
+        timestamp: Unix epoch timestamp for the signature
+
+    Returns:
+        Hex-encoded digest string
+    """
+    message = f"{timestamp}.{payload}"
+    return hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def build_signature_header(secret: str, payload: str, timestamp: int) -> str:
+    """Build the X-Webhook-Signature header value in t=,v1= format.
+
+    Format: t={timestamp},v1={hex_signature}
+
+    This format enables receivers to:
+    1. Extract the timestamp for freshness validation
+    2. Verify the signature using the timestamped payload
+
+    Args:
+        secret: Endpoint signing secret
+        payload: JSON request body string
+        timestamp: Unix epoch timestamp
+
+    Returns:
+        Formatted signature header string
+    """
+    sig_hex = sign_payload_v1_with_timestamp(secret, payload, timestamp)
+    return f"t={timestamp},v1={sig_hex}"
+
+
+def parse_signature_header(header_value: str) -> dict:
+    """Parse X-Webhook-Signature header in t=,v1= format.
+
+    Args:
+        header_value: The raw signature header string
+
+    Returns:
+        Dict with 'timestamp' (int) and 'signature' (str) keys.
+        Returns empty dict if parsing fails.
+    """
+    result = {}
+    if not header_value:
+        return result
+    parts = [p.strip() for p in header_value.split(",")]
+    for part in parts:
+        if "=" in part:
+            key, val = part.split("=", 1)
+            result[key.strip()] = val.strip()
+    return result
+
+
+def verify_signature_header(
+    secret: str,
+    payload: str,
+    header_value: str,
+    max_age_seconds: int = 300,
+) -> bool:
+    """Verify a webhook signature from the t=,v1= header format.
+
+    Validates:
+    1. Header format parsing
+    2. Timestamp freshness (within max_age_seconds)
+    3. HMAC-SHA256 signature correctness
+
+    Args:
+        secret: Endpoint signing secret
+        payload: Original JSON request body
+        header_value: Raw X-Webhook-Signature header value
+        max_age_seconds: Maximum age of signature in seconds
+
+    Returns:
+        True if signature is valid and fresh, False otherwise
+    """
+    import time as _time
+
+    parsed = parse_signature_header(header_value)
+    if "t" not in parsed or "v1" not in parsed:
+        return False
+
+    try:
+        timestamp = int(parsed["t"])
+    except (ValueError, TypeError):
+        return False
+
+    # Check timestamp freshness
+    age = abs(_time.time() - timestamp)
+    if age > max_age_seconds:
+        return False
+
+    # Verify signature
+    expected_sig = sign_payload_v1_with_timestamp(secret, payload, timestamp)
+    return hmac.compare_digest(expected_sig, parsed["v1"])
+
+
 def verify_signature_v1(secret: str, payload: str, signature: str) -> bool:
     """Verify HMAC-SHA256 signature.
     

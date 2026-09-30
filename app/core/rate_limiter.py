@@ -54,12 +54,12 @@ def _get_bucket(key: str, capacity: int, refill_rate: float) -> _TokenBucket:
 
 
 class RateLimiterMiddleware(BaseHTTPMiddleware):
-    """Per-IP token-bucket rate limiter."""
+    """Per-IP sliding window rate limiter."""
 
-    def __init__(self, app, capacity: int = 60, refill_rate: float = 1.0) -> None:
+    def __init__(self, app, limit: int = 100, window_seconds: int = 60):
         super().__init__(app)
-        self.capacity = capacity
-        self.refill_rate = refill_rate
+        self.limit = limit
+        self.window_seconds = window_seconds
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -67,15 +67,16 @@ class RateLimiterMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else "unknown"
         if client_ip == "testclient" or os.environ.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
             return await call_next(request)
-        rate_key = CacheGovernance.build_key(CacheKeyNamespace.RATE_LIMIT, client_ip)
 
-        bucket = _get_bucket(rate_key, self.capacity, self.refill_rate)
-        if not bucket.consume():
+        rate_key = f"rate_limit:{client_ip}"
+        if not rate_limiter.check(rate_key, self.limit, self.window_seconds):
             logger.warning("Rate limit exceeded for %s", client_ip)
+            retry_after = str(self.window_seconds)
             return Response(
                 content='{"detail":"Too Many Requests"}',
                 status_code=429,
                 media_type="application/json",
+                headers={"Retry-After": retry_after},
             )
 
         return await call_next(request)

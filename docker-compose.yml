@@ -119,6 +119,38 @@ services:
     networks:
       - noc-iq-net
 
+  # Flower – Celery web monitoring dashboard (issue #534)
+  # UI available at http://localhost:5555, protected by basic auth.
+  flower:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A app.tasks.celery_app flower --loglevel=info --port=5555 --basic_auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-changeme}
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    env_file:
+      - .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      FLOWER_USER: ${FLOWER_USER:-admin}
+      FLOWER_PASSWORD: ${FLOWER_PASSWORD:-changeme}
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5555/healthcheck').read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    networks:
+      - noc-iq-net
+
 volumes:
   pgdata:
 

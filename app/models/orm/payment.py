@@ -13,6 +13,7 @@ class PaymentTransactionORM(Base):
     type = Column(String(50), nullable=False)
     amount = Column(Float, nullable=False)
     asset_code = Column(String(20), nullable=False)
+    asset_issuer = Column(String(255), nullable=True)
     from_address = Column(String(255), nullable=False)
     to_address = Column(String(255), nullable=False)
     status = Column(String(50), nullable=False, default="pending", index=True)
@@ -26,6 +27,11 @@ class PaymentTransactionORM(Base):
     idempotency_key = Column(String(255), nullable=True, unique=True, index=True)
     dead_letter_reason = Column(Text, nullable=True)
     dead_lettered_at = Column(DateTime(timezone=True), nullable=True)
+    # Transaction timeout bounds (Stellar time_bounds)
+    time_bounds_min = Column(Integer, nullable=False, default=0)
+    time_bounds_max = Column(Integer, nullable=False, default=0)
+    fee_re_estimation_pending = Column(Integer, nullable=False, default=0)  # Boolean stored as int for SQLite compat
+    expired_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         Index("ix_payment_transactions_from_address", "from_address"),

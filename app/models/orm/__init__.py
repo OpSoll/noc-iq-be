@@ -7,6 +7,7 @@ from app.models.orm.session import SessionORM
 from app.models.orm.audit_log import AuditLogORM
 from app.models.orm.token_family import TokenFamilyORM
 from app.models.orm.celery_task_dead_letter import CeleryTaskDeadLetterORM
+from app.models.orm.webhook_dead_letter import WebhookDeadLetterORM
 from app.models.sla_dispute import SLADispute
 
 __all__ = [
@@ -19,5 +20,6 @@ __all__ = [
     "AuditLogORM",
     "TokenFamilyORM",
     "CeleryTaskDeadLetterORM",
+    "WebhookDeadLetterORM",
     "SLADispute",
 ]

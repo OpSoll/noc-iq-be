@@ -43,6 +43,11 @@ class Webhook(Base):
     previous_secret = Column(String(255), nullable=True)  # Previous secret during grace window
     rotation_grace_expires_at = Column(DateTime, nullable=True)  # When previous_secret expires
 
+    # Custom HTTP headers for outgoing webhook dispatches
+    # Stored encrypted at rest (Fernet AES-128-CBC + HMAC-SHA256)
+    custom_headers_encrypted = Column(Text, nullable=True)  # Encrypted JSON dict
+    verify_ssl = Column(Boolean, default=True, nullable=False)
+
     deliveries = relationship("WebhookDelivery", back_populates="webhook", cascade="all, delete-orphan")
 
 

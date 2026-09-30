@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import signal
 import sys
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from celery import Celery, Task
-from celery.signals import worker_ready
+from celery.signals import before_task_publish, worker_ready
+from kombu import Queue
 
 from app.core.config import settings
 
@@ -22,6 +24,8 @@ celery_app = Celery(
         "app.tasks.idempotency_tasks",
         "app.tasks.timeout_guard",
         "app.tasks.dead_letter",
+        "app.tasks.worker_health",
+        "app.tasks.payment_tasks",
     ],
 )
 
@@ -48,8 +52,37 @@ celery_app.conf.update(
     task_store_eager_result=True,
     worker_prefetch_multiplier=1,
     result_expires=86400,  # 24 hours
+    # Issue #541: on a lost broker connection, in-flight tasks with the
+    # (already-set) acks_late flag are cancelled and re-queued for redelivery
+    # instead of being silently dropped, so no task data is lost on restart.
+    worker_cancel_long_running_tasks_on_connection_loss=True,
+    # Issue #540: priority task queue routing. Defining the queues explicitly
+    # (plus a default) lets urgent webhook dispatches land on the
+    # ``high_priority`` queue ahead of lower-priority work.
+    task_queues=(
+        Queue("high_priority"),
+        Queue("default"),
+        Queue("bulk"),
+    ),
+    task_default_queue="default",
+    task_routes={
+        "app.tasks.webhook_tasks.dispatch_webhook_delivery": {"queue": "high_priority"},
+        "app.tasks.webhook_tasks.dispatch_partitioned_delivery": {"queue": "high_priority"},
+        "app.tasks.webhook_tasks.trigger_sla_violation_async": {"queue": "high_priority"},
+    },
 
     beat_schedule={
+        "verify-payment-transactions": {
+            "task": "app.tasks.payment_tasks.verify_payment_transactions",
+            "schedule": 300.0,  # every 5 minutes
+        },
+        # Operator wallet balance threshold monitor: reads XLM/USDC balances
+        # every 15 minutes and alerts before a drained settlement wallet
+        # starts failing SLA payouts.
+        "monitor-wallet-balances": {
+            "task": "app.tasks.payment_tasks.monitor_wallet_balances",
+            "schedule": float(settings.WALLET_BALANCE_CHECK_INTERVAL_SECONDS),
+        },
         "webhook-autoscale-check": {
             "task": "app.tasks.webhook_autoscaler.periodic_autoscale_check",
             "schedule": 30.0,
@@ -77,6 +110,18 @@ celery_app.conf.update(
             "task": "app.tasks.timeout_guard.revoke_hung_tasks",
             "schedule": 60.0,
         },
+        # Delivery log retention purging: delete webhook delivery logs
+        # older than WEBHOOK_DELIVERY_LOG_RETENTION_DAYS (default 30 days).
+        "purge-old-webhook-logs": {
+            "task": "app.tasks.webhook_tasks.purge_old_webhook_logs",
+            "schedule": 86400.0,  # every 24 hours
+        },
+        # Issue #536: worker heartbeat monitor — pings the worker fleet every
+        # 60s, persists status to Redis, alerts when no worker responds.
+        "ping-celery-workers": {
+            "task": "app.tasks.worker_health.ping_celery_workers",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -85,8 +130,21 @@ celery_app.conf.update(
 # payload + traceback for audit. Importing the module wires the signal.
 from app.tasks import dead_letter as _dead_letter  # noqa: E402,F401
 
+# Issue #537: register Celery task Prometheus metrics signal handlers so
+# both the API process (eager mode) and worker processes export metrics on
+# the existing ``/metrics`` endpoint. Importing the module wires the signals.
+import app.metrics.celery_metrics  # noqa: E402,F401  (side-effect import)
+
 
 celery_app.autodiscover_tasks(["app.tasks"])
+
+
+# Issue #544: dedicated worker pools per task type. I/O-bound webhook tasks
+# run on an eventlet worker (high concurrency); CPU-bound SLA/contract
+# calculations run on a small prefork worker. Startup commands:
+#   celery -A app.tasks.celery_app worker --pool=eventlet --concurrency=50 -Q webhooks
+#   celery -A app.tasks.celery_app worker --pool=prefork --concurrency=4 -Q celery
+# See ``app.tasks.concurrency_config.get_task_pool_config`` for the resolver.
 
 
 def _mark_job_timed_out(task_id: str, code: str) -> None:
@@ -145,12 +203,15 @@ class GuardedTask(Task):
 
 
 def _required_queue_names() -> List[str]:
-    """Parse CELERY_REQUIRED_QUEUES (comma-separated) into a list of names."""
-    return [
-        name.strip()
-        for name in settings.CELERY_REQUIRED_QUEUES.split(",")
-        if name.strip()
-    ]
+    """Parse CELERY_REQUIRED_QUEUES (comma-separated) into a list of names.
+
+    Uses a defensive ``getattr`` so older deployments without the setting
+    degrade gracefully to no-op (empty required list).
+    """
+    raw = getattr(settings, "CELERY_REQUIRED_QUEUES", "")
+    if not raw:
+        return []
+    return [name.strip() for name in raw.split(",") if name.strip()]
 
 
 def verify_queue_bindings(
@@ -175,9 +236,15 @@ def verify_queue_bindings(
     to fail fast (e.g. ``sys.exit(1)`` from the worker-ready signal).
     """
     probe_timeout = (
-        timeout if timeout is not None else settings.CELERY_QUEUE_PROBE_TIMEOUT_SECONDS
+        timeout
+        if timeout is not None
+        else getattr(settings, "CELERY_QUEUE_PROBE_TIMEOUT_SECONDS", 5.0)
     )
-    strict_flag = strict if strict is not None else settings.CELERY_STRICT_QUEUE_BINDINGS
+    strict_flag = (
+        strict
+        if strict is not None
+        else getattr(settings, "CELERY_STRICT_QUEUE_BINDINGS", True)
+    )
 
     required = _required_queue_names()
     result: Dict[str, object] = {
@@ -267,6 +334,119 @@ def _on_worker_ready(sender=None, **kwargs) -> None:  # noqa: ANN001
         logger.critical("BE-W5-051: worker bootstrap aborted — %s", exc)
         # Fail fast so the orchestrator sees the worker crash and intervenes.
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Issue #542 — Task payload sanitization (mask secrets in task argument logs)
+# ---------------------------------------------------------------------------
+
+# Keys whose (case-insensitive) name matches any of these substrings are
+# masked whenever a task payload is logged via the before_task_publish hook.
+_SENSITIVE_KEY_FRAGMENTS = ("secret", "private_key", "token")
+
+
+def _sanitize_task_args(args: Any, kwargs: Any) -> Any:
+    """Recursively mask sensitive keys in a task payload.
+
+    Issue #542: any dict key whose name contains (case-insensitively) one of
+    ``secret`` / ``private_key`` / ``token`` is replaced with
+    ``settings.WEBHOOK_REDACTION_MASK`` (default ``[REDACTED]``). Lists and
+    nested dicts are traversed so the whole payload is scrubbed before it is
+    ever logged — the raw args are never emitted.
+    """
+    mask = getattr(settings, "WEBHOOK_REDACTION_MASK", "[REDACTED]")
+
+    def _redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for key, val in value.items():
+                low_key = str(key).lower()
+                if any(frag in low_key for frag in _SENSITIVE_KEY_FRAGMENTS):
+                    out[key] = mask
+                else:
+                    out[key] = _redact(val)
+            return out
+        if isinstance(value, (list, tuple)):
+            return [_redact(item) for item in value]
+        return value
+
+    return _redact(args), _redact(kwargs)
+
+
+@before_task_publish.connect
+def _on_before_task_publish(sender=None, body=None, **kwargs) -> None:  # noqa: ANN001
+    """Sanitize and log task arguments — never the raw secrets.
+
+    Issue #542: Celery fires ``before_task_publish`` in the *publishing*
+    process before a task is enqueued. The message ``body`` carries the
+    ``args``/``kwargs`` that will be handed to the task. We log only the
+    masked representation so secret keys (``secret``, ``private_key``,
+    ``token``) never reach the log stream.
+    """
+    if not isinstance(body, dict):
+        return
+    safe_args, safe_kwargs = _sanitize_task_args(
+        body.get("args", ()), body.get("kwargs", {})
+    )
+    logger.debug(
+        "Publishing task %s — args=%s kwargs=%s",
+        sender_name(sender),
+        safe_args,
+        safe_kwargs,
+    )
+
+
+def sender_name(sender: Any) -> str:
+    """Best-effort task name from the ``before_task_publish`` sender."""
+    name = getattr(sender, "name", None)
+    if name:
+        return name
+    return str(sender)
+
+
+# ---------------------------------------------------------------------------
+# Issue #541 — Graceful SIGTERM shutdown handling
+# ---------------------------------------------------------------------------
+
+
+def _handle_sigterm(signum, frame) -> None:  # noqa: ANN001
+    """Graceful shutdown on SIGTERM so in-flight tasks are re-queued.
+
+    Issue #541: with ``task_acks_late=True`` and
+    ``worker_cancel_long_running_tasks_on_connection_loss=True`` in place,
+    tasks that are in-flight when the worker is shut down are re-queued and
+    redelivered to a healthy worker. This handler simply logs that transition
+    gracefully and lets the normal worker teardown complete the requeue —
+    ensuring zero task data loss during a restart.
+    """
+    logger.warning(
+        "SIGTERM received (signum=%s); gracefully shutting down. In-flight "
+        "tasks will be re-queued and redelivered (acks_late).",
+        signum,
+    )
+
+
+def _register_sigterm_handler() -> None:
+    """Register the SIGTERM handler, guarded for non-worker / eager contexts.
+
+    Only meaningful for real Celery workers. Wrapped so importing this module
+    never fails on platforms where SIGTERM handling is limited or unavailable
+    (e.g. Windows), or when running in eager/test mode.
+    """
+    if getattr(settings, "CELERY_TASK_ALWAYS_EAGER", True):
+        logger.debug("Skipping SIGTERM handler registration in eager mode")
+        return
+    try:
+        if not hasattr(signal, "SIGTERM"):
+            logger.debug("SIGTERM not available on this platform; skipping")
+            return
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        logger.debug("Registered SIGTERM handler for graceful worker shutdown")
+    except (ValueError, OSError, TypeError) as exc:  # pragma: no cover
+        logger.warning("Unable to register SIGTERM handler: %s", exc)
+
+
+_register_sigterm_handler()
 
 
 @celery_app.task(name="app.tasks.celery_app.guardrail_check_task")

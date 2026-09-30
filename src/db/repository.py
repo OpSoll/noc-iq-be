@@ -1,0 +1,1 @@
+class BaseRepository:\n    pass\n

@@ -17,6 +17,8 @@ pydantic[email]
 
 # Task queue
 celery==5.5.3
+# Celery web monitoring dashboard (issue #534)
+flower==1.2.0
 
 # Redis
 redis>=5.0
@@ -26,6 +28,9 @@ httpx==0.28.1
 
 # Multipart form parsing (file uploads)
 python-multipart==0.0.20
+
+# Encryption (webhook custom headers at rest)
+cryptography>=42.0
 
 # Password hashing
 # bcrypt is pinned to <4.1: passlib 1.7.4's backend self-test hashes a >72-byte

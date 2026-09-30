@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -12,7 +13,18 @@ from app.core.security import require_admin
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("")
+class AuditLogEntry(BaseModel):
+    """A single structured audit log record."""
+    id: int = Field(..., description="Audit record ID")
+    event_type: str = Field(..., description="Event type (dot-namespaced, e.g. wallet.created)")
+    email: Optional[str] = Field(None, description="Actor email, when available")
+    actor_id: Optional[str] = Field(None, description="Actor identifier, when available")
+    correlation_id: Optional[str] = Field(None, description="Correlation ID tying the event to a request")
+    details: Optional[Dict[str, Any]] = Field(None, description="Structured event details")
+    created_at: Optional[str] = Field(None, description="ISO timestamp the event was recorded")
+
+
+@router.get("", response_model=List[AuditLogEntry])
 def get_audit_log(
     event_type_prefix: Optional[str] = Query(
         None,

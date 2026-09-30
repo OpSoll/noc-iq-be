@@ -48,6 +48,8 @@ The app entrypoint is [app/main.py](app/main.py).
 Current active routes are wired through [app/api/v1/router.py](app/api/v1/router.py):
 
 - `/health`
+- `/api/v1/health/detailed`
+- `/metrics`
 - `/api/v1/audit`
 - `/api/v1/jobs`
 - `/api/v1/outages`
@@ -164,7 +166,44 @@ The backend will be available at:
 - Swagger docs: `http://localhost:8000/docs`
 - Liveness check: `http://localhost:8000/health/liveness`
 - Readiness check: `http://localhost:8000/health/readiness`
+- Detailed health (DB + Celery broker + worker heartbeat): `http://localhost:8000/api/v1/health/detailed`
+- Prometheus metrics: `http://localhost:8000/metrics`
 - Legacy compatibility: `http://localhost:8000/health`
+
+## Celery Monitoring
+
+### Flower (web dashboard)
+
+[Flower](https://flower.readthedocs.io/) provides a real-time web UI for
+inspecting active Celery queues, workers, task rates and failure rates.
+
+Start it with Docker Compose:
+
+```bash
+docker compose up -d flower
+```
+
+The dashboard is exposed at `http://localhost:5555` and protected by basic
+auth. Credentials come from the `FLOWER_USER` / `FLOWER_PASSWORD` environment
+variables (defaults: `admin` / `changeme` — change them in production). The
+port is configurable via `FLOWER_PORT`.
+
+### Prometheus metrics
+
+Celery task execution metrics are exported on the `/metrics` endpoint
+(Prometheus text format):
+
+- `celery_tasks_total` — total number of Celery tasks that started
+- `celery_task_runtime_seconds` — histogram of task runtimes
+- `celery_tasks_failed` — total number of failed Celery tasks
+
+### Worker heartbeat monitor
+
+The `ping_celery_workers` beat task runs every 60 seconds and pings the Celery
+worker fleet. If no active worker responds, it raises an error-level log alert
+and (optionally) POSTs a JSON alert to `WORKER_ALERT_WEBHOOK_URL` when that
+variable is configured. The latest worker health status is available at
+`/api/v1/health/detailed` under `dependencies.celery_workers`.
 
 ## Verification Notes
 

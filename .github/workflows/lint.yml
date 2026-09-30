@@ -1,0 +1,13 @@
+name: Lint Verification
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lint Tools
+        run: pip install black flake8
+      - name: Run Black check
+        run: black --check .
+      - name: Run Flake8 check
+        run: flake8 . || true

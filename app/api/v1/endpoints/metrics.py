@@ -1,9 +1,10 @@
 from datetime import datetime
 from fastapi import APIRouter, Response, Depends, HTTPException
 from fastapi import status as http_status
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Response, Depends, HTTPException, Query
 from fastapi import status
+from pydantic import BaseModel, Field
 from app.services.metrics import metrics, ScorecardMetrics, ReliabilityScorecardService
 from app.services.analytics.trend_aggregator import TrendAggregator
 from app.core.security import require_engineer
@@ -16,28 +17,50 @@ from app.metrics.cardinality_guard import cardinality_guard
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
 
-@router.get("/webhook-workers")
+class PoolHealthStats(BaseModel):
+    """Database connection pool health snapshot."""
+    pool_size: int = Field(..., description="Configured pool size")
+    active: int = Field(..., description="Currently checked-out connections")
+    idle: int = Field(..., description="Currently checked-in connections")
+    overflow: int = Field(..., description="Connections above pool size")
+    max_overflow: int = Field(..., description="Configured maximum overflow")
+    saturation: float = Field(..., description="Pool saturation ratio (0-1)")
+
+
+class ScorecardEnvelope(BaseModel):
+    """Release governance evaluation envelope."""
+    success: bool = Field(..., description="Whether the evaluation completed")
+    data: Dict[str, Any] = Field(..., description="Reliability scorecard payload")
+
+
+class TrendsResponse(BaseModel):
+    """Aggregated trend buckets response."""
+    success: bool = Field(..., description="Whether aggregation succeeded")
+    data: List[Dict[str, Any]] = Field(..., description="Aligned time-window buckets")
+
+
+@router.get("/webhook-workers", response_model=Dict[str, Any])
 def webhook_worker_metrics():
     return autoscaler.get_metrics()
 
 
-@router.get("/pool")
+@router.get("/pool", response_model=PoolHealthStats)
 def pool_health_stats():
     return pool_health.get_stats()
 
 
-@router.get("/rate-limits")
+@router.get("/rate-limits", response_model=Dict[str, Any])
 def rate_limit_metrics():
     return rate_limiter.get_metrics()
 
 
-@router.get("/cardinality")
+@router.get("/cardinality", response_model=Dict[str, Any])
 def cardinality_metrics():
     return cardinality_guard.get_cardinality()
 
 
 # Issue #302: Webhook partition metrics
-@router.get("/webhook-partitions")
+@router.get("/webhook-partitions", response_model=Dict[str, Any])
 def webhook_partition_metrics():
     """Get webhook partition metrics including per-partition lag and throughput."""
     from app.services.webhook_service import get_partition_metrics
@@ -45,7 +68,7 @@ def webhook_partition_metrics():
 
 
 # Issue #305: Webhook SLO metrics
-@router.get("/webhook-slo")
+@router.get("/webhook-slo", response_model=Dict[str, Any])
 def webhook_slo_metrics():
     """Get webhook delivery SLO metrics including success rates, latency percentiles,
     and burn indicators."""
@@ -53,7 +76,7 @@ def webhook_slo_metrics():
     return get_slo_metrics()
 
 
-@router.post("/scorecard/evaluate", status_code=http_status.HTTP_200_OK)
+@router.post("/scorecard/evaluate", response_model=ScorecardEnvelope, status_code=http_status.HTTP_200_OK)
 async def evaluate_release_governance(metrics: ScorecardMetrics):
     """
     Evaluates system logs and telemetry payloads against governance criteria to issue an auditable deployment decision.
@@ -70,14 +93,14 @@ async def evaluate_release_governance(metrics: ScorecardMetrics):
             detail=f"Failed to compile reliability analytics: {str(e)}"
         )
 
-@router.get("")
+@router.get("", response_model=Dict[str, Any])
 def get_metrics():
     """Get application metrics in JSON format."""
     metrics_data = metrics.get_metrics_summary()
     return metrics_data
 
 
-@router.get("/prometheus")
+@router.get("/prometheus", response_model=None)
 def get_prometheus_metrics(current_user=Depends(require_engineer)):
     """Get metrics in Prometheus text format for scraping (BE-043).
 
@@ -190,7 +213,7 @@ def get_prometheus_metrics(current_user=Depends(require_engineer)):
     )
 
 
-@router.get("/trends", status_code=status.HTTP_200_OK)
+@router.get("/trends", response_model=TrendsResponse, status_code=status.HTTP_200_OK)
 async def get_trends(
     window: str = Query("daily", regex="^(hourly|daily|weekly)$"),
     from_date: Optional[str] = Query(None, alias="from"),

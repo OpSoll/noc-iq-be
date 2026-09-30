@@ -10,6 +10,7 @@ from celery.exceptions import SoftTimeLimitExceeded
 from app.tasks.celery_app import celery_app, GuardedTask
 from app.core.config import settings as cfg
 from app.db.session import SessionLocal
+from app.services.task_lock import RedisTaskLock
 from app.models.job import Job, JobStatus, JobType
 from app.models.webhook import WebhookEvent
 from app.repositories.payment_repository import PaymentRepository
@@ -20,6 +21,26 @@ from app.utils.logging import get_structured_logger
 
 logger = logging.getLogger(__name__)
 task_logger = get_structured_logger("sla_tasks")
+
+# Issue #538: bulk SLA computation chunk size. Batches larger than this are
+# split into parallel chunks via Celery ``chunks()`` so a single worker is
+# never blocked for minutes on a 10,000-device batch.
+SLA_BULK_CHUNK_SIZE = 50
+
+
+def _bulk_sla_lock_job_id(call_args) -> str:
+    """Deterministic lock job id for a bulk SLA batch (Issue #533).
+
+    Derived from a SHA-256 digest of the sorted device list + period so two
+    identical batch triggers map to the same ``lock:task:*`` key and only
+    one of them executes.
+    """
+    device_ids = sorted(call_args.get("device_ids") or [])
+    period = call_args.get("period") or ""
+    digest = hashlib.sha256(
+        json.dumps(device_ids, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"bulk_sla:{digest}:{period}"
 
 
 def _hash_job_payload(job: Job) -> str:
@@ -170,6 +191,45 @@ class DatabaseTask(GuardedTask):
                 job.progress_details = details
             db.commit()
 
+    def _publish_progress(
+        self,
+        current: int,
+        total: int,
+        stage: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish a Celery ``PROGRESS`` state update (issue #543).
+
+        Mirrors the DB-side Job progression to the result backend via
+        ``self.update_state(state="PROGRESS", ...)`` so callers reading the
+        task's ``AsyncResult`` see ``current``/``total`` plus a rounded
+        ``progress_percentage`` in its meta.
+
+        Guarded with try/except: eager mode (``task_always_eager=True``) and
+        unavailable result backends must never break the task itself.
+        """
+        if not total:
+            return
+        percent = (float(current) / float(total)) * 100.0
+        meta: Dict[str, Any] = {
+            "current": current,
+            "total": total,
+            "progress_percentage": round(percent, 2),
+        }
+        if stage:
+            meta["stage"] = stage
+        if extra:
+            for key, value in extra.items():
+                meta.setdefault(key, value)
+        try:
+            self.update_state(state="PROGRESS", meta=meta)
+        except Exception:  # pragma: no cover - eager/pool safety net
+            logger.debug(
+                "update_state(PROGRESS) unavailable — ignoring (task_id=%s)",
+                getattr(self.request, "id", None),
+                exc_info=True,
+            )
+
     def _add_partial_result(self, db, celery_task_id: str, item_id: str, result: Any):
         """Add a partial result for bulk operations."""
         job = self._get_job(db, celery_task_id)
@@ -213,6 +273,7 @@ class DatabaseTask(GuardedTask):
     max_retries=3,
     default_retry_delay=30,
 )
+@RedisTaskLock("sla:{device_id}:{period}")  # Issue #533
 def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Compute SLA metrics for a single device over a given period.
@@ -244,7 +305,8 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
-        
+        self._publish_progress(current=30, total=100, stage="data_collection")
+
         result = compute_device_sla(db, device_id=device_id, period=period)
         
         self._update_progress(db, self.request.id, 70.0, {
@@ -253,6 +315,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "period": period,
             "is_violated": result.get("is_violated", False)
         })
+        self._publish_progress(
+            current=70,
+            total=100,
+            stage="sla_computation_complete",
+            extra={"is_violated": result.get("is_violated", False)},
+        )
 
         # Check for violations and dispatch webhooks
         if result.get("is_violated"):
@@ -262,6 +330,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
                 "period": period,
                 "violation_detected": True
             })
+            self._publish_progress(
+                current=85,
+                total=100,
+                stage="triggering_webhooks",
+                extra={"violation_detected": True},
+            )
             
             from app.services.webhook_service import trigger_sla_violation_webhooks
             trigger_sla_violation_webhooks(
@@ -279,6 +353,7 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
+        self._publish_progress(current=95, total=100, stage="finalizing")
 
         self._mark_success(db, self.request.id, result)
         logger.info("SLA computation complete for device=%s", device_id)
@@ -321,10 +396,112 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
 @celery_app.task(
     bind=True,
     base=DatabaseTask,
+    name="app.tasks.sla_tasks.compute_sla_chunk",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def compute_sla_chunk(
+    self: DatabaseTask,
+    chunk_device_ids: List[str],
+    period: str,
+    job_task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Process a single chunk of device IDs (≤ SLA_BULK_CHUNK_SIZE items).
+
+    Issue #538: dispatched in parallel by ``compute_bulk_sla`` via Celery
+    ``chunks()`` so large SLA batches no longer block a single worker for
+    minutes. Returns a per-chunk summary the parent aggregates.
+
+    When ``job_task_id`` is the parent bulk job's Celery task ID, per-device
+    partial results / item errors are written back to the parent ``Job`` row
+    so progress tracking survives chunking.
+    """
+    db = self.get_db()
+    try:
+        results = []
+        violations = []
+        processed_count = 0
+        error_count = 0
+        total = len(chunk_device_ids)
+
+        for idx, device_id in enumerate(chunk_device_ids, start=1):
+            try:
+                from app.services.sla_service import compute_device_sla  # type: ignore
+
+                result = compute_device_sla(db, device_id=device_id, period=period)
+                results.append({"device_id": device_id, "result": result})
+
+                if job_task_id:
+                    self._add_partial_result(db, job_task_id, device_id, result)
+
+                if result.get("is_violated"):
+                    violations.append(device_id)
+                    from app.services.webhook_service import trigger_sla_violation_webhooks
+
+                    trigger_sla_violation_webhooks(
+                        db,
+                        sla_data={"device_id": device_id, "period": period, **result},
+                        event=WebhookEvent.SLA_VIOLATION,
+                    )
+                processed_count += 1
+
+            except Exception as device_exc:
+                logger.warning("SLA failed for device=%s: %s", device_id, device_exc)
+                results.append({"device_id": device_id, "error": str(device_exc)})
+
+                if job_task_id:
+                    self._add_item_error(db, job_task_id, device_id, str(device_exc))
+                error_count += 1
+
+            if job_task_id and total:
+                progress = (idx / total) * 100
+                self._update_progress(db, job_task_id, progress, {
+                    "stage": "processing_chunk",
+                    "current_device": device_id,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "chunk_size": total,
+                    "progress_percentage": round(progress, 2),
+                })
+
+            # Issue #543: publish per-item counters to the result backend so
+            # AsyncResult readers see PROGRESS with current/total percentages.
+            if total:
+                self._publish_progress(
+                    current=idx,
+                    total=total,
+                    stage="processing_chunk",
+                    extra={
+                        "current_device": device_id,
+                        "processed_count": processed_count,
+                        "error_count": error_count,
+                        "chunk_size": total,
+                    },
+                )
+
+        return {
+            "total": total,
+            "violations": len(violations),
+            "violated_devices": violations,
+            "processed_count": processed_count,
+            "error_count": error_count,
+            "results": results,
+        }
+    except Exception as exc:
+        logger.exception("SLA chunk computation failed: %s", exc)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    base=DatabaseTask,
     name="app.tasks.sla_tasks.compute_bulk_sla",
     max_retries=2,
     default_retry_delay=60,
 )
+@RedisTaskLock(lock_key=_bulk_sla_lock_job_id)  # Issue #533
 def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> Dict[str, Any]:
     """
     Compute SLA for multiple devices. Dispatches individual tasks per device
@@ -342,6 +519,104 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "total_devices": total,
             "period": period
         })
+        self._publish_progress(current=5, total=100, stage="initialization")
+
+        # Issue #538: chunk large batches into parallel tasks of at most
+        # SLA_BULK_CHUNK_SIZE (50) devices so a single worker is never
+        # blocked for minutes on a huge batch. Small batches keep the
+        # sequential in-process path.
+        if total > SLA_BULK_CHUNK_SIZE:
+            device_chunks = [
+                device_ids[i : i + SLA_BULK_CHUNK_SIZE]
+                for i in range(0, total, SLA_BULK_CHUNK_SIZE)
+            ]
+            self._update_progress(db, self.request.id, 10.0, {
+                "stage": "dispatching_chunks",
+                "total_devices": total,
+                "chunk_size": SLA_BULK_CHUNK_SIZE,
+                "chunk_count": len(device_chunks),
+                "period": period,
+            })
+            self._publish_progress(
+                current=10,
+                total=100,
+                stage="dispatching_chunks",
+                extra={
+                    "chunk_size": SLA_BULK_CHUNK_SIZE,
+                    "chunk_count": len(device_chunks),
+                },
+            )
+            logger.info(
+                "Bulk SLA computation chunking %d devices into %d chunks "
+                "of %d (period=%s)",
+                total, len(device_chunks), SLA_BULK_CHUNK_SIZE, period,
+            )
+
+            # Dispatch one chunk task per 50-device slice via Celery
+            # ``chunks()``; chunks run in parallel across worker nodes.
+            chunk_group = compute_sla_chunk.chunks(
+                [(chunk, period, self.request.id) for chunk in device_chunks],
+                1,
+            ).apply_async()
+            chunk_summaries = chunk_group.join(timeout=3600, propagate=True)
+
+            # Each chunk subtask's result is a list of per-invocation
+            # results (one invocation per chunk), so flatten before
+            # aggregating.
+            flat_summaries = []
+            for item in chunk_summaries:
+                if isinstance(item, list):
+                    flat_summaries.extend(item)
+                else:
+                    flat_summaries.append(item)
+
+            results = []
+            violations = []
+            processed_count = 0
+            error_count = 0
+            for chunk_summary in flat_summaries:
+                processed_count += chunk_summary.get("processed_count", 0)
+                error_count += chunk_summary.get("error_count", 0)
+                violations.extend(chunk_summary.get("violated_devices", []))
+                results.extend(chunk_summary.get("results", []))
+
+            self._update_progress(db, self.request.id, 95.0, {
+                "stage": "finalizing",
+                "total_devices": total,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "violations_found": len(violations),
+                "chunk_count": len(device_chunks),
+            })
+            self._publish_progress(
+                current=95,
+                total=100,
+                stage="finalizing",
+                extra={
+                    "chunk_count": len(device_chunks),
+                    "violations_found": len(violations),
+                },
+            )
+
+            summary = {
+                "total": total,
+                "violations": len(violations),
+                "violated_devices": violations,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "results": results,
+                "chunked": True,
+                "chunk_count": len(device_chunks),
+                "chunk_size": SLA_BULK_CHUNK_SIZE,
+            }
+
+            self._mark_success(db, self.request.id, summary)
+            logger.info(
+                "Bulk SLA computation complete (chunked). Violations: %d/%d, "
+                "Errors: %d, Chunks: %d",
+                len(violations), total, error_count, len(device_chunks),
+            )
+            return summary
 
         results = []
         violations = []
@@ -388,6 +663,19 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                 "progress_percentage": round(progress, 2)
             })
 
+            # Issue #543: publish per-item counters to the result backend.
+            self._publish_progress(
+                current=idx,
+                total=total,
+                stage="processing_devices",
+                extra={
+                    "current_device": device_id,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "violations_found": len(violations),
+                },
+            )
+
         # Final summary with structured progress
         self._update_progress(db, self.request.id, 95.0, {
             "stage": "finalizing",
@@ -396,6 +684,12 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "error_count": error_count,
             "violations_found": len(violations)
         })
+        self._publish_progress(
+            current=95,
+            total=100,
+            stage="finalizing",
+            extra={"violations_found": len(violations)},
+        )
         
         summary = {
             "total": total,

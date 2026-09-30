@@ -1,0 +1,1 @@
+def check_db_health():\n    pass\n

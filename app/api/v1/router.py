@@ -4,6 +4,7 @@ from app.api.v1.endpoints import audit
 from app.api.v1.endpoints import (
     analytics,
     auth,
+    health,
     jobs,
     metrics,
     outages,
@@ -28,6 +29,7 @@ from app.api.endpoints import (
 
 api_router = APIRouter()
 
+api_router.include_router(health.router)
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(audit.router)
 api_router.include_router(jobs.router)

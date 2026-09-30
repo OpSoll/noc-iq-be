@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -17,6 +17,7 @@ from app.models.payment import (
     PaymentResponse,
     PaymentTransaction,
     PaymentTransitionError,
+    ReconciliationReport,
 )
 from app.utils.correlation import get_correlation_id
 from app.repositories.payment_repository import PaymentRepository
@@ -24,13 +25,32 @@ from app.services.idempotency_service import IdempotencyService
 from app.services.contracts.sla_adapter import check_blockchain_payment_status
 from app.services.audit_log import audit_log
 from app.core.security import get_current_user, require_admin, require_engineer
+from app.services.analytics_exporter import AnalyticsExporter
+from fastapi.responses import StreamingResponse
+import io
 
 router = APIRouter()
+
+
+class IdempotencyMetrics(BaseModel):
+    """Idempotency cache usage counters."""
+    hits: int
+    misses: int
+    stored: int
+    expired_cleaned: int
+
+
+class EnvelopeResponse(BaseModel):
+    """Standard response envelope: data plus correlation metadata."""
+    data: Any = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=lambda: {"correlation_id": None})
+
 
 _SEEN_NONCES: dict[str, float] = {}
 CALLBACK_NONCE_TTL_SECONDS = 300  
 
-@router.get("/idempotency/metrics")
+@router.get("/idempotency/metrics", response_model=IdempotencyMetrics)
 def idempotency_metrics(db: Session = Depends(get_db)):
     service = IdempotencyService(db)
     return service.get_metrics()
@@ -125,12 +145,55 @@ def list_payments(
     )
 
 
-@router.get("/ping")
+@router.get("/accounting-report")
+def get_accounting_report(
+    format: str = Query(default="csv", regex="^(csv|pdf)$"),
+    date_from: Optional[datetime] = Query(default=None),
+    date_to: Optional[datetime] = Query(default=None),
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from cannot be after date_to")
+
+    repo = PaymentRepository(db)
+    payments, _ = repo.list(
+        page=1,
+        page_size=10000,  # A large number to get all records for the report
+        date_from=date_from,
+        date_to=date_to,
+    )
+
+    exporter = AnalyticsExporter()
+    try:
+        report_data = exporter.export(format, payments, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except NotImplementedError:
+        raise HTTPException(status_code=501, detail="PDF export is not yet implemented.")
+
+    if format == "csv":
+        media_type = "text/csv"
+        file_extension = "csv"
+        content = io.StringIO(report_data)
+    else: # pdf
+        media_type = "application/pdf"
+        file_extension = "pdf"
+        content = io.BytesIO(report_data)
+
+    return StreamingResponse(
+        content,
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename=accounting_report_{datetime.utcnow().strftime('%Y%m%d')}.{file_extension}"}
+    )
+
+
+@router.get("/ping", response_model=EnvelopeResponse)
 def payments_ping():
     return _envelope(data={"message": "payments ok"})
 
 
-@router.get("/dead-letter")
+@router.get("/dead-letter", response_model=EnvelopeResponse)
 def list_dead_letter_payments(
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
@@ -140,7 +203,7 @@ def list_dead_letter_payments(
     return _envelope(data=[i.model_dump(mode="json") for i in items])
 
 
-@router.post("/{transaction_id}/replay")
+@router.post("/{transaction_id}/replay", response_model=EnvelopeResponse)
 def replay_dead_letter_payment(
     transaction_id: str,
     current_user=Depends(require_admin),
@@ -241,7 +304,7 @@ class ReconcileRequest(BaseModel):
     status: str
 
 
-@router.post("/reconcile")
+@router.post("/reconcile", response_model=List[ReconciliationReport])
 def reconcile_all_payments(
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),

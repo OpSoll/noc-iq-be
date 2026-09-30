@@ -30,6 +30,7 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         type=orm.type,
         amount=orm.amount,
         asset_code=orm.asset_code,
+        asset_issuer=orm.asset_issuer,
         from_address=orm.from_address,
         to_address=orm.to_address,
         status=orm.status,
@@ -43,6 +44,10 @@ def _orm_to_pydantic(orm: PaymentTransactionORM) -> PaymentTransaction:
         idempotency_key=orm.idempotency_key,
         dead_letter_reason=orm.dead_letter_reason,
         dead_lettered_at=orm.dead_lettered_at,
+        time_bounds_min=getattr(orm, 'time_bounds_min', 0),
+        time_bounds_max=getattr(orm, 'time_bounds_max', 0),
+        fee_re_estimation_pending=bool(getattr(orm, 'fee_re_estimation_pending', 0)),
+        expired_at=getattr(orm, 'expired_at', None),
     )
 
 
@@ -57,6 +62,7 @@ class PaymentRepository:
             type=data.type,
             amount=data.amount,
             asset_code=data.asset_code,
+            asset_issuer=data.asset_issuer,
             from_address=data.from_address,
             to_address=data.to_address,
             status=data.status,
@@ -65,6 +71,9 @@ class PaymentRepository:
             created_at=data.created_at,
             confirmed_at=data.confirmed_at,
             idempotency_key=data.idempotency_key,
+            time_bounds_min=data.time_bounds_min,
+            time_bounds_max=data.time_bounds_max,
+            fee_re_estimation_pending=1 if data.fee_re_estimation_pending else 0,
         )
         self.db.add(orm)
         self.db.commit()
@@ -78,12 +87,16 @@ class PaymentRepository:
             type=data.type,
             amount=data.amount,
             asset_code=data.asset_code,
+            asset_issuer=data.asset_issuer,
             from_address=data.from_address,
             to_address=data.to_address,
             status=data.status,
             outage_id=data.outage_id,
             sla_result_id=data.sla_result_id,
             created_at=data.created_at,
+            time_bounds_min=data.time_bounds_min,
+            time_bounds_max=data.time_bounds_max,
+            fee_re_estimation_pending=1 if data.fee_re_estimation_pending else 0,
         )
         self.db.add(orm)
         self.db.flush()
@@ -98,6 +111,66 @@ class PaymentRepository:
         if not orm:
             return None
         return _orm_to_pydantic(orm)
+
+    def get_by_idempotency_key(
+        self, idempotency_key: str
+    ) -> Optional[PaymentTransaction]:
+        """Return the stored payment for ``idempotency_key``, if any.
+
+        Issue #560: used to reject duplicate settlement attempts. Returns the
+        active payment row (if any) without raising, so callers decide how to
+        handle the duplicate.
+        """
+        if not idempotency_key:
+            return None
+        orm = (
+            self.db.query(PaymentTransactionORM)
+            .filter(PaymentTransactionORM.idempotency_key == idempotency_key)
+            .first()
+        )
+        if not orm:
+            return None
+        return _orm_to_pydantic(orm)
+
+    def generate_idempotency_key(
+        self, outage_id: str, amount: float, recipient: str
+    ) -> str:
+        """Deterministic Stellar payment idempotency key (issue #560)."""
+        from app.services.stellar_payments import generate_payment_idempotency_key
+
+        return generate_payment_idempotency_key(
+            outage_id=outage_id, amount=amount, recipient=recipient
+        )
+
+    def ensure_unique_idempotency_key(
+        self,
+        outage_id: str,
+        amount: float,
+        recipient: str,
+        existing_key: str | None = None,
+    ) -> str:
+        """Compute a unique idempotency key or reject an active duplicate.
+
+        Issue #560: derives the deterministic key from
+        ``(outage_id, amount, recipient)`` and, when one is already in use by
+        an active payment row, raises :class:`PaymentIdempotencyError` instead
+        of allowing a second identical payout to be created. When an explicit
+        ``existing_key`` is supplied (legacy SLA path), that key is used
+        verbatim as long as it is not already active.
+
+        Returns:
+            The idempotency key to store on the new payment row.
+        """
+        from app.models.payment import PaymentIdempotencyError
+
+        key = existing_key or self.generate_idempotency_key(
+            outage_id=outage_id, amount=amount, recipient=recipient
+        )
+
+        dup = self.get_by_idempotency_key(key)
+        if dup is not None:
+            raise PaymentIdempotencyError(key)
+        return key
 
     def get_by_sla_result(self, sla_result_id: int, for_update: bool = False) -> Optional[PaymentTransaction]:
         query = (
@@ -279,7 +352,22 @@ class PaymentRepository:
         if existing:
             return existing
 
+        # Set time bounds: min=0, max=now+300s (5 minute timeout)
+        from app.models.payment import TimeBounds
+        time_bounds = TimeBounds.default_for_transaction()
+
         normalized_amount = abs(float(sla_result.amount))
+        # Issue #560: deterministic idempotency key from (outage, amount,
+        # recipient) — sha256(f"{outage_id}:{amount}:{recipient}"). The
+        # recipient is the configured settlement address. Before inserting,
+        # reject any existing payment that already holds the same active key
+        # so two identical payouts cannot both be created.
+        idempotency_key = self.ensure_unique_idempotency_key(
+            outage_id=outage_id,
+            amount=normalized_amount,
+            recipient=settings.PAYMENT_TO_ADDRESS,
+        )
+
         transaction = PaymentTransaction(
             id=f"pay_{uuid4().hex[:12]}",
             transaction_hash=f"sla-{sla_result.id}-{sla_result.payment_type}",
@@ -293,7 +381,9 @@ class PaymentRepository:
             sla_result_id=sla_result.id,
             created_at=datetime.now(timezone.utc),
             confirmed_at=None,
-            idempotency_key=f"sla_result_{sla_result.id}_{sla_result.payment_type}",
+            idempotency_key=idempotency_key,
+            time_bounds_min=time_bounds.min_time,
+            time_bounds_max=time_bounds.max_time,
         )
         return self.create(transaction)
 
