@@ -35,7 +35,7 @@ from app.repositories.outage_repository import OutageRepository
 from app.repositories.payment_repository import PaymentRepository
 from app.repositories.sla_repository import SLARepository
 from app.services.outage_store import outage_store
-from app.core.outage_state_machine import OutageStateMachine
+from app.core.outage_state_machine import InvalidStateTransition, OutageStateMachine
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
@@ -504,11 +504,13 @@ def update_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(re
             OutageStateMachine.transition(
                 outage_id, existing.status, payload.status.value
             )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except InvalidStateTransition as exc:
+            raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
 
     try:
         updated = repo.update(outage_id, payload)
+    except InvalidStateTransition as exc:
+        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     OutageEventRepository(db).record(outage_id, "updated", payload.model_dump(exclude_unset=True, exclude_none=True))
@@ -530,8 +532,18 @@ def patch_outage(outage_id: str, payload: OutageUpdate, current_user=Depends(req
     if not existing:
         raise HTTPException(status_code=404, detail="Outage not found")
 
+    if payload.status is not None:
+        try:
+            OutageStateMachine.transition(
+                outage_id, existing.status, payload.status.value
+            )
+        except InvalidStateTransition as exc:
+            raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
+
     try:
         updated = repo.update(outage_id, payload)
+    except InvalidStateTransition as exc:
+        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     OutageEventRepository(db).record(outage_id, "patched", payload.model_dump(exclude_unset=True, exclude_none=True))
@@ -588,6 +600,8 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
         OutageStateMachine.transition(
             outage_id, outage.status, "resolved"
         )
+    except InvalidStateTransition as exc:
+        raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     
@@ -596,6 +610,8 @@ def resolve_outage(outage_id: str, payload: ResolveOutageRequest, current_user=D
         with advisory_lock_nowait(db, f"resolve:{outage_id}"):
             try:
                 outage = repo.resolve(outage_id, payload.mttr_minutes)
+            except InvalidStateTransition as exc:
+                raise HTTPException(status_code=400, detail=exc.to_dict()) from exc
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             if not outage:

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Annotated, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, Path, UUID4, field_validator, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, UUID4, field_validator, model_validator, ValidationError
 
 from app.models.enums import OutageStatus, Severity
 from app.core.config import settings
@@ -47,7 +47,7 @@ def validate_uuid_path_param(value: str) -> str:
 
 UUIDPathParam = Annotated[
     UUID4,
-    Path(..., description="Canonical UUID v4 identifier.", pattern=UUID_V4_PATTERN),
+    Field(..., description="Canonical UUID v4 identifier.", pattern=UUID_V4_PATTERN),
 ]
 
 

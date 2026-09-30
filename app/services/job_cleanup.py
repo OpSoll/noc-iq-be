@@ -148,7 +148,7 @@ def reclaim_stale_leases(
 
     logger.info(
         "Lease reclamation scanned %d stale leases; reclaimed=%d dry_run=%s",
-        len(stale), len(reclaimed), dry_run,
+        len(stale), len(reclaimed), dry_run=dry_run,
     )
     return {
         "stale_leases_found": len(stale),
@@ -415,7 +415,11 @@ class JobCleanupService:
         self.db.commit()
         self.db.refresh(job)
 
-        audit_log.log_event(
+        # Audit log commits its own session internally (separate from self.db);
+        # avoid a second commit on the caller's session by routing through the
+        # lightweight log_no_commit() method which does not commit or open a
+        # new session.
+        audit_log.log_no_commit(
             self.db,
             event_type="job_investigation_flag_changed",
             details={
@@ -437,7 +441,11 @@ class JobCleanupService:
         self.db.commit()
         self.db.refresh(job)
 
-        audit_log.log_event(
+        # Audit log commits its own session internally (separate from self.db);
+        # avoid a second commit on the caller's session by routing through the
+        # lightweight log_no_commit() method which does not commit or open a
+        # new session.
+        audit_log.log_no_commit(
             self.db,
             event_type="job_dispute_flag_changed",
             details={

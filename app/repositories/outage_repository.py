@@ -4,6 +4,10 @@ from typing import Any, Dict, Iterator, List, Optional
 from sqlalchemy import and_, asc, desc, or_
 from sqlalchemy.orm import Session
 
+from app.core.outage_state_machine import (
+    VALID_TRANSITIONS as _STATE_MACHINE_TRANSITIONS,
+    OutageStateMachine,
+)
 from app.models.enums import OutageStatus, Severity
 from app.models.orm.outage import OutageORM
 from app.models.outage import Outage, Location, SLAStatus
@@ -38,9 +42,11 @@ def _orm_to_pydantic(orm: OutageORM) -> Outage:
     )
 
 
+# Issue #664: the outage state machine is the single source of truth for legal
+# lifecycle transitions. Kept as a derived alias so existing references remain
+# valid, but ``validate_status_transition`` delegates to the state machine.
 ALLOWED_STATUS_TRANSITIONS = {
-    OutageStatus.open.value: {OutageStatus.open.value, OutageStatus.resolved.value},
-    OutageStatus.resolved.value: {OutageStatus.resolved.value},
+    status: set(next_states) for status, next_states in _STATE_MACHINE_TRANSITIONS.items()
 }
 
 OUTAGE_SORT_FIELDS = {"detected_at", "site_name", "severity", "status", "id"}
@@ -52,12 +58,8 @@ class OutageRepository:
 
     @staticmethod
     def validate_status_transition(current_status: str, new_status: str) -> None:
-        c = current_status.lower()
-        n = new_status.lower()
-        if c == n:
-            return
-        if c == "resolved" and n == "open":
-            raise ValueError("Invalid status transition: resolved to open")
+        """Delegate to the outage state machine (Issue #664)."""
+        OutageStateMachine.validate_transition(current_status, new_status)
 
     def list(
         self,
@@ -254,9 +256,8 @@ class OutageRepository:
 
     @staticmethod
     def validate_status_transition(current_status: str, next_status: str) -> None:
-        allowed = ALLOWED_STATUS_TRANSITIONS.get(current_status, set())
-        if next_status not in allowed:
-            raise ValueError(f"Invalid status transition: {current_status} -> {next_status}")
+        """Delegate to the outage state machine (Issue #664)."""
+        OutageStateMachine.validate_transition(current_status, next_status)
 
     def _find_duplicate_orm(self, payload: OutageCreate) -> Optional[OutageORM]:
         query = self.db.query(OutageORM).filter(

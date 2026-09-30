@@ -3,6 +3,7 @@ from app.services.domain_rate_limiter import DomainRateLimiter
 
 # Rate limiter: 30 requests per second per domain
 rate_limiter = DomainRateLimiter(30, 1)
+import hashlib
 import ipaddress
 import json
 import logging
@@ -14,7 +15,7 @@ from threading import Lock
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 from urllib.parse import urlparse
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from sqlalchemy import cast, text
@@ -613,6 +614,7 @@ def _build_headers(
     signature_version: int = CURRENT_SIGNATURE_VERSION,
     idempotency_key: Optional[str] = None,
     schema_version: str = "1",
+    delivery_id: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build webhook delivery headers with explicit signature versioning (BE-087),
     idempotency key, and custom headers.
@@ -781,6 +783,7 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
     payload_data = json.loads(payload_str)
     schema_version = payload_data.get("schema_version", "1")
 
+    delivery_id = str(uuid4())
     headers = _build_headers(
         webhook,
         payload_str,
@@ -788,6 +791,7 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
         delivery.signature_version,
         idempotency_key=delivery.idempotency_key,
         schema_version=schema_version,
+        delivery_id=delivery_id,
     )
 
     # Issue #303: SSRF redirect protection - limit redirects
@@ -798,7 +802,6 @@ def _attempt_delivery(delivery: WebhookDelivery, webhook: Webhook) -> bool:
             response = client.post(webhook.url, content=payload_str, headers=headers)
         delivery.response_status_code = response.status_code
         delivery.response_body = _truncate_response_body(response.text)
-[:4000]
 
         # Use explicit status code classification
         classification = classify_http_status(response.status_code)

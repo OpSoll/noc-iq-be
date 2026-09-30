@@ -313,6 +313,32 @@ class AuditLogService:
         with self.db_session_factory() as db:
             self.log_event(db, event_type, email=email, actor_id=actor_id, details=details)
 
+    def log_no_commit(
+        self,
+        db: Session,
+        event_type: str,
+        details: Optional[dict[str, Any]] = None,
+        actor_id: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> None:
+        """
+        Record an audit event WITHOUT committing to the caller's session.
+
+        Used by services that already commit (e.g. set_investigation_flag)
+        so the audit trail is written without a second commit, and without
+        opening a fresh session that may lack necessary tables.
+        """
+        audit_entry = AuditLogORM(
+            event_type=event_type,
+            email=email,
+            actor_id=actor_id,
+            correlation_id=get_correlation_id() or None,
+            details=self._sanitize(details),
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(audit_entry)
+        # NOTE: do NOT commit here; the caller owns the transaction.
+
     def list(
         self,
         event_type_prefix: Optional[str] = None,

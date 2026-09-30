@@ -1,4 +1,7 @@
+import hashlib
+import json
 from decimal import Decimal, ROUND_HALF_UP
+from typing import Optional
 
 from app.models.sla import SLAResult, SLASeverityConfig
 from .config import SLA_CONFIG, get_all_config, get_config_for_severity
@@ -183,20 +186,30 @@ class SLACalculator:
         return normalized
 
     @classmethod
-    def calculate_sla(cls, outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", is_offline_fallback: bool = False) -> SLAResult:
-        return cls.calculate(outage_id, severity, mttr_minutes, policy_version, threshold_source, is_offline_fallback)
+    def calculate_sla(cls, outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", is_offline_fallback: bool = False, **kwargs) -> SLAResult:
+        return cls.calculate(outage_id, severity, mttr_minutes, policy_version, threshold_source, is_offline_fallback, **kwargs)
 
     @classmethod
-    def resolve_offline(cls, outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config") -> SLAResult:
+    def resolve_offline(cls, outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", **kwargs) -> SLAResult:
         """Compute SLA locally when the on-chain Soroban RPC is unreachable (#545).
 
         Applies the identical off-chain Python math as the online path and
         tags the result with ``is_offline_fallback=True`` for auditability.
         """
-        return cls.calculate(outage_id, severity, mttr_minutes, policy_version, threshold_source, is_offline_fallback=True)
+        return cls.calculate(outage_id, severity, mttr_minutes, policy_version, threshold_source, is_offline_fallback=True, **kwargs)
 
     @staticmethod
-    def calculate(outage_id: str, severity: str, mttr_minutes: int, policy_version: str = "1.0", threshold_source: str = "config", is_offline_fallback: bool = False) -> SLAResult:
+    def calculate(
+        outage_id: str,
+        severity: str,
+        mttr_minutes: int,
+        policy_version: str = "1.0",
+        threshold_source: str = "config",
+        is_offline_fallback: bool = False,
+        maintenance_minutes: int = 0,
+        monthly_contract_fee: Optional[int] = None,
+        max_penalty: Optional[int] = None,
+    ) -> SLAResult:
         validate_mttr(mttr_minutes)
         severity = severity.lower()
 
@@ -214,6 +227,14 @@ class SLACalculator:
         asset_code = config.asset_code
         asset_issuer = config.asset_issuer
 
+        # Issue #551: deduct any overlapping maintenance window from MTTR so
+        # scheduled maintenance does not count against the SLA.
+        adjusted_mttr, deducted_maintenance = deduct_maintenance_window(
+            mttr_minutes, maintenance_minutes
+        )
+        # Issue #550: pin the exact config used to the result for auditability.
+        config_version_hash = compute_config_version_hash(config)
+
         # Case 1: SLA violated → penalty
         # Deterministic boundary handling: use >= for violation check to handle exact threshold edges
         if adjusted_mttr > threshold:
@@ -230,7 +251,7 @@ class SLACalculator:
                 penalty = cap
                 penalty_capped = True
 
-            decision_trace = f"MTTR {mttr_minutes} > threshold {threshold} (overtime {overtime} minutes)"
+            decision_trace = f"MTTR {adjusted_mttr} > threshold {threshold} (overtime {overtime} minutes)"
             if penalty_capped:
                 decision_trace += f" | penalty capped at {cap} (100% of monthly contract fee)"
 
@@ -246,7 +267,8 @@ class SLACalculator:
                 threshold_source=threshold_source,
                 is_offline_fallback=is_offline_fallback,
                 reason_code="mttr_exceeded",
-                decision_trace=f"MTTR {adjusted_mttr} > threshold {threshold} (overtime {overtime} minutes)",
+                decision_trace=decision_trace,
+                penalty_capped=penalty_capped,
                 asset_code=asset_code,
                 asset_issuer=asset_issuer,
                 deducted_maintenance_minutes=deducted_maintenance,

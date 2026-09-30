@@ -13,7 +13,7 @@ class StructuredLogger:
     def __init__(self, name: str):
         self.logger = logging.getLogger(name)
     
-    def _format_message(self, level: str, message: str, **kwargs) -> str:
+    def _format_message(self, level: str, message: str, *args, **kwargs) -> str:
         """Format a log message with structured context."""
         log_entry = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -32,32 +32,40 @@ class StructuredLogger:
             if key not in log_entry:
                 log_entry[key] = value
         
+        # If positional args were provided, format the message (like standard logging)
+        if args:
+            try:
+                message = message % args
+            except Exception:
+                # If formatting fails, keep the message as-is and add args to context
+                log_entry["format_args"] = args
+        
         return json.dumps(log_entry)
     
-    def debug(self, message: str, **kwargs):
+    def debug(self, message: str, *args, **kwargs):
         """Log a debug message."""
-        self.logger.debug(self._format_message("DEBUG", message, **kwargs))
+        self.logger.debug(self._format_message("DEBUG", message, *args, **kwargs))
     
-    def info(self, message: str, **kwargs):
+    def info(self, message: str, *args, **kwargs):
         """Log an info message."""
-        self.logger.info(self._format_message("INFO", message, **kwargs))
+        self.logger.info(self._format_message("INFO", message, *args, **kwargs))
     
-    def warning(self, message: str, **kwargs):
+    def warning(self, message: str, *args, **kwargs):
         """Log a warning message."""
-        self.logger.warning(self._format_message("WARNING", message, **kwargs))
+        self.logger.warning(self._format_message("WARNING", message, *args, **kwargs))
     
-    def error(self, message: str, **kwargs):
+    def error(self, message: str, *args, **kwargs):
         """Log an error message."""
-        self.logger.error(self._format_message("ERROR", message, **kwargs))
+        self.logger.error(self._format_message("ERROR", message, *args, **kwargs))
     
-    def critical(self, message: str, **kwargs):
+    def critical(self, message: str, *args, **kwargs):
         """Log a critical message."""
-        self.logger.critical(self._format_message("CRITICAL", message, **kwargs))
+        self.logger.critical(self._format_message("CRITICAL", message, *args, **kwargs))
     
-    def exception(self, message: str, **kwargs):
+    def exception(self, message: str, *args, **kwargs):
         """Log an exception with traceback."""
         kwargs["exception"] = True
-        self.logger.error(self._format_message("ERROR", message, **kwargs), exc_info=True)
+        self.logger.error(self._format_message("ERROR", message, *args, **kwargs), exc_info=True)
 
 
 def get_structured_logger(name: str) -> StructuredLogger:

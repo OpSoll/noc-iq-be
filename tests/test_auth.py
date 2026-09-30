@@ -36,7 +36,8 @@ def expired_token():
     return encoded_jwt
 
 
-@pytest.mark.asyncio def test_jwt_bearer_valid_token(valid_token):
+@pytest.mark.asyncio
+async def test_jwt_bearer_valid_token(valid_token):
     async with AsyncClient(app=app, base_url="http://test") as client:
         response = await client.get("/protected", headers={"Authorization": f"Bearer {valid_token}"})
         assert response.status_code == HTTP_200_OK
