@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     # When True the worker fails fast if a required queue is not bound.
     CELERY_STRICT_QUEUE_BINDINGS: bool = True
 
+    # ── Per-task-type worker pools (issue #544) ───────────────────────────
+    # I/O-bound (webhook) tasks run on the eventlet pool with high
+    # concurrency; CPU-bound (SLA/contract) tasks run on prefork with a low
+    # concurrency so DB/CPU pressure stays predictable.
+    CELERY_WEBHOOK_POOL: str = "eventlet"
+    CELERY_CALC_POOL: str = "prefork"
+    CELERY_IO_CONCURRENCY: int = 50
+    CELERY_CPU_CONCURRENCY: int = 4
+
     # ── DB transaction isolation (issue #526) ─────────────────────────────
     # Applied to the engine for all transactions (PostgreSQL only).
     DB_TRANSACTION_ISOLATION_LEVEL: str = "READ COMMITTED"
