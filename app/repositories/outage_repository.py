@@ -117,6 +117,45 @@ class OutageRepository:
             "sort_direction": sort_direction.value,
         }
 
+    def count_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> int:
+        """Return how many outages match, without fetching any rows (#964).
+
+        The filters are applied by the same predicate chain as :meth:`list`, so a
+        count can never disagree with the ``total`` that listing reports. Keeping
+        the two adjacent is deliberate: the obvious way for them to drift is for
+        someone to change one filter and not the other.
+        """
+        query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
+
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == status.value)
+
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        return query.count()
+
     def list_all(self) -> List[Outage]:
         rows = self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False)).all()
         return [_orm_to_pydantic(r) for r in rows]

@@ -94,6 +94,44 @@ class ValidTransitionsResponse(BaseModel):
     valid_next_states: List[str] = Field(..., description="Sorted list of permitted next statuses")
 
 
+class OutageCountResponse(BaseModel):
+    """Count-only projection for the lightweight count endpoint (#964)."""
+
+    count: int = Field(..., ge=0, description="Number of outages matching the supplied filters.")
+
+
+@router.get("/count", response_model=OutageCountResponse)
+def count_outages_endpoint(
+    severity: Severity | None = None,
+    status: OutageStatus | None = None,
+    search: str | None = None,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Return only how many outages match, without transferring any rows (#964).
+
+    Clients previously fetched a full page purely to learn the total. The filters
+    are the same ones ``GET /api/v1/outages`` accepts and are applied by the same
+    repository code path, so the two can never disagree — the alternative,
+    calling ``list(limit=1)`` and reading ``total``, would deserialise a row and
+    build a response model to produce one integer, which is the cost this endpoint
+    exists to remove.
+
+    Declared before ``/`` in the file, but ordering does not matter here:
+    FastAPI matches ``/count`` as a literal path, not as a value of ``/{outage_id}``.
+    """
+    total = OutageRepository(db).count_filtered(
+        severity=severity,
+        status=status,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return OutageCountResponse(count=total)
+
+
 @router.get("/export", response_model=None)
 def export_outages_endpoint(
     format: str = "json",
