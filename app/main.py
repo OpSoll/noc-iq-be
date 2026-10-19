@@ -259,11 +259,11 @@ app.add_middleware(DeprecationHeaderMiddleware)
 
 
 # Health checks
-@app.get("/health/liveness")
+@app.get("/health/liveness", tags=["health"])
 def liveness():
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
 
-@app.get("/health/readiness")
+@app.get("/health/readiness", tags=["health"])
 async def readiness():
     db_ok = await check_database()
     celery_ok = await check_celery()
@@ -285,7 +285,7 @@ async def readiness():
     return JSONResponse(status_code=200 if overall_ok else 503, content=payload)
 
 
-@app.get("/health/worker")
+@app.get("/health/worker", tags=["health"])
 async def worker_health():
     """Celery worker queue-bindings health probe.
 
@@ -306,7 +306,7 @@ async def worker_health():
     )
 
 
-@app.get("/health/concurrency")
+@app.get("/health/concurrency", tags=["health"])
 async def concurrency_health():
     """Per-environment concurrency profile + live DB/broker saturation.
 
@@ -335,7 +335,7 @@ async def concurrency_health():
         },
     )
 
-@app.get("/health")
+@app.get("/health", tags=["health"])
 def health_check():
     return {"status": "ok"}
 
