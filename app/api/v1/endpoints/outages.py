@@ -39,7 +39,11 @@ from app.core.outage_state_machine import InvalidStateTransition, OutageStateMac
 from app.services.audit_log import audit_log
 from app.services.contracts import SLAContractAdapter, translate_contract_result
 from app.services.webhook_service import trigger_sla_violation_webhooks
-from app.utils.exporter import export_outages, stream_outages_csv
+from app.utils.exporter import (
+    export_outages,
+    resolve_export_columns,
+    stream_outages_csv,
+)
 from app.api.v1.endpoints.sla import _invalidate_analytics_cache
 from app.core.security import require_engineer, require_admin
 from app.core.config import settings
@@ -140,10 +144,28 @@ def export_outages_endpoint(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    columns: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated export columns (issue #963). Omit to export every "
+            "column, which is the default. Order is preserved. Unknown or empty "
+            "selections are rejected with 400."
+        ),
+    ),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     repo = OutageRepository(db)
+
+    # Validate before branching. The CSV branch returns a streaming response, so a
+    # bad column discovered mid-stream would surface as a truncated download
+    # rather than a 400.
+    try:
+        selected = resolve_export_columns(
+            [part for part in columns.split(",")] if columns is not None else None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Issue #507: CSV exports stream database rows in chunks of 500 instead
     # of loading the full dataset into memory before sending the payload.
@@ -156,7 +178,7 @@ def export_outages_endpoint(
             end_date=end_date,
         )
         return StreamingResponse(
-            stream_outages_csv(batches),
+            stream_outages_csv(batches, columns=selected),
             media_type="text/csv",
             headers={"Content-Disposition": "attachment; filename=outages.csv"},
         )
@@ -169,7 +191,7 @@ def export_outages_endpoint(
         end_date=end_date,
     )
     try:
-        exported = export_outages(data, format)
+        exported = export_outages(data, format, columns=selected)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return exported
