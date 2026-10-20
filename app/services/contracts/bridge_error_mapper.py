@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
+from fastapi import HTTPException, status
+
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -108,4 +110,49 @@ def map_bridge_error(raw_error: Any) -> BridgeError:
         message=str(raw_error),
         retryable=False,
         upstream_error=raw_error,
+    )
+
+
+# HTTP translation for bridge errors surfaced through the API. Retryable codes
+# map to 503/504 and carry a Retry-After hint; terminal codes never do.
+BRIDGE_ERROR_HTTP_STATUS: dict[BridgeErrorCode, int] = {
+    BridgeErrorCode.TIMEOUT: status.HTTP_504_GATEWAY_TIMEOUT,
+    BridgeErrorCode.NETWORK_ERROR: status.HTTP_503_SERVICE_UNAVAILABLE,
+    BridgeErrorCode.REJECTED: status.HTTP_422_UNPROCESSABLE_ENTITY,
+    BridgeErrorCode.INSUFFICIENT_FUNDS: status.HTTP_402_PAYMENT_REQUIRED,
+    BridgeErrorCode.CONTRACT_ERROR: status.HTTP_502_BAD_GATEWAY,
+    BridgeErrorCode.UNKNOWN: status.HTTP_500_INTERNAL_SERVER_ERROR,
+}
+
+BRIDGE_RETRY_AFTER_SECONDS = 5
+UNKNOWN_BRIDGE_ERROR_MESSAGE = "Contract bridge returned an unrecognised error."
+
+
+def http_status_for_bridge_code(code: Any) -> int:
+    """Resolve the HTTP status for a bridge error code, falling back to 500."""
+    try:
+        return BRIDGE_ERROR_HTTP_STATUS[BridgeErrorCode(code)]
+    except (ValueError, KeyError):
+        return BRIDGE_ERROR_HTTP_STATUS[BridgeErrorCode.UNKNOWN]
+
+
+def bridge_error_to_http(error: BridgeError) -> HTTPException:
+    """Translate a BridgeError into an HTTPException without leaking upstream details."""
+    try:
+        code = BridgeErrorCode(error.code)
+    except ValueError:
+        code = BridgeErrorCode.UNKNOWN
+    # Unclassified errors are never advertised as retryable and their raw text
+    # is replaced, since it may carry upstream internals.
+    is_unknown = code is BridgeErrorCode.UNKNOWN
+    retryable = bool(error.retryable) and not is_unknown
+    headers = {"Retry-After": str(BRIDGE_RETRY_AFTER_SECONDS)} if retryable else None
+    return HTTPException(
+        status_code=http_status_for_bridge_code(code),
+        detail={
+            "error_code": code.value,
+            "message": UNKNOWN_BRIDGE_ERROR_MESSAGE if is_unknown else error.message,
+            "retryable": retryable,
+        },
+        headers=headers,
     )
