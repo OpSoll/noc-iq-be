@@ -110,10 +110,19 @@ class TestCheckEventCoverage(unittest.TestCase):
         self.assertEqual(by_class["auth."].severity, "ok")
 
         # Missing classes
-        for prefix in ["job_", "sla.", "webhook.", "payment."]:
+        missing_prefixes = [
+            "job_",
+            "sla.",
+            "webhook.",
+            "payment.",
+            "redaction.",
+            "webhook.partition.",
+            "webhook.slo.",
+        ]
+        for prefix in missing_prefixes:
             self.assertEqual(by_class[prefix].severity, "critical", msg=prefix)
 
-        self.assertEqual(report.missing_classes, 4)
+        self.assertEqual(report.missing_classes, len(missing_prefixes))
         self.assertEqual(report.covered_classes, 2)
 
     def test_underrepresented_class(self):
@@ -132,6 +141,11 @@ class TestCheckEventCoverage(unittest.TestCase):
             *[f"webhook.delivered" for _ in range(10)],
             # payment: 10 events — ok
             *[f"payment.sent" for _ in range(10)],
+            # redaction: 10 events — ok
+            *["redaction.config.changed" for _ in range(10)],
+            # nested webhook classes: 10 events each — ok
+            *["webhook.partition.scaled" for _ in range(10)],
+            *["webhook.slo.budget_alert" for _ in range(10)],
         ]
         service = _make_service_with_events(events)
         report = service.check_event_coverage(window_hours=24, underrepresented_threshold=5)
@@ -143,6 +157,36 @@ class TestCheckEventCoverage(unittest.TestCase):
 
         self.assertEqual(report.underrepresented_classes, 1)
         self.assertEqual(report.missing_classes, 0)
+
+    def test_present_missing_and_underrepresented_event_classes(self):
+        """Classify observed, missing, and low-volume events independently."""
+        events = (
+            ["wallet.created"] * 5
+            + ["auth.login_success"] * 2
+            + ["webhook.delivered"] * 5
+            + ["webhook.partition.scaled"] * 5
+            + ["webhook.slo.budget_alert"]
+        )
+        service = _make_service_with_events(events)
+
+        report = service.check_event_coverage(
+            window_hours=24,
+            underrepresented_threshold=5,
+        )
+
+        by_class = self._coverage_by_class(report)
+        self.assertEqual(by_class["wallet."].severity, "ok")
+        self.assertEqual(by_class["auth."].severity, "warning")
+        self.assertEqual(by_class["webhook."].event_count, 5)
+        self.assertEqual(by_class["webhook.partition."].event_count, 5)
+        self.assertEqual(by_class["webhook.slo."].severity, "warning")
+        self.assertEqual(by_class["payment."].severity, "critical")
+        self.assertEqual(report.covered_classes, 5)
+        self.assertEqual(report.underrepresented_classes, 2)
+        self.assertEqual(
+            report.missing_classes,
+            len(EXPECTED_EVENT_CLASSES) - report.covered_classes,
+        )
 
     def test_report_includes_impacted_metrics_and_ingestion_stage(self):
         """Coverage entries include impacted_metrics and ingestion_stage from taxonomy."""

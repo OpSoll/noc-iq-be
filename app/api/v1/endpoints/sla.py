@@ -595,7 +595,7 @@ async def get_sla_summary(
         )
 
 
- class SLAPerformanceResponse(BaseModel):
+class SLAPerformanceResponse(BaseModel):
     total_incidents: int = Field(..., description="Total number of resolved incidents")
     average_mttr_minutes: float = Field(..., description="Average Mean Time To Resolution in minutes")
     p50_mttr_minutes: Optional[float] = Field(None, description="50th percentile (median) MTTR in minutes")
@@ -642,4 +642,4 @@ def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerfo
         average_mttr_minutes=round(avg_mttr, 2),
         p50_mttr_minutes=round(p50, 2) if p50 is not None else None,
         p95_mttr_minutes=round(p95, 2) if p95 is not None else None
-    )       
+    )

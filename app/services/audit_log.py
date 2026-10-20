@@ -443,8 +443,12 @@ class AuditLogService:
 
         # Count events per expected class prefix
         counts: dict[str, int] = {prefix: 0 for prefix in EXPECTED_EVENT_CLASSES}
+        # Match nested classes before broader prefixes such as ``webhook.``.
+        event_class_prefixes = sorted(
+            EXPECTED_EVENT_CLASSES, key=len, reverse=True
+        )
         for (event_type,) in rows:
-            for prefix in EXPECTED_EVENT_CLASSES:
+            for prefix in event_class_prefixes:
                 if event_type.startswith(prefix):
                     counts[prefix] += 1
                     break
