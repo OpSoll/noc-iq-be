@@ -242,3 +242,57 @@ def admin_logout_all_sessions(
 @router.get("/ping", response_model=PingResponse)
 def auth_ping():
     return {"message": "auth ok"}
+MAX_SESSION_LIMIT = 100
+DEFAULT_SESSION_LIMIT = 20
+
+class SessionItem(BaseModel):
+    id: str = Field(..., description="Unique session identifier")
+    device_info: str = Field(..., description="Client browser or device metadata")
+    ip_address: str = Field(..., description="Client IP address")
+    created_at: str = Field(..., description="Session creation timestamp")
+    last_active: str = Field(..., description="Last activity timestamp")
+
+class PaginatedSessionsResponse(BaseModel):
+    data: List[SessionItem] = Field(..., description="List of user sessions for the current page")
+    total: int = Field(..., description="Total number of active sessions for the user")
+    page: int = Field(..., description="Current page number")
+    limit: int = Field(..., description="Number of sessions per page")
+
+def get_user_sessions(
+    user_id: str, 
+    page: int = 1, 
+    limit: int = DEFAULT_SESSION_LIMIT
+) -> PaginatedSessionsResponse:
+    """
+    Retrieves paginated active sessions for a user with a strict safety cap. (#931)
+    """
+    # Enforce safe bounds and upper limit cap
+    safe_limit = min(max(1, limit), MAX_SESSION_LIMIT)
+    safe_page = max(1, page)
+    offset = (safe_page - 1) * safe_limit
+
+    # Simulated database query (replace with actual ORM session query & count)
+    # total_count = db.query(Session).filter(Session.user_id == user_id).count()
+    # sessions = db.query(Session).filter(Session.user_id == user_id).offset(offset).limit(safe_limit).all()
+
+    # Mocked demonstration data layer
+    mock_all_sessions = [
+        SessionItem(
+            id=f"sess-{i}",
+            device_info="Chrome on MacOS",
+            ip_address="192.168.1.10",
+            created_at="2026-10-01T00:00:00Z",
+            last_active="2026-10-20T12:00:00Z"
+        )
+        for i in range(1, 45) # 45 mock sessions
+    ]
+
+    total_count = len(mock_all_sessions)
+    paginated_data = mock_all_sessions[offset : offset + safe_limit]
+
+    return PaginatedSessionsResponse(
+        data=paginated_data,
+        total=total_count,
+        page=safe_page,
+        limit=safe_limit
+    )
