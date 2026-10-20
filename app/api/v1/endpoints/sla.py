@@ -593,3 +593,53 @@ async def get_sla_summary(
                 "retryable": True
             }
         )
+
+
+ class SLAPerformanceResponse(BaseModel):
+    total_incidents: int = Field(..., description="Total number of resolved incidents")
+    average_mttr_minutes: float = Field(..., description="Average Mean Time To Resolution in minutes")
+    p50_mttr_minutes: Optional[float] = Field(None, description="50th percentile (median) MTTR in minutes")
+    p95_mttr_minutes: Optional[float] = Field(None, description="95th percentile MTTR in minutes")
+
+def compute_percentile(sorted_values: List[float], percentile: float) -> Optional[float]:
+    """Computes the given percentile from a sorted list of floats using linear interpolation."""
+    if not sorted_values:
+        return None
+    
+    k = (len(sorted_values) - 1) * percentile
+    f = math.floor(k)
+    c = math.ceil(k)
+    
+    if f == c:
+        return sorted_values[int(k)]
+    
+    d0 = sorted_values[int(f)] * (c - k)
+    d1 = sorted_values[int(c)] * (k - f)
+    return d0 + d1
+
+def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerformanceResponse:
+    """
+    Computes SLA performance metrics including total incidents, average MTTR,
+    and p50/p95 percentiles with null safety on empty datasets. (#922)
+    """
+    if not resolution_times_minutes:
+        return SLAPerformanceResponse(
+            total_incidents=0,
+            average_mttr_minutes=0.0,
+            p50_mttr_minutes=None,
+            p95_mttr_minutes=None
+        )
+
+    sorted_times = sorted(resolution_times_minutes)
+    total = len(sorted_times)
+    avg_mttr = sum(sorted_times) / total
+
+    p50 = compute_percentile(sorted_times, 0.50)
+    p95 = compute_percentile(sorted_times, 0.95)
+
+    return SLAPerformanceResponse(
+        total_incidents=total,
+        average_mttr_minutes=round(avg_mttr, 2),
+        p50_mttr_minutes=round(p50, 2) if p50 is not None else None,
+        p95_mttr_minutes=round(p95, 2) if p95 is not None else None
+    )       
