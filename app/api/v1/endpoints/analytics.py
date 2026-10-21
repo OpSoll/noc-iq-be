@@ -54,3 +54,63 @@ def sla_trends(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+        class SeverityViolationStats(BaseModel):
+    severity: str = Field(..., description="Severity tier (e.g., P1, P2, P3, P4)")
+    total_incidents: int = Field(..., description="Total incidents in this severity tier")
+    violation_count: int = Field(..., description="Number of SLA violations in this severity tier")
+    violation_rate: float = Field(..., description="Percentage of SLA violations for this tier")
+
+class SLAViolationAnalyticsResponse(BaseModel):
+    total_incidents: int = Field(..., description="Total incidents across all tiers")
+    total_violations: int = Field(..., description="Total SLA violations across all tiers")
+    overall_violation_rate: float = Field(..., description="Overall SLA violation rate percentage")
+    by_severity: Optional[List[SeverityViolationStats]] = Field(None, description="Violation rates grouped by severity tier")
+
+def calculate_sla_violation_rate(
+    incidents: List[Dict[str, any]], 
+    group_by_severity: bool = False
+) -> SLAViolationAnalyticsResponse:
+    """
+    Calculates SLA violation rates with optional severity grouping.
+    Omits empty severity tiers and preserves accurate overall totals. (#923)
+    """
+    total_incidents = len(incidents)
+    total_violations = sum(1 for inc in incidents if inc.get("violation", False))
+    overall_rate = (total_violations / total_incidents * 100.0) if total_incidents > 0 else 0.0
+
+    by_severity_result: Optional[List[SeverityViolationStats]] = None
+
+    if group_by_severity:
+        severity_map: Dict[str, Dict[str, int]] = {}
+        
+        for inc in incidents:
+            sev = inc.get("severity", "UNKNOWN")
+            if sev not in severity_map:
+                severity_map[sev] = {"total": 0, "violations": 0}
+            
+            severity_map[sev]["total"] += 1
+            if inc.get("violation", False):
+                severity_map[sev]["violations"] += 1
+
+        by_severity_list = []
+        for sev, stats in severity_map.items():
+            if stats["total"] > 0:
+                rate = (stats["violations"] / stats["total"]) * 100.0
+                by_severity_list.append(
+                    SeverityViolationStats(
+                        severity=sev,
+                        total_incidents=stats["total"],
+                        violation_count=stats["violations"],
+                        violation_rate=round(rate, 2)
+                    )
+                )
+        
+        if by_severity_list:
+            by_severity_result = by_severity_list
+
+    return SLAViolationAnalyticsResponse(
+        total_incidents=total_incidents,
+        total_violations=total_violations,
+        overall_violation_rate=round(overall_rate, 2),
+        by_severity=by_severity_result
+    )
