@@ -114,3 +114,17 @@ def calculate_sla_violation_rate(
         overall_violation_rate=round(overall_rate, 2),
         by_severity=by_severity_result
     )
+    def get_bucket_key(timestamp: datetime, interval: str) -> str:
+    """
+    Returns the time bucket key ('daily', 'weekly', 'monthly') for a given timestamp. (#924)
+    """
+    if interval == 'daily':
+        return timestamp.strftime('%Y-%m-%d')
+    elif interval == 'weekly':
+        # ISO week start (Monday)
+        start_of_week = timestamp - timedelta(days=timestamp.weekday())
+        return start_of_week.strftime('%Y-%m-%d')
+    elif interval == 'monthly':
+        return timestamp.strftime('%Y-%m')
+    else:
+        raise ValueError(f"Unsupported interval: {interval}")
