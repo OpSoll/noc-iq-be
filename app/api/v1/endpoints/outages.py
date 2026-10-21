@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api.pagination import limit as limit_query, offset as offset_query, page_number, page_size as page_size_query
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import (
@@ -210,17 +211,8 @@ def list_outages(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=100,
-        description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500).",
-    ),
-    offset: int = Query(
-        default=0,
-        ge=0,
-        description="Number of records to skip for pagination.",
-    ),
+    limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500)."),
+    offset: int = offset_query(description="Number of records to skip for pagination."),
     include_deleted: bool = Query(False, description="Include soft-deleted outages"),
     sort_by: OutageSortField = Query(
         default=OutageSortField.detected_at,
@@ -272,13 +264,8 @@ def list_outages(
 
 @router.get("/deleted", response_model=PaginatedOutages)
 def list_deleted_outages(
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=100,
-        description="Maximum number of records to return (1-100).",
-    ),
-    offset: int = Query(default=0, ge=0, description="Number of records to skip for pagination."),
+    limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100)."),
+    offset: int = offset_query(description="Number of records to skip for pagination."),
 ):
     items = outage_store.list_deleted()
     total = len(items)
@@ -767,8 +754,8 @@ def get_outage_timeline(
     event_type: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page: int = page_number(),
+    page_size: int = page_size_query(),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):

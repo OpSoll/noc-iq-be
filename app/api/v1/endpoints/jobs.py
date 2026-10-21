@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from fastapi import Request
 
 from app.db.session import get_db
+from app.api.pagination import limit as limit_query
 from app.models.job import (
     Job,
     JobErrorDetail,
@@ -19,6 +20,7 @@ from app.models.job import (
     JobType,
     RetryClass,
 )
+from app.models.enum_serialization import enum_value
 from app.services.audit_log import audit_log
 from app.services.job_cleanup import (
     JobCleanupService,
@@ -287,7 +289,7 @@ def _serialize_envelope(job: Job) -> JobEnvelopeResponse:
         job_id=str(job.id),
         celery_task_id=job.celery_task_id,
         job_type=job.job_type.value,
-        status=job.status.value,
+        status=enum_value(job.status),
         progress=job.progress or 0.0,
         result=json.loads(job.result) if job.result else None,
         error=_build_error_detail(job),
@@ -443,7 +445,7 @@ def submit_bulk_sla_computation(
 def list_jobs(
     job_type: Optional[JobType] = Query(None),
     status_filter: Optional[JobStatus] = Query(None, alias="status"),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = limit_query(),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
@@ -535,7 +537,7 @@ def cancel_job(
             "job_id": str(job.id),
             "celery_task_id": job.celery_task_id,
             "job_type": job.job_type.value,
-            "previous_status": job.status.value,
+            "previous_status": enum_value(job.status),
             "payload": job.payload,
         },
     )
@@ -588,7 +590,7 @@ def retry_job(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Cannot retry job with status '{job.status.value}'. "
+                f"Cannot retry job with status '{enum_value(job.status)}'. "
                 f"Only FAILED, REVOKED, or DEAD_LETTER jobs can be retried."
             ),
         )
@@ -635,7 +637,7 @@ def retry_job(
             "job_id": str(job.id),
             "original_celery_task_id": job.celery_task_id,
             "job_type": job.job_type.value,
-            "previous_status": job.status.value,
+            "previous_status": enum_value(job.status),
             "retry_count": job.retry_count + 1,
             "max_retries": job.max_retries,
             "retry_class": job.retry_class,
@@ -773,7 +775,7 @@ def list_retry_policies(
 # BE-W5-048: Dead-letter listing
 @router.get("/dead-letter", response_model=List[DeadLetterSummary])
 def list_dead_letter_jobs(
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = limit_query(),
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -819,7 +821,7 @@ def record_job_heartbeat(
     if job.status not in (JobStatus.STARTED, JobStatus.PENDING):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot heartbeat a job with status '{job.status.value}'.",
+            detail=f"Cannot heartbeat a job with status '{enum_value(job.status)}'.",
         )
 
     updated = heartbeat_job(
@@ -994,7 +996,7 @@ class JobReleaseResponse(BaseModel):
 
 @router.get("/quarantined", response_model=List[QuarantinedJobSummary])
 def list_quarantined_jobs(
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = limit_query(),
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -1039,7 +1041,7 @@ def release_job_from_quarantine(
     if job.status != JobStatus.QUARANTINED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Job is not quarantined (current status: {job.status.value}).",
+            detail=f"Job is not quarantined (current status: {enum_value(job.status)}).",
         )
 
     audit_log.log_event(
