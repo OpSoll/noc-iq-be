@@ -643,3 +643,34 @@ def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerfo
         p50_mttr_minutes=round(p50, 2) if p50 is not None else None,
         p95_mttr_minutes=round(p95, 2) if p95 is not None else None
     )       
+    class SLAPerformanceResponse(BaseModel):
+    total_incidents: int = Field(0, description="Total number of resolved incidents", example=0)
+    average_mttr_minutes: float = Field(0.0, description="Average Mean Time To Resolution in minutes", example=0.0)
+    p50_mttr_minutes: Optional[float] = Field(None, description="50th percentile (median) MTTR in minutes", example=None)
+    p95_mttr_minutes: Optional[float] = Field(None, description="95th percentile MTTR in minutes", example=None)
+    is_empty: bool = Field(True, description="Indicates whether the response window contains no recorded data (distinct from errors)", example=True)
+
+def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerformanceResponse:
+    """
+    Computes SLA performance metrics with explicit empty-state semantics (#925).
+    Returns a stable payload with `is_empty = True` for empty data windows.
+    """
+    if not resolution_times_minutes:
+        return SLAPerformanceResponse(
+            total_incidents=0,
+            average_mttr_minutes=0.0,
+            p50_mttr_minutes=None,
+            p95_mttr_minutes=None,
+            is_empty=True
+        )
+
+    total = len(resolution_times_minutes)
+    avg_mttr = sum(resolution_times_minutes) / total
+
+    return SLAPerformanceResponse(
+        total_incidents=total,
+        average_mttr_minutes=round(avg_mttr, 2),
+        p50_mttr_minutes=round(sorted(resolution_times_minutes)[int((total - 1) * 0.5)], 2),
+        p95_mttr_minutes=round(sorted(resolution_times_minutes)[int((total - 1) * 0.95)], 2),
+        is_empty=False
+    )
