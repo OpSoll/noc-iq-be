@@ -10,6 +10,7 @@ from sqlalchemy import JSON, String, cast, func, or_
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api.pagination import limit as limit_query, offset as offset_query, page_number, page_size as page_size_query
 from app.models.webhook import Webhook, WebhookDelivery, WebhookDeliveryStatus, WebhookEvent
 from app.services.webhook_service import (
     WEBHOOK_SCHEMA_VERSION,
@@ -331,8 +332,8 @@ def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), 
 def list_webhooks(
     is_active: Optional[bool] = Query(None),
     name: Optional[str] = Query(None, description="Filter by name (case-insensitive substring match)"),  # BE-083
-    page: int = Query(1, ge=1, description="Page number (1-indexed)"),  # BE-083
-    page_size: int = Query(20, ge=1, le=100, description="Items per page"),  # BE-083
+    page: int = page_number(description="Page number (1-indexed)"),  # BE-083
+    page_size: int = page_size_query(description="Items per page"),  # BE-083
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -398,8 +399,8 @@ def list_webhook_deliveries(
     created_before: Optional[datetime] = Query(None, description="Return deliveries created before this timestamp."),
     delivered_after: Optional[datetime] = Query(None, description="Return deliveries delivered after this timestamp."),
     delivered_before: Optional[datetime] = Query(None, description="Return deliveries delivered before this timestamp."),
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0, description="Number of records to skip"),  # BE-083
+    limit: int = limit_query(),
+    offset: int = offset_query(description="Number of records to skip"),  # BE-083
     db: Session = Depends(get_db),
 ):
     _get_webhook_or_404(db, webhook_id)
@@ -536,7 +537,7 @@ def retry_delivery(webhook_id: UUID, delivery_id: UUID, db: Session = Depends(ge
 @router.get("/{webhook_id}/dead-letter-deliveries", response_model=List[WebhookDeliveryResponse])
 def list_dead_letter_deliveries(
     webhook_id: UUID,
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = limit_query(),
     db: Session = Depends(get_db),
 ):
     """List dead-lettered deliveries for a webhook."""
@@ -760,8 +761,8 @@ class WebhookDeadLetterListResponse(BaseModel):
 
 @router.get("/dead-letter-queue", response_model=WebhookDeadLetterListResponse)
 def list_webhook_dead_letter_queue(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
+    limit: int = limit_query(),
+    offset: int = offset_query(),
     current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):

@@ -178,6 +178,7 @@ async def lifespan(app: FastAPI):
 from app.api.v1.router import api_router
 from app.core.lifespan import app_lifespan
 from app.core.rate_limiter import RateLimiterMiddleware
+from app.api.validation import format_validation_errors
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -205,20 +206,9 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 
     Schema: ``{"code": "VALIDATION_ERROR", "message": "...", "details": [...]}``.
     """
-    details = []
-    for error in exc.errors():
-        details.append({
-            "loc": list(error.get("loc", [])),
-            "msg": error.get("msg", ""),
-            "type": error.get("type", ""),
-        })
     return JSONResponse(
         status_code=422,
-        content={
-            "code": "VALIDATION_ERROR",
-            "message": "Request validation failed",
-            "details": details,
-        },
+        content=format_validation_errors(exc.errors()),
     )
 
 app.add_middleware(LatencyLoggingMiddleware)

@@ -9,6 +9,7 @@ from app.core.outage_state_machine import (
     OutageStateMachine,
 )
 from app.models.enums import OutageStatus, Severity
+from app.models.enum_serialization import enum_value
 from app.models.orm.outage import OutageORM
 from app.models.outage import Outage, Location, SLAStatus
 from app.models.outage_dto import OutageCreate, OutageSortDirection, OutageSortField, OutageUpdate
@@ -86,7 +87,7 @@ class OutageRepository:
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
-            query = query.filter(OutageORM.status == status.value)
+            query = query.filter(OutageORM.status == enum_value(status))
 
         if search:
             search_filter = or_(
@@ -138,7 +139,7 @@ class OutageRepository:
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
-            query = query.filter(OutageORM.status == status.value)
+            query = query.filter(OutageORM.status == enum_value(status))
 
         if search:
             query = query.filter(
@@ -173,7 +174,7 @@ class OutageRepository:
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
-            query = query.filter(OutageORM.status == status.value)
+            query = query.filter(OutageORM.status == enum_value(status))
         if search:
             query = query.filter(
                 or_(
@@ -206,7 +207,7 @@ class OutageRepository:
         if severity:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
-            query = query.filter(OutageORM.status == status.value)
+            query = query.filter(OutageORM.status == enum_value(status))
         if search:
             query = query.filter(
                 or_(
@@ -354,7 +355,7 @@ class OutageRepository:
             site_name=payload.site_name,
             site_id=payload.site_id,
             severity=payload.severity.value,
-            status=payload.status.value,
+            status=enum_value(payload.status),
             detected_at=payload.detected_at,
             description=payload.description,
             affected_services=payload.affected_services,
@@ -384,7 +385,7 @@ class OutageRepository:
         update_data = payload.model_dump(exclude_unset=True)
         if "status" in update_data and update_data["status"] is not None:
             next_status = update_data["status"]
-            next_status_value = next_status.value if hasattr(next_status, "value") else str(next_status)
+        next_status_value = enum_value(next_status)
             self.validate_status_transition(orm.status, next_status_value)
 
         for key, value in update_data.items():

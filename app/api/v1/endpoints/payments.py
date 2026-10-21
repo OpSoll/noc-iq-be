@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.api.pagination import page_number, page_size as page_size_query
 from app.db.session import get_db
 from app.models.payment import (
     CursorPage,
@@ -101,10 +102,10 @@ class ReconciliationHistoryResponse(BaseModel):
 
 @router.get("/", response_model=PaginatedPaymentResponse)
 def list_payments(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page: int = page_number(),
+    page_size: int = page_size_query(),
     cursor: Optional[str] = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = page_size_query(default=20, maximum=100),
     status: Optional[str] = None,
     type: Optional[str] = None,
     outage_id: Optional[str] = None,
