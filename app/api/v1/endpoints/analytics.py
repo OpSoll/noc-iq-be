@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.security import require_engineer
@@ -54,7 +58,9 @@ def sla_trends(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-        class SeverityViolationStats(BaseModel):
+
+
+class SeverityViolationStats(BaseModel):
     severity: str = Field(..., description="Severity tier (e.g., P1, P2, P3, P4)")
     total_incidents: int = Field(..., description="Total incidents in this severity tier")
     violation_count: int = Field(..., description="Number of SLA violations in this severity tier")
@@ -114,7 +120,9 @@ def calculate_sla_violation_rate(
         overall_violation_rate=round(overall_rate, 2),
         by_severity=by_severity_result
     )
-    def get_bucket_key(timestamp: datetime, interval: str) -> str:
+
+
+def get_bucket_key(timestamp: datetime, interval: str) -> str:
     """
     Returns the time bucket key ('daily', 'weekly', 'monthly') for a given timestamp. (#924)
     """
