@@ -194,12 +194,14 @@ def test_empty_custom_headers_no_effect(client, db):
         WebhookEvent.SLA_VIOLATION,
     )
 
-    # Should only have system headers
+    # Should only have system headers (Content-Type, X-Webhook-Event,
+    # X-Webhook-Timestamp, X-Webhook-Version)
     assert "Content-Type" in headers
     assert "X-Webhook-Event" in headers
     assert "X-Webhook-Timestamp" in headers
-    # No custom headers
-    assert len(headers) == 3
+    assert "X-Webhook-Version" in headers
+    # No custom headers beyond system headers
+    assert len(headers) == 4
 
 
 def test_decrypt_headers_with_invalid_data():
@@ -217,3 +219,329 @@ def test_encrypt_decrypt_roundtrip():
     assert encrypted is not None
     decrypted = decrypt_headers(encrypted)
     assert decrypted == original
+
+
+# ---------------------------------------------------------------------------
+# Issue #1000: Additional tests for custom header injection
+# ---------------------------------------------------------------------------
+
+class TestSecretHeadersMaskedInLogs:
+    """Secret header values must not appear in log output."""
+
+    def test_build_headers_does_not_log_secret_values(self, client, db, caplog):
+        """Custom header values must not appear in _build_headers log output."""
+        import logging
+
+        webhook = Webhook(
+            name="log-masking-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        from app.utils.header_encryption import encrypt_headers
+        secret_value = "super-secret-api-key-do-not-log"
+        webhook.custom_headers_encrypted = encrypt_headers({
+            "X-Api-Key": secret_value,
+            "Authorization": "Bearer secret-bearer-token",
+        })
+        db.commit()
+        db.refresh(webhook)
+
+        with caplog.at_level(logging.DEBUG):
+            headers = _build_headers(
+                webhook,
+                '{"test": true}',
+                WebhookEvent.SLA_VIOLATION,
+                delivery_id="log-test-delivery",
+            )
+
+        # Headers should be present in the result
+        assert headers["X-Api-Key"] == secret_value
+        assert headers["Authorization"] == "Bearer secret-bearer-token"
+
+        # But the secret values should not appear in any log message
+        for record in caplog.records:
+            assert secret_value not in record.getMessage()
+            assert "secret-bearer-token" not in record.getMessage()
+
+    def test_encrypted_headers_not_in_plaintext_log(self, client, db, caplog):
+        """The encrypted blob itself should not be logged in plaintext."""
+        import logging
+
+        webhook = Webhook(
+            name="encrypted-log-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        from app.utils.header_encryption import encrypt_headers
+        webhook.custom_headers_encrypted = encrypt_headers({
+            "X-Secret": "my-secret-value",
+        })
+        db.commit()
+        db.refresh(webhook)
+
+        with caplog.at_level(logging.DEBUG):
+            _build_headers(
+                webhook,
+                '{"test": true}',
+                WebhookEvent.SLA_VIOLATION,
+            )
+
+        # The plaintext secret should not appear in logs
+        for record in caplog.records:
+            assert "my-secret-value" not in record.getMessage()
+
+    def test_dispatch_delivery_does_not_log_custom_header_values(self, client, db, caplog):
+        """Custom header values must not leak into dispatch_delivery logs."""
+        import logging
+        import httpx
+
+        webhook = Webhook(
+            name="dispatch-log-masking",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        from app.utils.header_encryption import encrypt_headers
+        secret_header_value = "leak-test-secret-12345"
+        webhook.custom_headers_encrypted = encrypt_headers({
+            "X-Api-Key": secret_header_value,
+        })
+        db.commit()
+        db.refresh(webhook)
+
+        delivery = WebhookDelivery(
+            webhook_id=webhook.id,
+            event=WebhookEvent.SLA_VIOLATION,
+            payload='{"test": true}',
+            status=WebhookDeliveryStatus.PENDING,
+            attempt_count=0,
+            idempotency_key=f"test-key-{uuid.uuid4()}",
+            event_timestamp=datetime.utcnow(),
+        )
+        db.add(delivery)
+        db.commit()
+        db.refresh(delivery)
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = "OK"
+        mock_response.is_success = True
+
+        with caplog.at_level(logging.DEBUG):
+            with patch("httpx.Client") as mock_client:
+                mock_client.return_value.__enter__.return_value.post.return_value = mock_response
+                from app.services.webhook_service import dispatch_delivery
+                dispatch_delivery(db, delivery.id)
+
+        # The secret value should not appear in any log record
+        for record in caplog.records:
+            assert secret_header_value not in record.getMessage()
+
+
+class TestMissingConfigHandled:
+    """Missing custom header configuration must be handled gracefully."""
+
+    def test_no_custom_headers_attribute(self, client, db):
+        """Webhook without custom_headers_encrypted attribute works fine."""
+        webhook = Webhook(
+            name="no-custom-attr-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        # Do not set custom_headers_encrypted at all
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        # _build_headers should not raise
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+        )
+        assert headers["Content-Type"] == "application/json"
+        assert headers["X-Webhook-Event"] == "sla.violation"
+
+    def test_none_custom_headers(self, client, db):
+        """custom_headers_encrypted set to None is handled gracefully."""
+        webhook = Webhook(
+            name="none-custom-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        webhook.custom_headers_encrypted = None
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+        )
+        assert "Content-Type" in headers
+        # No custom headers beyond system headers
+        assert len(headers) == 4  # Content-Type, X-Webhook-Event, X-Webhook-Timestamp, X-Webhook-Version
+
+    def test_empty_string_custom_headers(self, client, db):
+        """custom_headers_encrypted set to empty string is handled."""
+        webhook = Webhook(
+            name="empty-custom-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        webhook.custom_headers_encrypted = ""
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+        )
+        assert "Content-Type" in headers
+        assert len(headers) == 4
+
+    def test_invalid_encrypted_data_handled(self, client, db):
+        """Corrupted encrypted data returns empty dict, not an exception."""
+        webhook = Webhook(
+            name="corrupted-custom-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        webhook.custom_headers_encrypted = "not-valid-encrypted-data!!!"
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        # Should not raise — decrypt_headers returns {} for invalid data
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+        )
+        assert "Content-Type" in headers
+        assert len(headers) == 4
+
+    def test_missing_config_does_not_add_custom_headers(self, client, db):
+        """When no custom headers configured, only system headers are present."""
+        webhook = Webhook(
+            name="missing-config-webhook",
+            url="https://example.com/webhook",
+            secret="secret-key-123456789012345678901234567890",
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+            delivery_id="test-id",
+        )
+
+        # System headers should be present
+        system_headers = {
+            "Content-Type",
+            "X-Webhook-Event",
+            "X-Webhook-Timestamp",
+            "X-Webhook-Delivery-ID",
+            "X-Webhook-Signature",
+            "X-Webhook-Signature-Version",
+            "X-Webhook-Version",
+        }
+        for h in system_headers:
+            assert h in headers
+
+        # No extra custom headers
+        non_system = set(headers.keys()) - system_headers
+        assert len(non_system) == 0
+
+
+class TestConfiguredHeadersAttached:
+    """Explicit tests that configured headers are attached to outgoing requests."""
+
+    def test_multiple_custom_headers_attached(self, client, db):
+        """Multiple custom headers are all attached."""
+        webhook = Webhook(
+            name="multi-headers-webhook",
+            url="https://example.com/webhook",
+            secret=None,
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        from app.utils.header_encryption import encrypt_headers
+        webhook.custom_headers_encrypted = encrypt_headers({
+            "X-Api-Key": "key-123",
+            "X-Tenant-Id": "tenant-456",
+            "Authorization": "Bearer token-789",
+            "X-Custom-Header": "custom-value",
+        })
+        db.commit()
+        db.refresh(webhook)
+
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+            delivery_id="test-delivery",
+        )
+
+        assert headers["X-Api-Key"] == "key-123"
+        assert headers["X-Tenant-Id"] == "tenant-456"
+        assert headers["Authorization"] == "Bearer token-789"
+        assert headers["X-Custom-Header"] == "custom-value"
+
+    def test_custom_headers_with_secret_attached(self, client, db):
+        """Custom headers are attached even when webhook has a signing secret."""
+        webhook = Webhook(
+            name="secret-and-custom-webhook",
+            url="https://example.com/webhook",
+            secret="test-secret-123456789012345678901234567890",
+            events='["sla.violation"]',
+        )
+        db.add(webhook)
+        db.commit()
+        db.refresh(webhook)
+
+        from app.utils.header_encryption import encrypt_headers
+        webhook.custom_headers_encrypted = encrypt_headers({
+            "X-Api-Key": "secret-api-key",
+        })
+        db.commit()
+        db.refresh(webhook)
+
+        headers = _build_headers(
+            webhook,
+            '{"test": true}',
+            WebhookEvent.SLA_VIOLATION,
+            delivery_id="test-delivery",
+        )
+
+        # Both signature and custom header should be present
+        assert "X-Webhook-Signature" in headers
+        assert headers["X-Api-Key"] == "secret-api-key"
