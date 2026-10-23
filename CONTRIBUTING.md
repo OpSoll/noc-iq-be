@@ -590,6 +590,29 @@ AGGREGATION_LATENCY_THRESHOLD_MS=500 EXPORT_LATENCY_THRESHOLD_MS=1000 \
 
 Benchmark results are written to `tests/benchmark-results.json` and uploaded as a named artifact per commit SHA, enabling trend comparison across releases.
 
+### Pre-commit hooks
+
+Install the pre-commit hooks so formatting and lint checks run on staged files before every commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The configuration is `./.pre-commit-config.yaml` and includes:
+
+- **black** for formatting
+- **isort** for import ordering
+- **flake8** for linting
+- **mypy** for type checking
+- **check-yaml**, **end-of-file-fixer**, **trailing-whitespace** for repository hygiene
+
+Run the hooks manually on all files with:
+
+```bash
+pre-commit run --all-files
+```
+
 ### Release Drift Check
 
 `scripts/check_release_drift.py` cross-checks three sources for synchronisation:
