@@ -1,0 +1,1 @@
+def calculate_penalty_credits():\n    pass\n

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pytest
 from sqlalchemy.orm import Session
 from app.services.auth_store import AuthStore
@@ -5,8 +7,10 @@ from app.models.enums import Role
 from app.models.orm.audit_log import AuditLogORM
 from tests.factories import make_login_request, make_register_request
 
+import uuid
+
 def test_registration_audit(db: Session):
-    email = "audit_test@example.com"
+    email = f"audit_{uuid.uuid4().hex[:6]}@example.com"
     payload = make_register_request(
         email=email,
         full_name="Audit Test",
@@ -22,11 +26,12 @@ def test_registration_audit(db: Session):
     assert "password" not in log.details or log.details["password"] == "[REDACTED]"
 
 def test_login_audit(db: Session):
-    email = "login_audit@example.com"
+    email = f"login_{uuid.uuid4().hex[:6]}@example.com"
     password = "Password123!"
     # Register first
     AuthStore.register(make_register_request(
         email=email,
+        password=password,
         full_name="Login Audit",
         role=Role.engineer,
     ), db=db)
@@ -35,12 +40,13 @@ def test_login_audit(db: Session):
     AuthStore.login(make_login_request(email=email, password=password), db=db)
     
 def test_login_lockout(db: Session):
-    email = "lockout_test@example.com"
+    email = f"lockout_{uuid.uuid4().hex[:6]}@example.com"
     password = "Password123!"
     
     # Register user
     AuthStore.register(make_register_request(
         email=email,
+        password=password,
         full_name="Lockout Test",
         role=Role.engineer,
     ), db=db)
@@ -55,7 +61,7 @@ def test_login_lockout(db: Session):
     
     # Next attempt should be locked
     try:
-        AuthStore.login(LoginRequest(email=email, password=password), db=db)
+        AuthStore.login(make_login_request(email=email, password=password), db=db)
         assert False, "Should be locked"
     except ValueError as e:
         assert "locked" in str(e)
@@ -68,14 +74,14 @@ def test_login_lockout(db: Session):
     assert lockout_log is not None
 
 def test_logout_audit(db: Session):
-    email = "logout_audit@example.com"
+    email = f"logout_{uuid.uuid4().hex[:6]}@example.com"
     password = "Password123!"
     # Register and login
-    AuthStore.register(RegisterRequest(
+    AuthStore.register(make_register_request(
         email=email,
         password=password,
         full_name="Logout Audit",
-        role=Role.engineer
+        role="engineer"
     ), db=db)
     session_resp = AuthStore.login(make_login_request(email=email, password=password), db=db)
     

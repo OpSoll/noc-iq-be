@@ -2,12 +2,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 from app.main import app
 
-client = TestClient(app)
+import uuid
 
-def test_api_changelog(db: Session):
+
+def test_api_changelog(client, db: Session):
+    v = f"v1.2.{uuid.uuid4().hex[:6]}"
     # Add entry
     payload = {
-        "version": "v1.2.0",
+        "version": v,
         "description": "Added idempotency keys for financial endpoints",
         "breaking_changes": False
     }
@@ -19,4 +21,4 @@ def test_api_changelog(db: Session):
     assert response_get.status_code == 200
     data = response_get.json()
     assert len(data) >= 1
-    assert data[0]["version"] == "v1.2.0"
+    assert any(item["version"] == v for item in data)

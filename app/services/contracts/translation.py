@@ -1,3 +1,4 @@
+from typing import Any
 from app.models.sla import SLAResult
 
 
@@ -45,18 +46,43 @@ def validate_asset_config(asset_code: str, asset_issuer: str) -> None:
         )
 
 
-def translate_contract_result(raw_result: dict) -> SLAResult:
-    return SLAResult(
-        outage_id=raw_result["outage_id"],
-        status="violated" if raw_result["status"] == "viol" else "met",
-        mttr_minutes=raw_result["mttr_minutes"],
-        threshold_minutes=raw_result["threshold_minutes"],
-        amount=raw_result["amount"],
-        payment_type="penalty" if raw_result["payment_type"] == "pen" else "reward",
-        rating={
+def translate_contract_result(raw_result: Any) -> SLAResult:
+    if isinstance(raw_result, SLAResult):
+        return raw_result
+    if isinstance(raw_result, dict):
+        status = raw_result.get("status")
+        if status == "viol":
+            status = "violated"
+        elif status not in ("met", "violated"):
+            status = "met"
+
+        payment_type = raw_result.get("payment_type")
+        if payment_type == "pen":
+            payment_type = "penalty"
+        elif payment_type not in ("penalty", "reward"):
+            payment_type = "reward"
+
+        rating_map = {
             "top": "exceptional",
             "high": "excellent",
             "good": "good",
             "poor": "poor",
-        }[raw_result["rating"]],
-    )
+            "exceptional": "exceptional",
+            "excellent": "excellent",
+        }
+        rating = rating_map.get(raw_result.get("rating", "good"), "good")
+
+        return SLAResult(
+            outage_id=raw_result["outage_id"],
+            status=status,
+            mttr_minutes=raw_result["mttr_minutes"],
+            threshold_minutes=raw_result["threshold_minutes"],
+            amount=raw_result["amount"],
+            payment_type=payment_type,
+            rating=rating,
+            policy_version=raw_result.get("policy_version", "v1.0"),
+            threshold_source=raw_result.get("threshold_source", "config"),
+            reason_code=raw_result.get("reason_code"),
+            decision_trace=raw_result.get("decision_trace"),
+        )
+    raise TypeError(f"Unsupported contract result type: {type(raw_result)}")

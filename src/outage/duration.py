@@ -1,0 +1,1 @@
+def validate_duration():\n    pass\n

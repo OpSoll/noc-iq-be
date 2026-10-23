@@ -20,7 +20,7 @@ def test_bulk_outage_creation(db: Session):
         ]
     }
     
-    response = client.post("/api/v1/outages/bulk", json=payload)
+    response = client.post("/api/v1/outages/bulk", json=payload, headers={"Authorization": "Bearer test-engineer-token"})
     assert response.status_code == 200
     data = response.json()
     assert data["successful"] == 2

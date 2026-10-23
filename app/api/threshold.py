@@ -1,0 +1,504 @@
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterator, List, Optional
+
+from sqlalchemy import and_, asc, desc, or_
+from sqlalchemy.orm import Session
+
+from app.core.outage_state_machine import (
+    VALID_TRANSITIONS as _STATE_MACHINE_TRANSITIONS,
+    OutageStateMachine,
+)
+from app.models.enums import OutageStatus, Severity
+from app.models.enum_serialization import enum_value
+from app.models.orm.outage import OutageORM
+from app.models.outage import Outage, Location, SLAStatus
+from app.models.outage_dto import OutageCreate, OutageSortDirection, OutageSortField, OutageUpdate
+
+
+def _orm_to_pydantic(orm: OutageORM) -> Outage:
+    location = None
+    if orm.location:
+        location = Location(**orm.location)
+
+    sla_status = None
+    if orm.sla_status:
+        sla_status = SLAStatus(**orm.sla_status)
+
+    return Outage(
+        id=orm.id,
+        site_name=orm.site_name,
+        site_id=orm.site_id,
+        severity=orm.severity,
+        status=orm.status,
+        detected_at=orm.detected_at,
+        resolved_at=orm.resolved_at,
+        description=orm.description,
+        affected_services=orm.affected_services or [],
+        affected_subscribers=orm.affected_subscribers,
+        assigned_to=orm.assigned_to,
+        created_by=orm.created_by,
+        location=location,
+        sla_status=sla_status,
+        deleted_at=orm.deleted_at,
+    )
+
+
+# Issue #664: the outage state machine is the single source of truth for legal
+# lifecycle transitions. Kept as a derived alias so existing references remain
+# valid, but ``validate_status_transition`` delegates to the state machine.
+ALLOWED_STATUS_TRANSITIONS = {
+    status: set(next_states) for status, next_states in _STATE_MACHINE_TRANSITIONS.items()
+}
+
+OUTAGE_SORT_FIELDS = {"detected_at", "site_name", "severity", "status", "id"}
+
+
+class OutageRepository:
+    def __init__(self, db: Session):
+        self.db = db
+
+    @staticmethod
+    def validate_status_transition(current_status: str, new_status: str) -> None:
+        """Delegate to the outage state machine (Issue #664)."""
+        OutageStateMachine.validate_transition(current_status, new_status)
+
+    def list(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 50,
+        offset: int = 0,
+        sort_by: OutageSortField = OutageSortField.detected_at,
+        sort_direction: OutageSortDirection = OutageSortDirection.desc,
+    ) -> dict:
+        """Return a paginated page of outages (Issue #500).
+
+        ``limit`` caps the number of rows returned (1-100) and ``offset``
+        skips rows, so callers cannot pull tens of thousands of records in a
+        single request. The total matching count is returned alongside the
+        page so clients can compute pagination metadata.
+        """
+        query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
+
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == enum_value(status))
+
+        if search:
+            search_filter = or_(
+                OutageORM.id.ilike(f"%{search}%"),
+                OutageORM.site_id.ilike(f"%{search}%"),
+                OutageORM.site_name.ilike(f"%{search}%"),
+            )
+            query = query.filter(search_filter)
+
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        sort_column = getattr(OutageORM, sort_by.value)
+        direction_fn = asc if sort_direction == OutageSortDirection.asc else desc
+        query = query.order_by(direction_fn(sort_column), OutageORM.id.asc())
+
+        total = query.count()
+        items = query.offset(offset).limit(limit).all()
+
+        return {
+            "items": [_orm_to_pydantic(o) for o in items],
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "sort_by": sort_by.value,
+            "sort_direction": sort_direction.value,
+        }
+
+    def count_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> int:
+        """Return how many outages match, without fetching any rows (#964).
+
+        The filters are applied by the same predicate chain as :meth:`list`, so a
+        count can never disagree with the ``total`` that listing reports. Keeping
+        the two adjacent is deliberate: the obvious way for them to drift is for
+        someone to change one filter and not the other.
+        """
+        query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
+
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == enum_value(status))
+
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        return query.count()
+
+    def list_all(self) -> List[Outage]:
+        rows = self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False)).all()
+        return [_orm_to_pydantic(r) for r in rows]
+
+    def list_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> List[Outage]:
+        query = self.db.query(OutageORM)
+        query = query.filter(OutageORM.is_deleted.is_(False))
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == enum_value(status))
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+        return [_orm_to_pydantic(r) for r in query.all()]
+
+    def stream_filtered(
+        self,
+        severity: Optional[Severity] = None,
+        status: Optional[OutageStatus] = None,
+        search: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        chunk_size: int = 500,
+    ) -> Iterator[List[Outage]]:
+        """Yield filtered outages in batches of ``chunk_size`` rows.
+
+        Uses ``yield_per`` so database rows are streamed in chunks instead of
+        loading the full result set into memory (Issue #507).
+        """
+        query = self.db.query(OutageORM)
+        if severity:
+            query = query.filter(OutageORM.severity == severity.value)
+        if status:
+            query = query.filter(OutageORM.status == enum_value(status))
+        if search:
+            query = query.filter(
+                or_(
+                    OutageORM.id.ilike(f"%{search}%"),
+                    OutageORM.site_id.ilike(f"%{search}%"),
+                    OutageORM.site_name.ilike(f"%{search}%"),
+                )
+            )
+        if start_date:
+            query = query.filter(OutageORM.detected_at >= start_date)
+        if end_date:
+            query = query.filter(OutageORM.detected_at <= end_date)
+
+        batch: List[Outage] = []
+        for orm in query.yield_per(chunk_size):
+            batch.append(_orm_to_pydantic(orm))
+            if len(batch) >= chunk_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    def get(self, outage_id: str) -> Optional[Outage]:
+        row = self._query_active().filter(OutageORM.id == outage_id).first()
+        if not row:
+            return None
+        return _orm_to_pydantic(row)
+
+    def get_orm(self, outage_id: str) -> Optional[OutageORM]:
+        return self._query_active().filter(OutageORM.id == outage_id).first()
+
+    def get_orm_locked(self, outage_id: str) -> Optional[OutageORM]:
+        """Acquire a row-level lock (SELECT FOR UPDATE) before mutating."""
+        return (
+            self._query_active()
+            .filter(OutageORM.id == outage_id)
+            .with_for_update()
+            .first()
+        )
+
+    def _query_active(self):
+        """Base query that excludes soft-deleted outages by default (Issue #521)."""
+        return self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False))
+
+    def soft_delete(self, outage_id: str) -> Optional[Outage]:
+        """Soft-delete an outage so historical SLA compliance data is retained.
+
+        Soft-deleted records are excluded from queries by default and can be
+        restored with :meth:`restore`.
+        """
+        orm = self.get_orm(outage_id)
+        if not orm:
+            return None
+        orm.is_deleted = True
+        orm.deleted_at = datetime.now(timezone.utc)
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def restore(self, outage_id: str) -> Optional[Outage]:
+        """Restore a soft-deleted outage record (Issue #521)."""
+        orm = (
+            self.db.query(OutageORM)
+            .filter(OutageORM.id == outage_id)
+            .first()
+        )
+        if not orm:
+            return None
+        orm.is_deleted = False
+        orm.deleted_at = None
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def list_deleted(self) -> List[Outage]:
+        """Return all soft-deleted outages (Issue #521)."""
+        rows = (
+            self.db.query(OutageORM)
+            .filter(OutageORM.is_deleted.is_(True))
+            .order_by(OutageORM.deleted_at.desc())
+            .all()
+        )
+        return [_orm_to_pydantic(r) for r in rows]
+
+    @staticmethod
+    def validate_status_transition(current_status: str, next_status: str) -> None:
+        """Delegate to the outage state machine (Issue #664)."""
+        OutageStateMachine.validate_transition(current_status, next_status)
+
+    def _find_duplicate_orm(self, payload: OutageCreate) -> Optional[OutageORM]:
+        query = self.db.query(OutageORM).filter(
+            and_(
+                OutageORM.site_name == payload.site_name,
+                OutageORM.detected_at == payload.detected_at,
+                OutageORM.description == payload.description,
+            )
+        )
+        if payload.site_id:
+            query = query.filter(OutageORM.site_id == payload.site_id)
+        return query.first()
+
+    @staticmethod
+    def _is_same_outage(orm: OutageORM, payload: OutageCreate) -> bool:
+        orm_dt = orm.detected_at.replace(tzinfo=None) if hasattr(orm.detected_at, "replace") else orm.detected_at
+        p_dt = payload.detected_at.replace(tzinfo=None) if hasattr(payload.detected_at, "replace") else payload.detected_at
+        severity_match = (str(orm.severity) == str(payload.severity)) or (hasattr(payload.severity, "value") and str(orm.severity) == payload.severity.value)
+        status_match = (str(orm.status) == str(payload.status)) or (hasattr(payload.status, "value") and str(orm.status) == payload.status.value)
+        return (
+            orm.id == payload.id
+            and orm.site_name == payload.site_name
+            and (orm.site_id or None) == (payload.site_id or None)
+            and severity_match
+            and status_match
+            and orm_dt == p_dt
+            and orm.description == payload.description
+        )
+
+    def check_duplicate(self, payload: OutageCreate) -> Optional[Outage]:
+        existing_by_id = self.get_orm(payload.id)
+        if existing_by_id:
+            if self._is_same_outage(existing_by_id, payload):
+                return _orm_to_pydantic(existing_by_id)
+            raise ValueError(f"Outage with id '{payload.id}' already exists with different content")
+
+        duplicate = self._find_duplicate_orm(payload)
+        if duplicate:
+            return _orm_to_pydantic(duplicate)
+        return None
+
+    def create_or_get_existing(self, payload: OutageCreate) -> tuple[Outage, bool]:
+        """Create a new outage or return an existing duplicate.
+
+        Returns a tuple of (outage, persisted).
+        Persisted is False when the payload matches an existing outage.
+        """
+        existing = self.check_duplicate(payload)
+        if existing:
+            return existing, False
+
+        location_data = payload.location.model_dump() if payload.location else None
+        orm = OutageORM(
+            id=payload.id,
+            site_name=payload.site_name,
+            site_id=payload.site_id,
+            severity=payload.severity.value,
+            status=enum_value(payload.status),
+            detected_at=payload.detected_at,
+            description=payload.description,
+            affected_services=payload.affected_services,
+            affected_subscribers=payload.affected_subscribers,
+            assigned_to=payload.assigned_to,
+            created_by=payload.created_by,
+            location=location_data,
+        )
+        self.db.add(orm)
+        self.db.flush()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm), True
+
+    def create(self, payload: OutageCreate) -> Outage:
+        outage, _ = self.create_or_get_existing(payload)
+        self.db.commit()
+        return outage
+
+    def bulk_create(self, outages: List[OutageCreate]) -> List[Outage]:
+        return [self.create(payload) for payload in outages]
+
+    def update(self, outage_id: str, payload: OutageUpdate) -> Optional[Outage]:
+        orm = self.get_orm(outage_id)
+        if not orm:
+            return None
+
+        update_data = payload.model_dump(exclude_unset=True)
+        if "status" in update_data and update_data["status"] is not None:
+            next_status = update_data["status"]
+        next_status_value = enum_value(next_status)
+            self.validate_status_transition(orm.status, next_status_value)
+
+        for key, value in update_data.items():
+            if key == "location" and value is not None:
+                setattr(orm, key, value if isinstance(value, dict) else value.model_dump())
+            elif hasattr(value, "value"):  # enum
+                setattr(orm, key, value.value)
+            else:
+                setattr(orm, key, value)
+
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def delete(self, outage_id: str) -> None:
+        orm = self.get_orm(outage_id)
+        if orm:
+            self.db.delete(orm)
+            self.db.commit()
+
+    def bulk_resolve(
+        self,
+        outage_ids: List[str],
+        resolution_notes: str = "",
+        mttr_minutes: Optional[int] = None,
+    ) -> dict:
+        """Resolve multiple outages inside a single transaction (Issue #501).
+
+        Each outage ID is validated (exists, open -> resolved transition)
+        before being updated. Missing or invalid IDs are collected as
+        failures without aborting the batch. No commit is issued here - the
+        caller commits once so the whole batch is atomic: either every valid
+        outage is resolved or none are.
+
+        Returns ``{"succeeded": [ids], "failed": [{"id", "reason"}]}``.
+        """
+        succeeded: List[str] = []
+        failed: List[dict] = []
+        for outage_id in outage_ids:
+            orm = self.get_orm_locked(outage_id)
+            if orm is None:
+                failed.append({"id": outage_id, "reason": "not_found"})
+                continue
+            try:
+                self.validate_status_transition(orm.status, OutageStatus.resolved.value)
+            except ValueError as exc:
+                failed.append({"id": outage_id, "reason": str(exc)})
+                continue
+            orm.status = OutageStatus.resolved.value
+            orm.resolved_at = datetime.now(timezone.utc)
+            orm.updated_at = datetime.now(timezone.utc)
+            if mttr_minutes is not None:
+                orm.mttr_minutes = mttr_minutes
+            self.db.flush()
+            succeeded.append(outage_id)
+        return {"succeeded": succeeded, "failed": failed}
+
+    def resolve(self, outage_id: str, mttr_minutes: int) -> Optional[Outage]:
+        orm = self.get_orm_locked(outage_id)
+        if not orm:
+            return None
+
+        # Idempotent: already resolved with same mttr → return as-is
+        if orm.status == OutageStatus.resolved.value and orm.mttr_minutes == mttr_minutes:
+            return _orm_to_pydantic(orm)
+
+        self.validate_status_transition(orm.status, OutageStatus.resolved.value)
+        orm.status = OutageStatus.resolved.value
+        orm.mttr_minutes = mttr_minutes
+        orm.resolved_at = datetime.now(timezone.utc)
+        orm.updated_at = datetime.now(timezone.utc)
+        self.db.commit()
+        self.db.refresh(orm)
+        return _orm_to_pydantic(orm)
+
+    def list_violations(self) -> List[dict]:
+        from app.services.sla import SLACalculator
+
+        rows = (
+            self.db.query(OutageORM)
+            .filter(
+                OutageORM.status == OutageStatus.resolved.value,
+                OutageORM.is_deleted.is_(False),
+            )
+            .all()
+        )
+
+        violations = []
+        for orm in rows:
+            if orm.mttr_minutes is None:
+                continue
+            sla = SLACalculator.calculate(
+                outage_id=orm.id,
+                severity=orm.severity,
+                mttr_minutes=orm.mttr_minutes,
+            )
+            if sla.status == "violated":
+                violations.append({"outage": _orm_to_pydantic(orm), "sla": sla})
+
+        return violations
+
+    def get_raw_outage_events(self, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
+        """
+        Retrieves root infrastructure downtime events within a window.
+        Uses system identifiers (cluster_id, region) to protect user data privacy.
+        """
+        return [
+            {
+                "outage_id": "out-88291-xyz",
+                "system_node": "kafka-cluster-01",
+                "region": "us-east-1",
+                "duration_seconds": 340,
+                "timestamp": start_time.isoformat()
+            }
+        ]

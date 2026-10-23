@@ -1,0 +1,1 @@
+def handle_secret_rotation():\n    pass\n

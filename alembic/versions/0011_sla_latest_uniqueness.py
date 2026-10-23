@@ -11,7 +11,7 @@ from alembic import op
 
 
 revision = "0011_sla_latest_uniqueness"
-down_revision = "0010_wallet_persistence"
+down_revision = "0011_payment_deduplication"
 branch_labels = None
 depends_on = None
 

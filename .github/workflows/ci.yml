@@ -65,6 +65,10 @@ jobs:
           flake8 app/ --select=E9,F821,F823 \
             --format="::error file=%(path)s,line=%(row)d,col=%(col)d::%(text)s"
 
+      - name: Check single Alembic head (blocking — issue #516)
+        run: |
+          python scripts/check_alembic_single_head.py
+
       - name: Lint with flake8 (informational — style and import issues)
         run: |
           flake8 app/ --max-line-length=120 \
@@ -109,13 +113,15 @@ jobs:
 
       - name: Run unit and integration tests
         run: |
+          mkdir -p test-results
+          set -o pipefail
           pytest tests/ \
             --ignore=tests/test_contract_parity.py \
             --ignore=tests/test_stellar_wave_issues.py \
             --ignore=tests/test_analytics_benchmarks.py \
             -v \
             --junit-xml=test-results/unit-results.xml \
-            2>&1 | tee test-results/unit-tests.log || true
+            2>&1 | tee test-results/unit-tests.log
 
       - name: Upload test results artifact
         if: always()
@@ -159,9 +165,10 @@ jobs:
       - name: Run contract parity checks
         run: |
           mkdir -p test-results
+          set -o pipefail
           pytest tests/test_contract_parity.py -v \
             --junit-xml=test-results/contract-results.xml \
-            2>&1 | tee test-results/contract-checks.log || true
+            2>&1 | tee test-results/contract-checks.log
 
       - name: Upload contract check results
         if: always()
@@ -205,9 +212,10 @@ jobs:
       - name: Run Stellar Wave integration checks
         run: |
           mkdir -p test-results
+          set -o pipefail
           pytest tests/test_stellar_wave_issues.py -v \
             --junit-xml=test-results/integration-results.xml \
-            2>&1 | tee test-results/integration-checks.log || true
+            2>&1 | tee test-results/integration-checks.log
 
       - name: Upload integration check results
         if: always()

@@ -42,7 +42,7 @@ def _session_id(session: Session) -> int:
 # SQLAlchemy event listeners for lifecycle tracking
 # ---------------------------------------------------------------------------
 
-@event.listens_for(Session, "after_create")
+@event.listens_for(Session, "after_transaction_create")
 def _on_session_create(session: Session, transaction: Any) -> None:
     global _sessions_created
     _sessions_created += 1
@@ -50,8 +50,8 @@ def _on_session_create(session: Session, transaction: Any) -> None:
     logger.debug("Session opened [%s] id=%d", session_key, _session_id(session))
 
 
-@event.listens_for(Session, "after_close")
-def _on_session_close(session: Session) -> None:
+@event.listens_for(Session, "after_transaction_end")
+def _on_session_close(session: Session, transaction: Any) -> None:
     global _sessions_closed, _sessions_leaked
     _sessions_closed += 1
     session_key = f"req:{getattr(session, '_request_id', 'bg')}"

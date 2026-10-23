@@ -9,13 +9,24 @@ from app.utils.logging import get_structured_logger
 logger = get_structured_logger("correlation_middleware")
 
 
+async def _single_body_iterator(body: bytes):
+    yield body
+
+
 class CorrelationMiddleware(BaseHTTPMiddleware):
     """Middleware to add correlation IDs to requests and enable request tracing."""
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Extract correlation ID from header or generate new one
-        correlation_id = request.headers.get("X-Correlation-ID") or get_or_generate_correlation_id()
-        set_correlation_id(correlation_id)
+        correlation_id = request.headers.get("X-Correlation-ID")
+        if not correlation_id:
+            correlation_id = get_or_generate_correlation_id()
+            # Inject into request headers scope
+            headers = list(request.scope.get("headers", []))
+            headers.append((b"x-correlation-id", correlation_id.encode()))
+            request.scope["headers"] = headers
+        else:
+            set_correlation_id(correlation_id)
         
         # Add correlation ID to request state for easy access
         request.state.correlation_id = correlation_id
@@ -32,6 +43,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             user_agent=request.headers.get("User-Agent"),
             correlation_id=correlation_id
         )
+
         
         try:
             # Process the request
@@ -40,8 +52,21 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             # Calculate request duration
             duration_ms = (time.time() - start_time) * 1000
             
-            # Add correlation ID to response headers
+            # Add correlation ID to response headers (mandatory for all paths)
             response.headers["X-Correlation-ID"] = correlation_id
+            # Also inject into JSON body for error consumers
+            try:
+                body = b""
+                async for chunk in response.body_iterator:
+                    body += chunk
+                response.body_iterator = _single_body_iterator(body)
+                import json
+                data = json.loads(body) if body else {}
+                if isinstance(data, dict):
+                    data["correlation_id"] = correlation_id
+                    response.headers["Content-Length"] = str(len(json.dumps(data)))
+            except Exception:
+                pass
             
             # Log outgoing response
             logger.info(
@@ -56,10 +81,7 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
             return response
             
         except Exception as exc:
-            # Calculate request duration for failed requests
             duration_ms = (time.time() - start_time) * 1000
-            
-            # Log request failure
             logger.error(
                 "Request failed",
                 method=request.method,
@@ -68,6 +90,4 @@ class CorrelationMiddleware(BaseHTTPMiddleware):
                 duration_ms=round(duration_ms, 2),
                 correlation_id=correlation_id
             )
-            
-            # Re-raise the exception to let FastAPI handle it
             raise

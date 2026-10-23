@@ -164,7 +164,9 @@ class TestWebhookHeadersWithSignatureVersion(unittest.TestCase):
         self.assertIn("X-Webhook-Signature-Version", headers)
         self.assertEqual(headers["X-Webhook-Signature-Version"], "1")
         self.assertIn("X-Webhook-Signature", headers)
-        self.assertTrue(headers["X-Webhook-Signature"].startswith("sha256="))
+        # Updated to t=,v1= format (HMAC SHA-256 with timestamp)
+        self.assertTrue(headers["X-Webhook-Signature"].startswith("t="))
+        self.assertIn(",v1=", headers["X-Webhook-Signature"])
 
     def test_build_headers_omits_signature_version_without_secret(self):
         """Headers should not include signature version when secret is None."""

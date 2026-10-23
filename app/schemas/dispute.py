@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
 from enum import Enum
@@ -20,6 +20,13 @@ class DisputeCreate(DisputeBase):
 class DisputeUpdate(BaseModel):
     state: DisputeState
     resolution_notes: Optional[str] = None
+
+
+class ReSimulateRequest(BaseModel):
+    """Inputs for re-simulating an SLA dispute's contract calculation (Issue #510)."""
+
+    mttr_minutes: int = Field(..., ge=0, description="Updated MTTR (minutes) to dry-run against the Soroban contract")
+    severity: Optional[str] = Field(default=None, description="Optional severity override for the dry-run")
 
 class DisputeResponse(DisputeBase):
     id: int

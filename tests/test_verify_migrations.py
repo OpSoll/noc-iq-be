@@ -6,9 +6,12 @@ import pytest
 
 
 def run_alembic(command: str) -> str:
+    import sys
+    import shutil
+    alembic_bin = shutil.which("alembic") or os.path.join(os.path.dirname(sys.executable), "alembic")
     env = os.environ.copy()
     process = subprocess.run(
-        ["alembic"] + command.split(),
+        [alembic_bin] + command.split(),
         check=True,
         capture_output=True,
         text=True,
@@ -40,6 +43,9 @@ def test_migration_chain_is_linear():
 
 
 def test_current_revision_matches_head():
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url or "sqlite" in database_url:
+        pytest.skip("Current revision verification requires a PostgreSQL-compatible DATABASE_URL.")
     head = run_alembic("heads").split()[0]
     current = run_alembic("current").split()[0]
     assert current == head, f"DB is at {current}, expected head {head}"

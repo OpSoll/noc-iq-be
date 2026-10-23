@@ -1,0 +1,1 @@
+def acquire_sequence_lock():\n    pass\n

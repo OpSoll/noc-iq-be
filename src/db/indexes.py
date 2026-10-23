@@ -1,0 +1,1 @@
+def create_indexes():\n    pass\n

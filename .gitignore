@@ -43,6 +43,12 @@ Thumbs.db
 # Logs
 *.log
 
+# Databases & local benchmark results
+*.db
+*.db-shm
+*.db-wal
+*-results.json
+
 # mypy
 .mypy_cache/
 

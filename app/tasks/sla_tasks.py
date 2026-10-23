@@ -5,10 +5,12 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from celery import Task
+from celery.exceptions import SoftTimeLimitExceeded
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, GuardedTask
+from app.core.config import settings as cfg
 from app.db.session import SessionLocal
+from app.services.task_lock import RedisTaskLock
 from app.models.job import Job, JobStatus, JobType
 from app.models.webhook import WebhookEvent
 from app.repositories.payment_repository import PaymentRepository
@@ -19,6 +21,26 @@ from app.utils.logging import get_structured_logger
 
 logger = logging.getLogger(__name__)
 task_logger = get_structured_logger("sla_tasks")
+
+# Issue #538: bulk SLA computation chunk size. Batches larger than this are
+# split into parallel chunks via Celery ``chunks()`` so a single worker is
+# never blocked for minutes on a 10,000-device batch.
+SLA_BULK_CHUNK_SIZE = 50
+
+
+def _bulk_sla_lock_job_id(call_args) -> str:
+    """Deterministic lock job id for a bulk SLA batch (Issue #533).
+
+    Derived from a SHA-256 digest of the sorted device list + period so two
+    identical batch triggers map to the same ``lock:task:*`` key and only
+    one of them executes.
+    """
+    device_ids = sorted(call_args.get("device_ids") or [])
+    period = call_args.get("period") or ""
+    digest = hashlib.sha256(
+        json.dumps(device_ids, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"bulk_sla:{digest}:{period}"
 
 
 def _hash_job_payload(job: Job) -> str:
@@ -38,8 +60,12 @@ def _hash_job_payload(job: Job) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-class DatabaseTask(Task):
-    """Base task that provides a scoped DB session and updates Job records."""
+class DatabaseTask(GuardedTask):
+    """Base task that provides a scoped DB session, updates Job records,
+    and manages lease heartbeats for BE-W5-047.
+
+    Inherits :class:`GuardedTask` for issue #531 execution time-limit
+    cleanup hooks."""
 
     abstract = True
     _db = None
@@ -55,6 +81,17 @@ class DatabaseTask(Task):
         if job:
             job.status = JobStatus.STARTED
             job.started_at = datetime.utcnow()
+            # BE-W5-047: Initialize lease on start
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS)
+            db.commit()
+
+    def _heartbeat(self, db, celery_task_id: str):
+        """BE-W5-047: Extend the lease on a running job."""
+        job = self._get_job(db, celery_task_id)
+        if job and job.status == JobStatus.STARTED:
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS)
             db.commit()
 
     def _mark_success(self, db, celery_task_id: str, result: Any):
@@ -64,21 +101,50 @@ class DatabaseTask(Task):
             job.result = json.dumps(result)
             job.progress = 100.0
             job.finished_at = datetime.utcnow()
+            # BE-W5-047: Clear lease on completion
+            job.lease_expires_at = None
+            job.heartbeat_at = None
             db.commit()
 
-    def _mark_failure(self, db, celery_task_id: str, error: str):
+    def _mark_failure(self, db, celery_task_id: str, error: str, error_code: Optional[str] = None, error_retryable: Optional[bool] = None):
         job = self._get_job(db, celery_task_id)
         if not job:
             return
         # BE-W5-054: bucket retry_count so the QUARANTINED boundary is invariant.
-        # We compare 'attempts' (this attempt) against max_retries so the
-        # transition into QUARANTINED occurs after the final allowed attempt
-        # fails — never one attempt early or late.
         attempts = (job.retry_count or 0) + 1
-        # BE-W5-054: poison-message quarantine. If this attempt exhausts the
-        # per-job ``max_retries`` cap, quarantine it instead of letting
-        # subsequent periodic retry sweeps keep bouncing it through the worker.
+        # BE-W5-054: poison-message quarantine
         if attempts >= max(job.max_retries, 0):
+            # BE-W5-048: if dead-letter is enabled, route exhausted jobs there
+            if cfg.JOB_RETRY_DEAD_LETTER_ENABLED:
+                job.status = JobStatus.DEAD_LETTER
+                job.dead_letter_reason = f"Max retries exhausted ({job.max_retries}). Last error: {error}"
+                job.dead_letter_at = datetime.utcnow()
+                job.finished_at = datetime.utcnow()
+                job.retry_count = attempts
+                job.error = error
+                job.error_code = error_code or "DEAD_LETTER"
+                job.error_retryable = False
+                logger.error(
+                    "BE-W5-048: dead-lettering job %s type=%s after %d attempts: %s",
+                    job.id, job.job_type.value, attempts, error,
+                )
+                audit_log.log_event(
+                    db,
+                    event_type="job_dead_lettered",
+                    details={
+                        "job_id": str(job.id),
+                        "celery_task_id": celery_task_id,
+                        "job_type": job.job_type.value,
+                        "retry_count": attempts,
+                        "max_retries": job.max_retries,
+                        "retry_class": job.retry_class,
+                        "error": error,
+                        "error_code": error_code,
+                    },
+                )
+                db.commit()
+                return
+
             payload_hash = _hash_job_payload(job)
             job.payload_hash = payload_hash
             job.quarantine_reason = error
@@ -86,6 +152,8 @@ class DatabaseTask(Task):
             job.status = JobStatus.QUARANTINED
             job.retry_count = attempts
             job.finished_at = datetime.utcnow()
+            job.error_code = error_code or "QUARANTINED"
+            job.error_retryable = False
             logger.error(
                 "BE-W5-054: quarantining job %s type=%s payload_hash=%s after "
                 "%d attempts: %s",
@@ -110,6 +178,8 @@ class DatabaseTask(Task):
         job.retry_count = attempts
         job.status = JobStatus.FAILURE
         job.error = error
+        job.error_code = error_code
+        job.error_retryable = error_retryable if error_retryable is not None else False
         job.finished_at = datetime.utcnow()
         db.commit()
 
@@ -120,6 +190,45 @@ class DatabaseTask(Task):
             if details:
                 job.progress_details = details
             db.commit()
+
+    def _publish_progress(
+        self,
+        current: int,
+        total: int,
+        stage: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Publish a Celery ``PROGRESS`` state update (issue #543).
+
+        Mirrors the DB-side Job progression to the result backend via
+        ``self.update_state(state="PROGRESS", ...)`` so callers reading the
+        task's ``AsyncResult`` see ``current``/``total`` plus a rounded
+        ``progress_percentage`` in its meta.
+
+        Guarded with try/except: eager mode (``task_always_eager=True``) and
+        unavailable result backends must never break the task itself.
+        """
+        if not total:
+            return
+        percent = (float(current) / float(total)) * 100.0
+        meta: Dict[str, Any] = {
+            "current": current,
+            "total": total,
+            "progress_percentage": round(percent, 2),
+        }
+        if stage:
+            meta["stage"] = stage
+        if extra:
+            for key, value in extra.items():
+                meta.setdefault(key, value)
+        try:
+            self.update_state(state="PROGRESS", meta=meta)
+        except Exception:  # pragma: no cover - eager/pool safety net
+            logger.debug(
+                "update_state(PROGRESS) unavailable — ignoring (task_id=%s)",
+                getattr(self.request, "id", None),
+                exc_info=True,
+            )
 
     def _add_partial_result(self, db, celery_task_id: str, item_id: str, result: Any):
         """Add a partial result for bulk operations."""
@@ -164,6 +273,7 @@ class DatabaseTask(Task):
     max_retries=3,
     default_retry_delay=30,
 )
+@RedisTaskLock("sla:{device_id}:{period}")  # Issue #533
 def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Compute SLA metrics for a single device over a given period.
@@ -195,7 +305,8 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
-        
+        self._publish_progress(current=30, total=100, stage="data_collection")
+
         result = compute_device_sla(db, device_id=device_id, period=period)
         
         self._update_progress(db, self.request.id, 70.0, {
@@ -204,6 +315,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "period": period,
             "is_violated": result.get("is_violated", False)
         })
+        self._publish_progress(
+            current=70,
+            total=100,
+            stage="sla_computation_complete",
+            extra={"is_violated": result.get("is_violated", False)},
+        )
 
         # Check for violations and dispatch webhooks
         if result.get("is_violated"):
@@ -213,6 +330,12 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
                 "period": period,
                 "violation_detected": True
             })
+            self._publish_progress(
+                current=85,
+                total=100,
+                stage="triggering_webhooks",
+                extra={"violation_detected": True},
+            )
             
             from app.services.webhook_service import trigger_sla_violation_webhooks
             trigger_sla_violation_webhooks(
@@ -230,20 +353,142 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
             "device_id": device_id,
             "period": period
         })
+        self._publish_progress(current=95, total=100, stage="finalizing")
 
         self._mark_success(db, self.request.id, result)
         logger.info("SLA computation complete for device=%s", device_id)
         return result
 
+    except SoftTimeLimitExceeded as exc:
+        # Issue #531: log graceful cleanup and surface as a timeout failure.
+        # Do not retry — the task keeps exceeding its time limit.
+        logger.warning(
+            "SLA computation for device=%s hit soft time limit — cleaning up gracefully",
+            device_id,
+        )
+        self._mark_failure(
+            db,
+            self.request.id,
+            f"SoftTimeLimitExceeded: {exc}",
+            error_code="SOFT_TIME_LIMIT",
+            error_retryable=False,
+        )
+        raise
+
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("SLA computation failed for device=%s: %s", device_id, error_msg)
-        
+
+        # BE-W5-050: Classify error for typed envelope
+        error_code = "SLA_COMPUTATION_ERROR"
+        error_retryable = self.request.retries < self.max_retries
+
         # Log retry attempt if we have retries left
         if self.request.retries < self.max_retries:
             self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
-        
-        self._mark_failure(db, self.request.id, error_msg)
+
+        self._mark_failure(db, self.request.id, error_msg, error_code=error_code, error_retryable=error_retryable)
+        raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    base=DatabaseTask,
+    name="app.tasks.sla_tasks.compute_sla_chunk",
+    max_retries=2,
+    default_retry_delay=60,
+)
+def compute_sla_chunk(
+    self: DatabaseTask,
+    chunk_device_ids: List[str],
+    period: str,
+    job_task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Process a single chunk of device IDs (≤ SLA_BULK_CHUNK_SIZE items).
+
+    Issue #538: dispatched in parallel by ``compute_bulk_sla`` via Celery
+    ``chunks()`` so large SLA batches no longer block a single worker for
+    minutes. Returns a per-chunk summary the parent aggregates.
+
+    When ``job_task_id`` is the parent bulk job's Celery task ID, per-device
+    partial results / item errors are written back to the parent ``Job`` row
+    so progress tracking survives chunking.
+    """
+    db = self.get_db()
+    try:
+        results = []
+        violations = []
+        processed_count = 0
+        error_count = 0
+        total = len(chunk_device_ids)
+
+        for idx, device_id in enumerate(chunk_device_ids, start=1):
+            try:
+                from app.services.sla_service import compute_device_sla  # type: ignore
+
+                result = compute_device_sla(db, device_id=device_id, period=period)
+                results.append({"device_id": device_id, "result": result})
+
+                if job_task_id:
+                    self._add_partial_result(db, job_task_id, device_id, result)
+
+                if result.get("is_violated"):
+                    violations.append(device_id)
+                    from app.services.webhook_service import trigger_sla_violation_webhooks
+
+                    trigger_sla_violation_webhooks(
+                        db,
+                        sla_data={"device_id": device_id, "period": period, **result},
+                        event=WebhookEvent.SLA_VIOLATION,
+                    )
+                processed_count += 1
+
+            except Exception as device_exc:
+                logger.warning("SLA failed for device=%s: %s", device_id, device_exc)
+                results.append({"device_id": device_id, "error": str(device_exc)})
+
+                if job_task_id:
+                    self._add_item_error(db, job_task_id, device_id, str(device_exc))
+                error_count += 1
+
+            if job_task_id and total:
+                progress = (idx / total) * 100
+                self._update_progress(db, job_task_id, progress, {
+                    "stage": "processing_chunk",
+                    "current_device": device_id,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "chunk_size": total,
+                    "progress_percentage": round(progress, 2),
+                })
+
+            # Issue #543: publish per-item counters to the result backend so
+            # AsyncResult readers see PROGRESS with current/total percentages.
+            if total:
+                self._publish_progress(
+                    current=idx,
+                    total=total,
+                    stage="processing_chunk",
+                    extra={
+                        "current_device": device_id,
+                        "processed_count": processed_count,
+                        "error_count": error_count,
+                        "chunk_size": total,
+                    },
+                )
+
+        return {
+            "total": total,
+            "violations": len(violations),
+            "violated_devices": violations,
+            "processed_count": processed_count,
+            "error_count": error_count,
+            "results": results,
+        }
+    except Exception as exc:
+        logger.exception("SLA chunk computation failed: %s", exc)
         raise self.retry(exc=exc)
     finally:
         db.close()
@@ -256,6 +501,7 @@ def compute_sla_for_device(self: DatabaseTask, device_id: str, period: str, corr
     max_retries=2,
     default_retry_delay=60,
 )
+@RedisTaskLock(lock_key=_bulk_sla_lock_job_id)  # Issue #533
 def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> Dict[str, Any]:
     """
     Compute SLA for multiple devices. Dispatches individual tasks per device
@@ -273,6 +519,104 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "total_devices": total,
             "period": period
         })
+        self._publish_progress(current=5, total=100, stage="initialization")
+
+        # Issue #538: chunk large batches into parallel tasks of at most
+        # SLA_BULK_CHUNK_SIZE (50) devices so a single worker is never
+        # blocked for minutes on a huge batch. Small batches keep the
+        # sequential in-process path.
+        if total > SLA_BULK_CHUNK_SIZE:
+            device_chunks = [
+                device_ids[i : i + SLA_BULK_CHUNK_SIZE]
+                for i in range(0, total, SLA_BULK_CHUNK_SIZE)
+            ]
+            self._update_progress(db, self.request.id, 10.0, {
+                "stage": "dispatching_chunks",
+                "total_devices": total,
+                "chunk_size": SLA_BULK_CHUNK_SIZE,
+                "chunk_count": len(device_chunks),
+                "period": period,
+            })
+            self._publish_progress(
+                current=10,
+                total=100,
+                stage="dispatching_chunks",
+                extra={
+                    "chunk_size": SLA_BULK_CHUNK_SIZE,
+                    "chunk_count": len(device_chunks),
+                },
+            )
+            logger.info(
+                "Bulk SLA computation chunking %d devices into %d chunks "
+                "of %d (period=%s)",
+                total, len(device_chunks), SLA_BULK_CHUNK_SIZE, period,
+            )
+
+            # Dispatch one chunk task per 50-device slice via Celery
+            # ``chunks()``; chunks run in parallel across worker nodes.
+            chunk_group = compute_sla_chunk.chunks(
+                [(chunk, period, self.request.id) for chunk in device_chunks],
+                1,
+            ).apply_async()
+            chunk_summaries = chunk_group.join(timeout=3600, propagate=True)
+
+            # Each chunk subtask's result is a list of per-invocation
+            # results (one invocation per chunk), so flatten before
+            # aggregating.
+            flat_summaries = []
+            for item in chunk_summaries:
+                if isinstance(item, list):
+                    flat_summaries.extend(item)
+                else:
+                    flat_summaries.append(item)
+
+            results = []
+            violations = []
+            processed_count = 0
+            error_count = 0
+            for chunk_summary in flat_summaries:
+                processed_count += chunk_summary.get("processed_count", 0)
+                error_count += chunk_summary.get("error_count", 0)
+                violations.extend(chunk_summary.get("violated_devices", []))
+                results.extend(chunk_summary.get("results", []))
+
+            self._update_progress(db, self.request.id, 95.0, {
+                "stage": "finalizing",
+                "total_devices": total,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "violations_found": len(violations),
+                "chunk_count": len(device_chunks),
+            })
+            self._publish_progress(
+                current=95,
+                total=100,
+                stage="finalizing",
+                extra={
+                    "chunk_count": len(device_chunks),
+                    "violations_found": len(violations),
+                },
+            )
+
+            summary = {
+                "total": total,
+                "violations": len(violations),
+                "violated_devices": violations,
+                "processed_count": processed_count,
+                "error_count": error_count,
+                "results": results,
+                "chunked": True,
+                "chunk_count": len(device_chunks),
+                "chunk_size": SLA_BULK_CHUNK_SIZE,
+            }
+
+            self._mark_success(db, self.request.id, summary)
+            logger.info(
+                "Bulk SLA computation complete (chunked). Violations: %d/%d, "
+                "Errors: %d, Chunks: %d",
+                len(violations), total, error_count, len(device_chunks),
+            )
+            return summary
 
         results = []
         violations = []
@@ -319,6 +663,19 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
                 "progress_percentage": round(progress, 2)
             })
 
+            # Issue #543: publish per-item counters to the result backend.
+            self._publish_progress(
+                current=idx,
+                total=total,
+                stage="processing_devices",
+                extra={
+                    "current_device": device_id,
+                    "processed_count": processed_count,
+                    "error_count": error_count,
+                    "violations_found": len(violations),
+                },
+            )
+
         # Final summary with structured progress
         self._update_progress(db, self.request.id, 95.0, {
             "stage": "finalizing",
@@ -327,6 +684,12 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
             "error_count": error_count,
             "violations_found": len(violations)
         })
+        self._publish_progress(
+            current=95,
+            total=100,
+            stage="finalizing",
+            extra={"violations_found": len(violations)},
+        )
         
         summary = {
             "total": total,
@@ -341,15 +704,31 @@ def compute_bulk_sla(self: DatabaseTask, device_ids: List[str], period: str) -> 
         logger.info("Bulk SLA computation complete. Violations: %d/%d, Errors: %d", len(violations), total, error_count)
         return summary
 
+    except SoftTimeLimitExceeded as exc:
+        # Issue #531: log graceful cleanup; do not retry a timing-out task.
+        logger.warning(
+            "Bulk SLA computation hit soft time limit — cleaning up gracefully",
+        )
+        self._mark_failure(
+            db,
+            self.request.id,
+            f"SoftTimeLimitExceeded: {exc}",
+            error_code="SOFT_TIME_LIMIT",
+            error_retryable=False,
+        )
+        raise
+
     except Exception as exc:
         error_msg = str(exc)
         logger.exception("Bulk SLA computation failed: %s", error_msg)
-        
-        # Log retry attempt if we have retries left
+
+        error_code = "BULK_SLA_COMPUTATION_ERROR"
+        error_retryable = self.request.retries < self.max_retries
+
         if self.request.retries < self.max_retries:
             self._log_retry(db, self.request.id, self.request.retries + 1, error_msg)
-        
-        self._mark_failure(db, self.request.id, error_msg)
+
+        self._mark_failure(db, self.request.id, error_msg, error_code=error_code, error_retryable=error_retryable)
         raise self.retry(exc=exc)
     finally:
         db.close()

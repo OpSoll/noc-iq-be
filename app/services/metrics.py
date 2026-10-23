@@ -166,6 +166,9 @@ def set_gauge(name: str, value: float, tags: Dict[str, str] = None):
     metrics.set_gauge(name, value, tags)
 
 
+gauge = set_gauge
+
+
 def record_histogram(name: str, value: float, tags: Dict[str, str] = None):
     """Record a histogram value."""
     metrics.record_histogram(name, value, tags)

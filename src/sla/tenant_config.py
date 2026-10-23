@@ -1,0 +1,1 @@
+class TenantConfigRepo:\n    pass\n

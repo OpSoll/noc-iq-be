@@ -1,0 +1,1 @@
+def process_batch():\n    pass\n

@@ -1,7 +1,7 @@
 from prometheus_client import Histogram, Counter, generate_latest, CONTENT_TYPE_LATEST
 from fastapi import APIRouter, Response
 
-router = APIRouter()
+router = APIRouter(tags=["metrics"])
 
 DB_QUERY_DURATION = Histogram(
     "db_query_duration_seconds",

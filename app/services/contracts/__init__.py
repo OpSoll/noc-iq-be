@@ -1,6 +1,13 @@
 from .sla_adapter import SLAContractAdapter
 from .translation import translate_contract_result
-from .bridge_error_mapper import BridgeError, BridgeErrorCode, map_bridge_error, get_timeout_config
+from .bridge_error_mapper import (
+    BridgeError,
+    BridgeErrorCode,
+    bridge_error_to_http,
+    get_timeout_config,
+    http_status_for_bridge_code,
+    map_bridge_error,
+)
 from .execution_guard import ExecutionGuard, ExecutionBlockedError
 from .response_versioning import (
     BridgeResponseV1,
@@ -9,6 +16,9 @@ from .response_versioning import (
     normalize_response,
     get_target_version,
 )
+from .canonicalization import CanonicalRequestBuilder
+from .idempotency import IdempotencyService, idempotency_service
+from .bridge_fallback import BridgeFallbackService
 
 __all__ = [
     "SLAContractAdapter",
@@ -16,6 +26,8 @@ __all__ = [
     "BridgeError",
     "BridgeErrorCode",
     "map_bridge_error",
+    "bridge_error_to_http",
+    "http_status_for_bridge_code",
     "get_timeout_config",
     "ExecutionGuard",
     "ExecutionBlockedError",
@@ -24,15 +36,7 @@ __all__ = [
     "detect_version",
     "normalize_response",
     "get_target_version",
-from .canonicalization import CanonicalRequestBuilder
-
-__all__ = ["SLAContractAdapter", "translate_contract_result", "CanonicalRequestBuilder"]
-from .idempotency import IdempotencyService, idempotency_service
-from .bridge_fallback import BridgeFallbackService
-
-__all__ = [
-    "SLAContractAdapter",
-    "translate_contract_result",
+    "CanonicalRequestBuilder",
     "IdempotencyService",
     "idempotency_service",
     "BridgeFallbackService",

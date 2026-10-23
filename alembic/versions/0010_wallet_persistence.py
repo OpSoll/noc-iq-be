@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 
 revision = "0010_wallet_persistence"
-down_revision = "0009_token_families"
+down_revision = "0009"
 branch_labels = None
 depends_on = None
 

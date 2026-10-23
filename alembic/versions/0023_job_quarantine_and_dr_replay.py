@@ -44,11 +44,14 @@ def upgrade() -> None:
     )
 
     # Extend the jobstatus enum with the QUARANTINED value.
-    # Postgres requires ALTER TYPE ... ADD VALUE, which is idempotent only via
-    # IF NOT EXISTS in PG ≥ 14.
-    op.execute(
-        "ALTER TYPE jobstatus ADD VALUE IF NOT EXISTS 'quarantined'"
-    )
+    # Postgres requires ALTER TYPE ... ADD VALUE, which cannot run inside a
+    # transaction block (ActiveSqlTransaction); the autocommit_block wrapper
+    # commits the DDL statement on its own (Issue #518). IF NOT EXISTS makes
+    # the statement idempotent on PG ≥ 14.
+    with op.get_context().autocommit_block():
+        op.execute(
+            "ALTER TYPE jobstatus ADD VALUE IF NOT EXISTS 'quarantined'"
+        )
 
 
 def downgrade() -> None:

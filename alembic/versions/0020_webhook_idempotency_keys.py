@@ -16,12 +16,15 @@ from datetime import datetime
 
 
 revision = "0020_webhook_idempotency_keys"
-down_revision = "0016_webhook_signature_versioning"
+down_revision = "0020_wallet_lookup_indexes"
 branch_labels = None
 depends_on = None
 
 
 def upgrade() -> None:
+    # pgcrypto provides the digest() function used for idempotency keys
+    op.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+
     # Add event_timestamp column (nullable initially for existing records)
     op.add_column(
         "webhook_deliveries",

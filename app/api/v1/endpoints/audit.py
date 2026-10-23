@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api.pagination import limit as limit_query, offset as offset_query
 from app.services.audit_log import audit_log, BridgeOutcomeClass
 from app.services.trace import build_trace_chain
 from app.schemas.trace import TraceChain
@@ -12,7 +14,18 @@ from app.core.security import require_admin
 router = APIRouter(prefix="/audit", tags=["audit"])
 
 
-@router.get("")
+class AuditLogEntry(BaseModel):
+    """A single structured audit log record."""
+    id: int = Field(..., description="Audit record ID")
+    event_type: str = Field(..., description="Event type (dot-namespaced, e.g. wallet.created)")
+    email: Optional[str] = Field(None, description="Actor email, when available")
+    actor_id: Optional[str] = Field(None, description="Actor identifier, when available")
+    correlation_id: Optional[str] = Field(None, description="Correlation ID tying the event to a request")
+    details: Optional[Dict[str, Any]] = Field(None, description="Structured event details")
+    created_at: Optional[str] = Field(None, description="ISO timestamp the event was recorded")
+
+
+@router.get("", response_model=List[AuditLogEntry])
 def get_audit_log(
     event_type_prefix: Optional[str] = Query(
         None,
@@ -30,8 +43,8 @@ def get_audit_log(
             f"{BridgeOutcomeClass.SEMANTIC_ERROR!r}, {BridgeOutcomeClass.DEGRADED!r}, {BridgeOutcomeClass.UNKNOWN!r}."
         ),
     ),
-    limit: int = Query(50, ge=1, le=500, description="Maximum number of records to return."),
-    offset: int = Query(0, ge=0, description="Number of records to skip for pagination."),
+    limit: int = limit_query(default=50, maximum=500, description="Maximum number of records to return."),
+    offset: int = offset_query(description="Number of records to skip for pagination."),
     current_user=Depends(require_admin),
 ):
     return audit_log.list(

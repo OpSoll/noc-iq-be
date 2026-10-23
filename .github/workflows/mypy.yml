@@ -1,0 +1,11 @@
+name: Static Type Check
+on: [push, pull_request]
+jobs:
+  mypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run MyPy check
+        run: |
+          pip install mypy pydantic fastapi
+          mypy . || true

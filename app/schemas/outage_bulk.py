@@ -1,14 +1,9 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
-
-class OutageItemCreate(BaseModel):
-    service_name: str
-    description: str
-    severity: str
+from app.models.outage_dto import OutageCreate
 
 class BulkOutageCreate(BaseModel):
-    outages: List[OutageItemCreate]
+    outages: List[OutageCreate]
 
 class BulkOutageResponse(BaseModel):
     successful: int

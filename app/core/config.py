@@ -16,6 +16,18 @@ logger = logging.getLogger(__name__)
 
 VALID_STELLAR_NETWORKS = {"testnet", "mainnet", "futurenet", "standalone"}
 VALID_CONTRACT_EXECUTION_MODES = {"local_adapter", "soroban_rpc"}
+# Supported at-rest encryption schemes for Stellar secret keys.
+VALID_KEY_ENCRYPTION_SCHEMES = {"fernet", "aesgcm"}
+
+# SQL transaction isolation levels supported by PostgreSQL. Values must use
+# the exact SQL names (spaces, not underscores) accepted by
+# ``connection.execution_options(isolation_level=...)``.
+VALID_DB_ISOLATION_LEVELS = {
+    "READ UNCOMMITTED",
+    "READ COMMITTED",
+    "REPEATABLE READ",
+    "SERIALIZABLE",
+}
 
 # ---------------------------------------------------------------------------
 # Default secrets for local/dev — must be overridden in production.
@@ -50,11 +62,66 @@ class Settings(BaseSettings):
     # ── Secrets (must be overridden in production) ────────────────────────
     SECRET_KEY: str = _DEFAULT_SECRET
     JWT_SECRET_KEY: str = _DEFAULT_SECRET
+    API_KEY: str = _DEFAULT_SECRET
+
+    # ── JWT ───────────────────────────────────────────────────────────────
+    ALGORITHM: str = "RS256"
+    API_AUDIENCE: str = "https://api.nociq.com"
+
+    @property
+    def PUBLIC_KEY(self) -> str:
+        with open("auth/public_key.pem", "r") as f:
+            return f.read()
+
+    @property
+    def PRIVATE_KEY(self) -> str:
+        with open("auth/private_key.pem", "r") as f:
+            return f.read()
 
     # ── Celery ────────────────────────────────────────────────────────────
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
     CELERY_TASK_ALWAYS_EAGER: bool = True
+
+    # ── Celery execution time limits (issue #531) ─────────────────────────
+    # Soft limit raises ``SoftTimeLimitExceeded`` inside the running task so
+    # it can clean up gracefully; the hard limit SIGKILLs the worker process.
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 60
+    CELERY_TASK_TIME_LIMIT: int = 120
+
+    # ── Celery dead-letter queue (issue #530) ─────────────────────────────
+    CELERY_DEAD_LETTER_QUEUE: str = "celery_dead_letter"
+    CELERY_DEAD_LETTER_ENABLED: bool = True
+
+    # ── Celery queue routing (issue #540) ─────────────────────────────────
+    # Priority task queues. Urgent webhook dispatches are routed to the
+    # ``high_priority`` queue; the default and bulk queues serve the rest.
+    CELERY_TASK_QUEUES: str = "high_priority,default,bulk"
+    # The queue Celery uses when a task does not declare one explicitly.
+    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    # Comma-separated list of queue names that MUST be bound to active
+    # workers at boot (BE-W5-051). Empty means the probe is a no-op.
+    CELERY_REQUIRED_QUEUES: str = ""
+    # Seconds to wait for the queue-binding probe to hear from workers.
+    CELERY_QUEUE_PROBE_TIMEOUT_SECONDS: float = 5.0
+    # When True the worker fails fast if a required queue is not bound.
+    CELERY_STRICT_QUEUE_BINDINGS: bool = True
+
+    # ── Per-task-type worker pools (issue #544) ───────────────────────────
+    # I/O-bound (webhook) tasks run on the eventlet pool with high
+    # concurrency; CPU-bound (SLA/contract) tasks run on prefork with a low
+    # concurrency so DB/CPU pressure stays predictable.
+    CELERY_WEBHOOK_POOL: str = "eventlet"
+    CELERY_CALC_POOL: str = "prefork"
+    CELERY_IO_CONCURRENCY: int = 50
+    CELERY_CPU_CONCURRENCY: int = 4
+
+    # ── DB transaction isolation (issue #526) ─────────────────────────────
+    # Applied to the engine for all transactions (PostgreSQL only).
+    DB_TRANSACTION_ISOLATION_LEVEL: str = "READ COMMITTED"
+    # Isolation level used for the payment deduplication check-then-insert
+    # path so concurrent settlement checks do not suffer from read skew.
+    PAYMENT_DEDUP_ISOLATION_LEVEL: str = "REPEATABLE READ"
 
     # ── Observability ─────────────────────────────────────────────────────
     OTEL_SERVICE_NAME: str = "nociq-api"
@@ -64,17 +131,73 @@ class Settings(BaseSettings):
     SLA_CONTRACT_ADDRESS: str = "local-sla-calculator"
     STELLAR_NETWORK: str = "testnet"
     CONTRACT_EXECUTION_MODE: str = "local_adapter"
+    SLA_CONTRACT_SPEC_PATH: str = ""
+    XLM_PRICE_FEED_URL: str = "https://api.coingecko.com/api/v3/simple/price?ids=stellar&vs_currencies=usd,eur"
     PAYMENT_WEBHOOK_SECRET: str = ""
     PAYMENT_ASSET_CODE: str = "USDC"
     PAYMENT_FROM_ADDRESS: str = "SYSTEM_POOL"
     PAYMENT_TO_ADDRESS: str = "OUTAGE_SETTLEMENT"
     PAYMENT_ASSET_ISSUER: str = ""
 
+    # ── Friendbot auto-faucet (testnet only) ──────────────────────────────
+    # Friendbot funds brand-new testnet accounts with XLM. Testnet resets
+    # wipe balances, so operator wallets are re-funded automatically instead
+    # of by hand.
+    STELLAR_FRIENDBOT_ENABLED: bool = True
+    STELLAR_FRIENDBOT_URL: str = ""          # empty -> derived from network
+    STELLAR_FRIENDBOT_TIMEOUT_SECONDS: float = 30.0
+
+    # ── Operator wallet secret key encryption at rest ─────────────────────
+    # Scheme used to encrypt Stellar secret keys: "fernet" (AES-128-CBC +
+    # HMAC-SHA256) or "aesgcm" (AES-256-GCM). Keys are only ever decrypted
+    # in memory for the duration of a signing operation.
+    STELLAR_KEY_ENCRYPTION_SCHEME: str = "fernet"
+    # Optional dedicated 32-byte url-safe base64 key. When empty the key is
+    # derived from SECRET_KEY via PBKDF2-HMAC-SHA256.
+    STELLAR_KEY_ENCRYPTION_KEY: str = ""
+    # Encrypted operator/pool secret key (ciphertext, never plaintext).
+    STELLAR_OPERATOR_SECRET_ENCRYPTED: str = ""
+
+    # ── Wallet balance threshold monitor ──────────────────────────────────
+    WALLET_BALANCE_MONITOR_ENABLED: bool = True
+    # Beat interval: every 15 minutes.
+    WALLET_BALANCE_CHECK_INTERVAL_SECONDS: int = 900
+    WALLET_MIN_XLM_BALANCE: float = 50.0
+    WALLET_MIN_USDC_BALANCE: float = 500.0
+    # Wallet monitored by default; falls back to PAYMENT_FROM_ADDRESS.
+    WALLET_MONITOR_ADDRESS: str = ""
+    # Optional: POST a JSON alert here when a monitored balance is below its
+    # operational threshold.
+    WALLET_ALERT_WEBHOOK_URL: str = ""
+
     @property
     def horizon_url(self) -> str:
         if self.STELLAR_NETWORK == "mainnet":
             return "https://horizon.stellar.org"
         return "https://horizon-testnet.stellar.org"
+
+    @property
+    def friendbot_url(self) -> str:
+        """Friendbot faucet URL for the configured network.
+
+        Friendbot only exists on the test networks; ``supports_friendbot``
+        gates callers before this is used.
+        """
+        if self.STELLAR_FRIENDBOT_URL:
+            return self.STELLAR_FRIENDBOT_URL.rstrip("/")
+        if self.STELLAR_NETWORK == "futurenet":
+            return "https://friendbot-futurenet.stellar.org"
+        return "https://friendbot.stellar.org"
+
+    @property
+    def supports_friendbot(self) -> bool:
+        """True only on networks that run a Friendbot faucet."""
+        return self.STELLAR_NETWORK in {"testnet", "futurenet"}
+
+    @property
+    def monitored_wallet_address(self) -> str:
+        """Address watched by the balance threshold monitor."""
+        return (self.WALLET_MONITOR_ADDRESS or self.PAYMENT_FROM_ADDRESS).strip()
 
     # ── Auth throttling ───────────────────────────────────────────────────
     AUTH_MAX_FAILED_ATTEMPTS: int = 5
@@ -141,6 +264,9 @@ class Settings(BaseSettings):
     )
     WEBHOOK_REDACTION_MASK: str = "[REDACTED]"
 
+    # ── Delivery log retention ──────────────────────────────────────────
+    WEBHOOK_DELIVERY_LOG_RETENTION_DAYS: int = 30
+
     # ── BE-W5-044 (#305): SLO metrics & alert thresholds ─────────────────
     WEBHOOK_SLO_SUCCESS_TARGET: float = 0.999
     WEBHOOK_SLO_LATENCY_TARGET_MS: int = 5000
@@ -186,6 +312,43 @@ class Settings(BaseSettings):
     WEBHOOK_QUEUE_SCALE_UP_THRESHOLD: int = 100
     WEBHOOK_QUEUE_SCALE_DOWN_THRESHOLD: int = 10
 
+    # Optional alert webhook for the Celery worker heartbeat monitor (#536).
+    # When set, a JSON payload is POSTed here whenever no worker responds to
+    # the ``ping_celery_workers`` beat task.
+    WORKER_ALERT_WEBHOOK_URL: str = ""
+
+    # ── BE-W5-047: Job lease heartbeat ────────────────────────────────────
+    JOB_LEASE_HEARTBEAT_INTERVAL_SECONDS: int = 30
+    JOB_LEASE_TIMEOUT_SECONDS: int = 120
+    JOB_LEASE_RECLAMATION_ENABLED: bool = True
+    JOB_LEASE_RECLAMATION_BATCH_SIZE: int = 50
+
+    # ── BE-W5-048: Retry taxonomy governance ──────────────────────────────
+    JOB_RETRY_CLASS_DEFAULTS: str = (
+        "sla_computation:exponential_backoff:3:30,"
+        "bulk_sla_computation:exponential_backoff:2:60,"
+        "webhook_dispatch:at_least_once:5:30,"
+        "webhook_dr_replay:at_most_once:1:60"
+    )
+    # Format per entry: "job_type:retry_class:max_retries:base_delay_seconds"
+    JOB_RETRY_DEAD_LETTER_ENABLED: bool = True
+    JOB_RETRY_BACKOFF_MAX_DELAY_SECONDS: int = 3600
+    JOB_RETRY_BACKOFF_MULTIPLIER: float = 2.0
+    JOB_RETRY_JITTER_SECONDS: int = 5
+
+    # ── BE-W5-052: Retention tiering ──────────────────────────────────────
+    JOB_RETENTION_SUCCESS_DAYS: int = 30
+    JOB_RETENTION_FAILURE_DAYS: int = 90
+    JOB_RETENTION_REVOKED_DAYS: int = 30
+    JOB_RETENTION_QUARANTINED_DAYS: int = 180
+    JOB_RETENTION_DEAD_LETTER_DAYS: int = 180
+    JOB_RETENTION_AUDIT_CRITICAL_DAYS: int = 365
+    JOB_RETENTION_INVESTIGATION_PROTECTED: bool = True
+    JOB_RETENTION_DISPUTE_PROTECTED: bool = True
+    JOB_RETENTION_DRY_RUN_DEFAULT: bool = False
+    JOB_RETENTION_CLEANUP_BATCH_SIZE: int = 1000
+    JOB_RETENTION_CLEANUP_METRICS_ENABLED: bool = True
+
     # ── DB pool ───────────────────────────────────────────────────────────
     DB_POOL_SATURATION_THRESHOLD: float = 0.9
     DB_POOL_REJECT_AFTER_SECONDS: int = 30
@@ -204,7 +367,33 @@ class Settings(BaseSettings):
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_database_url(cls, v: str) -> str:
+        if v.startswith("sqlite"):
+            return v
         return validate_postgres_url(v)
+
+    @field_validator("DB_TRANSACTION_ISOLATION_LEVEL", "PAYMENT_DEDUP_ISOLATION_LEVEL")
+    @classmethod
+    def _validate_db_isolation_level(cls, v: str) -> str:
+        if v.upper() not in VALID_DB_ISOLATION_LEVELS:
+            raise ValueError(
+                f"{v!r} is not a supported isolation level. "
+                f"Supported: {sorted(VALID_DB_ISOLATION_LEVELS)}"
+            )
+        return v
+
+    @field_validator("CELERY_TASK_SOFT_TIME_LIMIT", "CELERY_TASK_TIME_LIMIT")
+    @classmethod
+    def _validate_celery_time_limits(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Celery time limits must be positive integers")
+        return v
+
+    @field_validator("CELERY_IO_CONCURRENCY", "CELERY_CPU_CONCURRENCY")
+    @classmethod
+    def _validate_celery_concurrency(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("Celery worker concurrency must be a positive integer")
+        return v
 
     @field_validator("CELERY_BROKER_URL")
     @classmethod
@@ -220,6 +409,17 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_jwt_secret_key(cls, v: str) -> str:
         return validate_min_length(v, 32, "JWT_SECRET_KEY")
+
+    @field_validator("STELLAR_KEY_ENCRYPTION_SCHEME")
+    @classmethod
+    def _validate_key_encryption_scheme(cls, v: str) -> str:
+        scheme = v.strip().lower()
+        if scheme not in VALID_KEY_ENCRYPTION_SCHEMES:
+            raise ValueError(
+                f"{v!r} is not a supported secret-key encryption scheme. "
+                f"Supported: {sorted(VALID_KEY_ENCRYPTION_SCHEMES)}"
+            )
+        return scheme
 
 
 settings = Settings()

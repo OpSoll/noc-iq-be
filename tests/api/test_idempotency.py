@@ -3,9 +3,7 @@ from sqlalchemy.orm import Session
 from app.main import app
 import uuid
 
-client = TestClient(app)
-
-def test_idempotency_financial_transaction(db: Session):
+def test_idempotency_financial_transaction(client, db: Session):
     idem_key = str(uuid.uuid4())
     headers = {"idempotency-key": idem_key}
     

@@ -1,13 +1,14 @@
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from celery import Task
+import httpx
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import celery_app, GuardedTask
+from app.core.config import settings as cfg
 from app.db.session import SessionLocal
 from app.models.job import Job, JobStatus, JobType
 from app.services.audit_log import audit_log
@@ -15,12 +16,14 @@ from app.services.audit_log import audit_log
 logger = logging.getLogger(__name__)
 
 
-class WebhookDatabaseTask(Task):
-    """Task base for webhook Celery tasks — tracks progress & supports quarantine.
+class WebhookDatabaseTask(GuardedTask):
+    """Task base for webhook Celery tasks — tracks progress, supports quarantine,
+    and manages lease heartbeats (BE-W5-047).
 
     BE-W5-054: Tasks inherit this base so retries can be quarantined after the
-    per-delivery retry budget is exhausted, and so progress reporting mirrors
-    the existing SLA task tracking.
+    per-delivery retry budget is exhausted.
+    BE-W5-047: Lease heartbeats are recorded for long-running DR replay tasks.
+    Inherits :class:`GuardedTask` for issue #531 execution time-limit cleanup.
     """
 
     abstract = True
@@ -33,6 +36,34 @@ class WebhookDatabaseTask(Task):
 
     def _get_job_by_id(self, db, job_id: str) -> Optional[Job]:
         return db.query(Job).filter(Job.id == job_id).first()
+
+    def _heartbeat(self, db, celery_task_id: str):
+        """BE-W5-047: Extend the lease on a running job."""
+        job = self._get_job(db, celery_task_id)
+        if job and job.status == JobStatus.STARTED:
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(
+                seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+
+    def _mark_started(self, db, celery_task_id: str):
+        """BE-W5-047: Initialise lease on task start."""
+        job = self._get_job(db, celery_task_id)
+        if job:
+            job.status = JobStatus.STARTED
+            job.started_at = datetime.utcnow()
+            job.heartbeat_at = datetime.utcnow()
+            job.lease_expires_at = datetime.utcnow() + timedelta(
+                seconds=cfg.JOB_LEASE_TIMEOUT_SECONDS
+            )
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
 
     def _update_progress(
         self,
@@ -52,17 +83,31 @@ class WebhookDatabaseTask(Task):
                 db.rollback()
 
 
+def _retry_backoff_countdown(retries: int) -> int:
+    """Exponential backoff delay (seconds) for a webhook dispatch retry.
+
+    Matches the 5s, 15s, 45s, ~2m sequence from issue #535:
+    ``5 * 3 ** retries``, capped at ``retry_backoff_max`` (600s).
+    """
+    return min(5 * (3 ** retries), 600)
+
+
 @celery_app.task(
     bind=True,
     name="app.tasks.webhook_tasks.dispatch_webhook_delivery",
+    autoretry_for=(httpx.RequestError,),
+    retry_backoff=True,
+    retry_backoff_max=600,
     max_retries=5,
-    default_retry_delay=30,
+    default_retry_delay=5,
 )
 def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
     """Deliver a single WebhookDelivery record asynchronously.
 
     Issue #302: Delivery is dispatched with partition awareness.
     Backpressure is checked at the service layer before each attempt.
+    Issue #535: Failed dispatches are retried with exponential backoff
+    (5s, 15s, 45s, ~2m), capped at 10 minutes.
     """
     db = SessionLocal()
     try:
@@ -74,8 +119,53 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
         error_msg = str(exc)
         logger.exception("Failed to dispatch webhook delivery %s: %s", delivery_id, error_msg)
 
-        # Log retry attempt if we have retries left
+        # Exponential backoff delay for this retry attempt (5s, 15s, 45s, ~2m),
+        # capped at 600s (10 minutes) to avoid retry storms (issue #535).
+        countdown = _retry_backoff_countdown(self.request.retries)
+        next_retry_eta = datetime.utcnow() + timedelta(seconds=countdown)
+
+        # BE-W5-048: Check if retries are exhausted before raising to Celery
+        if self.request.retries >= self.max_retries:
+            # Retries exhausted — route to dead-letter terminal status
+            job = db.query(Job).filter(Job.celery_task_id == self.request.id).first()
+            if job:
+                job.status = JobStatus.DEAD_LETTER
+                job.dead_letter_reason = (
+                    f"Max retries exhausted ({self.max_retries}). Last error: {error_msg}"
+                )
+                job.dead_letter_at = datetime.utcnow()
+                job.finished_at = datetime.utcnow()
+                job.error = error_msg
+                job.error_code = "WEBHOOK_RETRIES_EXHAUSTED"
+                job.error_retryable = False
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                audit_log.log_event(
+                    db,
+                    event_type="job_dead_lettered",
+                    details={
+                        "delivery_id": delivery_id,
+                        "job_type": JobType.WEBHOOK_DISPATCH.value,
+                        "retry_count": self.request.retries + 1,
+                        "max_retries": self.max_retries,
+                        "error": error_msg,
+                    },
+                )
+            return {"delivery_id": delivery_id, "dispatched": False, "dead_lettered": True}
+
+        # Log retry attempt number and next retry ETA if we have retries left
         if self.request.retries < self.max_retries:
+            logger.warning(
+                "Retrying webhook delivery %s (attempt %d/%d) in %ds "
+                "(next retry ETA: %s).",
+                delivery_id,
+                self.request.retries + 1,
+                self.max_retries,
+                countdown,
+                next_retry_eta.isoformat(),
+            )
             audit_log.log_event(
                 db,
                 event_type="webhook_retried",
@@ -83,10 +173,12 @@ def dispatch_webhook_delivery(self, delivery_id: str) -> Dict[str, Any]:
                     "delivery_id": delivery_id,
                     "retry_count": self.request.retries + 1,
                     "error": error_msg,
+                    "retry_delay_seconds": countdown,
+                    "next_retry_eta": next_retry_eta.isoformat(),
                 }
             )
 
-        raise self.retry(exc=exc)
+        raise self.retry(exc=exc, countdown=countdown)
     finally:
         db.close()
 
@@ -289,5 +381,60 @@ def trigger_sla_violation_async(
             )
 
         raise self.retry(exc=exc)
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------------- #
+# Delivery log retention purging                                               #
+# --------------------------------------------------------------------------- #
+
+
+@celery_app.task(
+    name="app.tasks.webhook_tasks.purge_old_webhook_logs",
+)
+def purge_old_webhook_logs() -> Dict[str, Any]:
+    """Periodic Celery beat task: delete webhook delivery logs older than the
+    configured retention period (default 30 days).
+
+    Runs daily via celery_app.conf.beat_schedule. Logs the number of purged
+    rows for operational visibility.
+    """
+    from app.models.webhook import WebhookDelivery
+
+    retention_days = cfg.WEBHOOK_DELIVERY_LOG_RETENTION_DAYS
+    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+
+    db = SessionLocal()
+    try:
+        # Count matching rows before deletion for logging
+        count_result = (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.created_at < cutoff)
+            .count()
+        )
+
+        if count_result == 0:
+            logger.info("purge_old_webhook_logs: no deliveries older than %d days.", retention_days)
+            return {"purged": 0, "retention_days": retention_days}
+
+        # Delete old delivery records
+        result = (
+            db.query(WebhookDelivery)
+            .filter(WebhookDelivery.created_at < cutoff)
+            .delete(synchronize_session=False)
+        )
+        db.commit()
+        total_purged = result
+
+        logger.info(
+            "purge_old_webhook_logs: purged %d delivery logs older than %d days (cutoff=%s).",
+            total_purged, retention_days, cutoff.isoformat(),
+        )
+        return {"purged": total_purged, "retention_days": retention_days, "cutoff": cutoff.isoformat()}
+    except Exception as exc:
+        logger.exception("purge_old_webhook_logs failed: %s", exc)
+        db.rollback()
+        return {"purged": 0, "error": str(exc)}
     finally:
         db.close()

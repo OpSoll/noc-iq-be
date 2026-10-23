@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
+UTC = timezone.utc
 from uuid import uuid4
 from sqlalchemy.orm import Session
 
@@ -170,13 +171,12 @@ class AuthStore:
         # SQLAlchemy DateTime usually returns naive. We need to compare carefully.
         now = datetime.now(timezone.utc)
         expires_at = session.expires_at
-        if expires_at.tzinfo is not None:
-             now = datetime.now(UTC).replace(tzinfo=None) # Keep it naive for comparison if needed
-             expires_at = expires_at.replace(tzinfo=None)
-
-        if now > expires_at:
-            session_repo.delete_session(hashed_token)
-            return None
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if now > expires_at:
+                session_repo.delete_session(hashed_token)
+                return None
             
         stored_user = user_repo.get_by_email(session.email)
         return user_orm_to_pydantic(stored_user) if stored_user else None
@@ -329,10 +329,12 @@ class AuthStore:
         now = datetime.now(timezone.utc)
         for session in sessions:
             expires_at = session.expires_at
-            if expires_at.tzinfo is not None:
-                expires_at = expires_at.replace(tzinfo=None)
-            
-            is_expired = now > expires_at
+            if expires_at is not None:
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                is_expired = now > expires_at
+            else:
+                is_expired = False
             session_list.append({
                 "access_token_preview": session.access_token[:12] + "..." if session.access_token else None,
                 "refresh_token_preview": session.refresh_token[:12] + "..." if session.refresh_token else None,

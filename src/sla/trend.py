@@ -1,0 +1,1 @@
+def get_trend_chart_data():\n    pass\n

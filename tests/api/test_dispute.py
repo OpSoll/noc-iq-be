@@ -2,9 +2,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 from app.main import app
 
-client = TestClient(app)
-
-def test_sla_dispute_workflow(db: Session):
+def test_sla_dispute_workflow(client, db: Session):
     # Open dispute
     payload = {
         "sla_id": 101,

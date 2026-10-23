@@ -26,6 +26,11 @@ class OutageResolvedDetail(BaseModel):
     mttr_minutes: int
 
 
+class OutageBulkResolvedDetail(BaseModel):
+    event_type: Literal["bulk_resolved"] = "bulk_resolved"
+    resolution_notes: str = Field("", description="Resolution notes applied to the batch")
+
+
 class SLAComputedDetail(BaseModel):
     event_type: Literal["sla_computed"] = "sla_computed"
     status: str  # "met" | "violated"
@@ -41,6 +46,7 @@ OutageEventDetail = Union[
     OutageUpdatedDetail,
     OutagePatchedDetail,
     OutageResolvedDetail,
+    OutageBulkResolvedDetail,
     SLAComputedDetail,
     SLARecomputedDetail,
 ]
@@ -50,6 +56,7 @@ _DETAIL_MAP: Dict[str, type] = {
     "updated": OutageUpdatedDetail,
     "patched": OutagePatchedDetail,
     "resolved": OutageResolvedDetail,
+    "bulk_resolved": OutageBulkResolvedDetail,
     "sla_computed": SLAComputedDetail,
     "sla_recomputed": SLARecomputedDetail,
 }

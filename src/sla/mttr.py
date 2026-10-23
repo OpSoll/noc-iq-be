@@ -1,0 +1,1 @@
+def calculate_mttr_mtbf():\n    pass\n

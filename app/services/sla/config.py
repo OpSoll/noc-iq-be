@@ -8,21 +8,29 @@ SLA_CONFIG = {
         "threshold_minutes": 15,
         "penalty_per_minute": 100,
         "reward_base": 750,
+        "asset_code": "USDC",
+        "asset_issuer": "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
     },
     "high": {
         "threshold_minutes": 30,
         "penalty_per_minute": 50,
         "reward_base": 750,
+        "asset_code": "EURC",
+        "asset_issuer": "GBBD47IF6LWK7P7MHY3FE6KLA_N56LUEVH2326NLGQQPfWCAKSL5L2",
     },
     "medium": {
         "threshold_minutes": 60,
         "penalty_per_minute": 25,
         "reward_base": 750,
+        "asset_code": "XLM",
+        "asset_issuer": None,
     },
     "low": {
         "threshold_minutes": 120,
         "penalty_per_minute": 10,
         "reward_base": 600,
+        "asset_code": "XLM",
+        "asset_issuer": None,
     },
 }
 

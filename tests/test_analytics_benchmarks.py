@@ -9,6 +9,8 @@ Thresholds (configurable via env vars for CI tuning):
   AGGREGATION_LATENCY_THRESHOLD_MS  default 200 ms
   EXPORT_LATENCY_THRESHOLD_MS       default 500 ms
 """
+from __future__ import annotations
+
 import json
 import os
 import time

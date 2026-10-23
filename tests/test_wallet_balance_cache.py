@@ -9,7 +9,8 @@ Covers:
 from __future__ import annotations
 
 import time
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from unittest.mock import patch
 
 import pytest

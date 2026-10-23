@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 
 revision = "0016_webhook_signature_versioning"
-down_revision = "0015_audit_correlation"
+down_revision = "0016_outage_event_schema_version"
 branch_labels = None
 depends_on = None
 

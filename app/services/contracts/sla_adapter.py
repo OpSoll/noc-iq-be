@@ -10,7 +10,8 @@ import hashlib
 import httpx
 import logging
 from dataclasses import dataclass
-from datetime import datetime, UTC
+from datetime import datetime, timezone
+UTC = timezone.utc
 from enum import Enum
 from typing import Any, Callable, Literal, Optional
 
@@ -42,8 +43,23 @@ def classify_error(error: Exception) -> RetryClass:
 
 
 class SLAContractAdapter:
-    """Backend-facing contract adapter (legacy stub)."""
-    pass
+    """Backend-facing contract adapter."""
+
+    @staticmethod
+    def calculate_sla(
+        outage_id: str,
+        severity: str,
+        mttr_minutes: int,
+        policy_version: str = "1.0",
+        threshold_source: str = "config",
+    ) -> dict[str, Any]:
+        return SLACalculator.calculate_sla(
+            outage_id=outage_id,
+            severity=severity,
+            mttr_minutes=mttr_minutes,
+            policy_version=policy_version,
+            threshold_source=threshold_source,
+        )
 
 
 import logging
@@ -151,17 +167,27 @@ class SLAAdapter:
         self,
         address: str,
         asset_code: str,
-        asset_issuer: str,
+        asset_issuer: str | None,
     ) -> TrustlineResult:
         """Return trustline readiness for *address*/*asset_code*.
 
         Non-destructive — only reads from Horizon.
         """
+        # Native (XLM) asset doesn't have a trustline in the same way.
+        # The presence of the account on the ledger is sufficient.
+        if asset_code == "XLM" and asset_issuer is None:
+            return TrustlineResult(
+                status=TrustlineStatus.READY,
+                asset_code=asset_code,
+                asset_issuer=asset_issuer,
+            )
+
         url = f"{self._horizon}/accounts/{address}"
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
+            account_data = resp.json()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return TrustlineResult(
@@ -182,6 +208,32 @@ class SLAAdapter:
                 asset_code=asset_code,
                 asset_issuer=asset_issuer,
             )
+
+        for balance in account_data.get("balances", []):
+            if balance.get("asset_code") == asset_code and balance.get("asset_issuer") == asset_issuer:
+                limit = balance.get("limit")
+                if limit and float(limit) > 0:
+                    return TrustlineResult(
+                        status=TrustlineStatus.READY,
+                        asset_code=asset_code,
+                        asset_issuer=asset_issuer,
+                        balance=balance.get("balance"),
+                        limit=limit,
+                    )
+                else:
+                    return TrustlineResult(
+                        status=TrustlineStatus.LIMIT_ZERO,
+                        asset_code=asset_code,
+                        asset_issuer=asset_issuer,
+                        balance=balance.get("balance"),
+                        limit=limit,
+                    )
+
+        return TrustlineResult(
+            status=TrustlineStatus.MISSING,
+            asset_code=asset_code,
+            asset_issuer=asset_issuer,
+        )
 
         data: dict[str, Any] = resp.json()
         balances: list[dict[str, Any]] = data.get("balances", [])
@@ -210,6 +262,23 @@ class SLAAdapter:
             asset_code=asset_code,
             asset_issuer=asset_issuer,
         )
+
+    async def get_transaction_status(self, transaction_hash: str) -> str:
+        """Get the status of a transaction from Horizon."""
+        url = f"{self._horizon}/transactions/{transaction_hash}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+            return "confirmed"
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return "not_found"
+            logger.error(f"Horizon error checking transaction {transaction_hash}: {exc}")
+            return "failed"
+        except httpx.RequestError as exc:
+            logger.error(f"Horizon request error for transaction {transaction_hash}: {exc}")
+            return "failed"
 
     async def assert_trustline_ready(
         self,

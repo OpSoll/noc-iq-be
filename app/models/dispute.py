@@ -4,6 +4,7 @@ from app.db.base_class import Base
 
 class SlaDispute(Base):
     __tablename__ = "sla_disputes"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(Integer, primary_key=True, index=True)
     sla_id = Column(Integer, index=True, nullable=False)
