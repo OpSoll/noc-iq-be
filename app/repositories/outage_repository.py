@@ -235,6 +235,18 @@ class OutageRepository:
             return None
         return _orm_to_pydantic(row)
 
+    def get_including_deleted(self, outage_id: str) -> Optional[Outage]:
+        """Return an outage regardless of its soft-delete state.
+
+        Used by the delete endpoint to distinguish between a record that never
+        existed (404) and one that has already been soft-deleted (409 Conflict)
+        — Issue #993.
+        """
+        row = self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
+        if not row:
+            return None
+        return _orm_to_pydantic(row)
+
     def get_orm(self, outage_id: str) -> Optional[OutageORM]:
         return self._query_active().filter(OutageORM.id == outage_id).first()
 

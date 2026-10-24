@@ -602,6 +602,22 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
+        # Issue #993: distinguish between "never existed" (404) and "already
+        # soft-deleted" (409 Conflict).  _query_active() filters out deleted
+        # records, so repo.get() returns None for both cases.  We resolve the
+        # ambiguity by doing a second, unfiltered lookup.
+        from sqlalchemy import text as _text
+        already_deleted = repo.get_including_deleted(outage_id)
+        if already_deleted is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ALREADY_DELETED",
+                    "message": "Outage has already been deleted.",
+                    "outage_id": outage_id,
+                    "deleted_at": already_deleted.deleted_at.isoformat() if already_deleted.deleted_at else None,
+                },
+            )
         raise HTTPException(status_code=404, detail="Outage not found")
 
     # Issue #521: soft-delete keeps historical SLA compliance data available
