@@ -231,3 +231,23 @@ def test_payload_size_middleware_enforces_cumulative_chunk_limit(monkeypatch):
     with pytest.raises(HTTPException) as exc_info:
         asyncio.run(middleware.dispatch(request, call_next))
     assert exc_info.value.status_code == 413
+
+
+def test_validation_errors_do_not_echo_secret_input():
+    from app.api.validation import format_validation_errors
+
+    secret = "s3cr3t-token-value"
+    errors = [
+        {
+            "loc": ("body", "api_key"),
+            "msg": "Input should be a valid integer",
+            "type": "int_parsing",
+            "input": secret,
+            "ctx": {"value": secret},
+        }
+    ]
+    result = format_validation_errors(errors)
+
+    assert secret not in str(result)
+    assert result["details"][0]["loc"] == ["body", "api_key"]
+    assert result["details"][0]["type"] == "int_parsing"
