@@ -22,7 +22,7 @@ class DeprecationHeaderMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Callable:
-        is_legacy = request.url.path.startswith(_V0_PREFIX)
+        is_legacy = request.url.path == _V0_PREFIX or request.url.path.startswith(_V0_PREFIX + "/")
         if is_legacy:
             logger.info(
                 "Legacy API V0 invocation",
