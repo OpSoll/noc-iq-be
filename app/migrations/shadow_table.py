@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from sqlalchemy import Table, MetaData, select, text
+from sqlalchemy import Index, Table, MetaData, UniqueConstraint, select, text
 from sqlalchemy.engine import Engine
 
 from app.core.config import settings
@@ -29,6 +29,24 @@ def create_shadow_table(engine: Engine, original_table_name: str) -> str:
         shadow_name,
         metadata,
         *(col.copy() for col in original.columns),
+        # Preserve unique constraints and indexes (names prefixed to avoid
+        # colliding with the original table's objects).
+        *(
+            UniqueConstraint(
+                *[c.name for c in uc.columns],
+                name=f"{shadow_name}_{uc.name}" if uc.name else None,
+            )
+            for uc in original.constraints
+            if isinstance(uc, UniqueConstraint)
+        ),
+        *(
+            Index(
+                f"{shadow_name}_{idx.name}",
+                *[c.name for c in idx.columns],
+                unique=idx.unique,
+            )
+            for idx in original.indexes
+        ),
         extend_existing=True,
     )
     shadow.create(bind=engine, checkfirst=True)
