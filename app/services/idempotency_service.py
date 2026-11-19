@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.orm.idempotency import IdempotencyKeyORM
+from app.models.orm.payment import PaymentTransactionORM
+
+IN_FLIGHT_PAYMENT_STATUSES = {"pending"}
 
 logger = logging.getLogger(__name__)
 
@@ -71,13 +74,32 @@ class IdempotencyService:
             .filter(IdempotencyKeyORM.expires_at < now)
             .all()
         )
-        count = len(expired)
+        if not expired:
+            return 0
+
+        expired_keys = [row.key for row in expired]
+        in_flight_keys = {
+            key
+            for key, in (
+                self.db.query(PaymentTransactionORM.idempotency_key)
+                .filter(
+                    PaymentTransactionORM.idempotency_key.in_(expired_keys),
+                    PaymentTransactionORM.status.in_(IN_FLIGHT_PAYMENT_STATUSES),
+                )
+                .all()
+            )
+        }
+
+        removed = 0
         for row in expired:
+            if row.key in in_flight_keys:
+                continue
             self.db.delete(row)
+            removed += 1
         self.db.commit()
-        metrics.expired_cleaned += count
-        logger.info("Cleaned up %d expired idempotency keys", count)
-        return count
+        metrics.expired_cleaned += removed
+        logger.info("Cleaned up %d expired idempotency keys", removed)
+        return removed
 
     def get_metrics(self) -> dict:
         return {
