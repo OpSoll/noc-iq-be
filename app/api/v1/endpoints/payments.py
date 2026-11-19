@@ -468,7 +468,15 @@ def provider_callback(
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     if effective_nonce:
-        if _is_replay(effective_nonce):
+        try:
+            replayed = _is_replay(effective_nonce)
+        except Exception:
+            audit_log.log(
+                "callback_rejected_nonce_store_unavailable",
+                {"transaction_id": payload.transaction_id, "provider_ref": payload.provider_ref},
+            )
+            raise HTTPException(status_code=503, detail="Replay protection storage unavailable")
+        if replayed:
             audit_log.log(
                 "callback_rejected_replay",
                 {
