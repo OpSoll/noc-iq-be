@@ -41,15 +41,26 @@ def create_next_month_partition(
     """Create the next month's partition; returns the created table name."""
     start, end = compute_next_month_range(now)
     name = partition_name(start)
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                f"CREATE TABLE IF NOT EXISTS {name} "
-                f"PARTITION OF webhook_deliveries "
-                f"FOR VALUES FROM (:start) TO (:end)"
-            ),
-            {"start": start, "end": end},
-        )
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"CREATE TABLE IF NOT EXISTS {name} "
+                    f"PARTITION OF webhook_deliveries "
+                    f"FOR VALUES FROM (:start) TO (:end)"
+                ),
+                {"start": start, "end": end},
+            )
+    except Exception:
+        # Another worker may have created the partition between the existence
+        # check and the DDL (duplicate-create race). Recheck catalog state:
+        # treat as success if the partition now exists, otherwise re-raise.
+        with engine.connect() as conn:
+            exists = conn.execute(
+                text("SELECT to_regclass(:name) IS NOT NULL"), {"name": name}
+            ).scalar()
+        if not exists:
+            raise
     return name
 
 
