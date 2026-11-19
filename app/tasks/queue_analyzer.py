@@ -44,6 +44,7 @@ PARTITIONS: list[str] = getattr(settings, "CELERY_PARTITIONS", _DEFAULT_PARTITIO
 class PartitionDepth:
     partition: str
     depth: int
+    available: bool = True  # False when the broker read failed (depth is unknown)
 
 
 @dataclass
@@ -89,7 +90,7 @@ class QueueAnalyzer:
 
     # -- data collection -----------------------------------------------------
 
-    def _get_queue_depth(self, queue_name: str) -> int:
+    def _get_queue_depth(self, queue_name: str) -> int | None:
         """Return the number of pending messages in *queue_name*.
 
         Uses the ``length()`` method of the Celery broker transport, which
@@ -100,19 +101,24 @@ class QueueAnalyzer:
             queue = conn.default_channel.queues(queue_name)
             return queue.length()
         except Exception:
-            # If the broker is unreachable we return 0 so the rest of the
-            # pipeline can still function.
+            # Broker unreachable: depth is unknown, not zero.
             logger.warning("Could not read depth for queue '%s'", queue_name)
-            return 0
+            return None
 
     def analyze(self) -> AnalysisResult:
         """Build a full analysis snapshot."""
-        depths = [PartitionDepth(partition=p, depth=self._get_queue_depth(p)) for p in self._partitions]
-        total = sum(d.depth for d in depths)
-        avg = total / len(depths) if depths else 0.0
+        raw = [(p, self._get_queue_depth(p)) for p in self._partitions]
+        depths = [
+            PartitionDepth(partition=p, depth=d if d is not None else 0, available=d is not None)
+            for p, d in raw
+        ]
+        # Unavailable partitions are flagged and excluded from totals/hotspots.
+        live = [d for d in depths if d.available]
+        total = sum(d.depth for d in live)
+        avg = total / len(live) if live else 0.0
 
-        hotspots = self.get_hotspots(depths, avg)
-        suggestions = self.suggest_rebalance(depths, hotspots)
+        hotspots = self.get_hotspots(live, avg)
+        suggestions = self.suggest_rebalance(live, hotspots)
 
         return AnalysisResult(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -198,7 +204,7 @@ class QueueAnalyzer:
             "total_depth": result.total_depth,
             "avg_depth": round(result.avg_depth, 2),
             "partitions": [
-                {"partition": d.partition, "depth": d.depth}
+                {"partition": d.partition, "depth": d.depth, "available": d.available}
                 for d in result.partitions
             ],
             "hotspots": [
