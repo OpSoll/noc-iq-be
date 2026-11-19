@@ -8,6 +8,7 @@ import time
 from typing import Any, Dict, List
 
 from app.models.sla import SLADashboardKPI, SLATrendPoint, SLAPerformanceAggregation
+from app.utils.csv_safety import sanitize_csv_row
 
 # ---------------------------------------------------------------------------
 # Benchmark regression thresholds
@@ -64,7 +65,7 @@ def export_dashboard_kpi(kpi: SLADashboardKPI, format: str = "json") -> Any:
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=data.keys())
     writer.writeheader()
-    writer.writerow(data)
+    writer.writerow(sanitize_csv_row(data))
     return buffer.getvalue()
 
 
@@ -95,7 +96,7 @@ def export_trends(trends: list[SLATrendPoint], format: str = "json") -> Any:
     writer = csv.DictWriter(buffer, fieldnames=data[0].keys())
     writer.writeheader()
     for row in data:
-        writer.writerow(row)
+        writer.writerow(sanitize_csv_row(row))
     return buffer.getvalue()
 
 
@@ -123,7 +124,7 @@ def export_performance_aggregation(
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=data.keys())
     writer.writeheader()
-    writer.writerow(data)
+    writer.writerow(sanitize_csv_row(data))
     return buffer.getvalue()
 
 
@@ -168,7 +169,7 @@ def export_analytics_summary(
     buffer.write("# KPI Metrics\n")
     kpi_writer = csv.DictWriter(buffer, fieldnames=summary["kpi"].keys())
     kpi_writer.writeheader()
-    kpi_writer.writerow(summary["kpi"])
+    kpi_writer.writerow(sanitize_csv_row(summary["kpi"]))
     buffer.write("\n")
     
     # Trends section
@@ -178,7 +179,7 @@ def export_analytics_summary(
         trend_writer = csv.DictWriter(buffer, fieldnames=trend_data[0].keys())
         trend_writer.writeheader()
         for row in trend_data:
-            trend_writer.writerow(row)
+            trend_writer.writerow(sanitize_csv_row(row))
     else:
         buffer.write("date,total_outages,violations,rewards,penalties\n")
     buffer.write("\n")
@@ -188,7 +189,7 @@ def export_analytics_summary(
         buffer.write("# Performance Aggregation\n")
         agg_writer = csv.DictWriter(buffer, fieldnames=summary["aggregation"].keys())
         agg_writer.writeheader()
-        agg_writer.writerow(summary["aggregation"])
+        agg_writer.writerow(sanitize_csv_row(summary["aggregation"]))
     
     return buffer.getvalue()
 

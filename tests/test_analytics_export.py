@@ -222,6 +222,27 @@ def test_export_trends_csv(db: Session):
     assert len(rows) >= 0
 
 
+def test_export_trends_csv_escapes_formula_prefixes():
+    from app.models.sla import SLATrendPoint
+    from app.utils.analytics_exporter import export_trends
+
+    prefixes = ("=", "+", "-", "@")
+    for prefix in prefixes:
+        trend = SLATrendPoint(
+            date=f"{prefix}1+1",
+            total_outages=2,
+            violations=1,
+            rewards=10.5,
+            penalties=3.0,
+        )
+
+        rows = list(csv.DictReader(io.StringIO(export_trends([trend], format="csv"))))
+
+        assert rows[0]["date"] == f"'{prefix}1+1"
+        assert rows[0]["total_outages"] == "2"
+        assert rows[0]["rewards"] == "10.5"
+
+
 def test_export_performance_aggregation_json(db: Session):
     """Test exporting performance aggregation in JSON format."""
     email = "export_perf_json@example.com"
