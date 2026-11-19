@@ -353,10 +353,18 @@ def bulk_resolve_outages(
             payload.outage_ids,
             resolution_notes=payload.resolution_notes,
         )
-        db.commit()
+        if result["failed"]:
+            db.rollback()
+            result["failed"].extend(
+                {"id": outage_id, "reason": "batch_rolled_back"}
+                for outage_id in result["succeeded"]
+            )
+            result["succeeded"] = []
+        else:
+            db.commit()
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Bulk resolve failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Bulk resolve failed") from exc
 
     for outage_id in result["succeeded"]:
         audit_log.log("outage_resolved", {"id": outage_id, "bulk": True, "resolution_notes": payload.resolution_notes})

@@ -443,8 +443,8 @@ class OutageRepository:
                 continue
             try:
                 self.validate_status_transition(orm.status, OutageStatus.resolved.value)
-            except ValueError as exc:
-                failed.append({"id": outage_id, "reason": str(exc)})
+            except ValueError:
+                failed.append({"id": outage_id, "reason": "invalid_transition"})
                 continue
             orm.status = OutageStatus.resolved.value
             orm.resolved_at = datetime.now(timezone.utc)
