@@ -36,6 +36,9 @@ class WalletLinkRequest(BaseModel):
     @field_validator("public_key")
     @classmethod
     def validate_stellar_public_key(cls, v: str) -> str:
+        # Issue #902: normalise surrounding whitespace before validating so a
+        # pasted address with stray spaces is not rejected.
+        v = v.strip()
         if not _STELLAR_PUBLIC_KEY_RE.match(v):
             raise ValueError(
                 "public_key must be a valid Stellar public key (starts with G, 56 characters, base32 alphabet)"
