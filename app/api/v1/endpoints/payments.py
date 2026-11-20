@@ -189,6 +189,30 @@ def get_accounting_report(
     )
 
 
+class SettlementAsset(BaseModel):
+    """An asset the payment pipeline can settle in (Issue #883)."""
+
+    code: str = Field(..., description="Asset code, e.g. XLM or USDC")
+    issuer: Optional[str] = Field(None, description="Issuer account for non-native assets")
+    native: bool = Field(..., description="True for the native XLM asset")
+
+
+@router.get("/assets", response_model=List[SettlementAsset])
+def list_settlement_assets(current_user=Depends(require_engineer)):
+    """List configured settlement assets and their issuers (Issue #883)."""
+    assets = [SettlementAsset(code="XLM", issuer=None, native=True)]
+    code = settings.PAYMENT_ASSET_CODE.strip()
+    if code and code != "XLM":
+        assets.append(
+            SettlementAsset(
+                code=code,
+                issuer=settings.PAYMENT_ASSET_ISSUER.strip() or None,
+                native=False,
+            )
+        )
+    return assets
+
+
 @router.get("/ping", response_model=EnvelopeResponse)
 def payments_ping():
     return _envelope(data={"message": "payments ok"})

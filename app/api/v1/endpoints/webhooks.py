@@ -306,6 +306,15 @@ def _serialize_delivery(delivery: WebhookDelivery) -> WebhookDeliveryResponse:
 # Endpoints                                                                    #
 # --------------------------------------------------------------------------- #
 
+@router.get("/event-types", response_model=List[str])
+def list_event_types(current_user=Depends(require_admin)):
+    """List the webhook event names clients may subscribe to (Issue #884).
+
+    Declared before ``/{webhook_id}`` so the literal path is not parsed as an id.
+    """
+    return [event.value for event in WebhookEvent]
+
+
 @router.post("", response_model=WebhookResponse, status_code=status.HTTP_201_CREATED)
 def create_webhook(payload: WebhookCreate, current_user=Depends(require_admin), db: Session = Depends(get_db)):
     # Encrypt custom headers before storage
