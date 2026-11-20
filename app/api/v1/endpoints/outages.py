@@ -262,6 +262,20 @@ def list_outages(
     return result
 
 
+# Issue #885: site id autocomplete, declared before /{outage_id} so the literal
+# path is not parsed as an outage id.
+@router.get("/site-ids", response_model=List[str])
+def list_site_ids(
+    prefix: str | None = Query(
+        default=None, description="Only site ids starting with this prefix"
+    ),
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Return distinct, alphabetically ordered outage site ids."""
+    return OutageRepository(db).list_site_ids(prefix=prefix)
+
+
 @router.get("/deleted", response_model=PaginatedOutages)
 def list_deleted_outages(
     limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100)."),

@@ -21,6 +21,7 @@ from app.models.sla import (
 )
 from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
+from app.services.sla.sla_calculator import SLA_REASON_CODES
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
 from app.services.sla_service import compute_device_sla, simulate_threshold_change
 from app.services.sla_metric_registry import list_metrics
@@ -60,6 +61,30 @@ class SLASummaryResponse(BaseModel):
     schema_version: str = Field(..., description="Version of the summary payload schema")
     data: List[Dict[str, Any]] = Field(..., description="Aggregated SLA metric rows")
     is_empty: bool = Field(..., description="True when no metric rows matched the window")
+
+
+class SLAReasonCode(BaseModel):
+    """A reason code the SLA calculator can emit (Issue #881)."""
+
+    code: str = Field(..., description="Reason code value")
+    description: str = Field(..., description="When the calculator emits this code")
+
+
+_REASON_CODE_DESCRIPTIONS = {
+    "mttr_exceeded": "MTTR exceeded the severity threshold; a penalty applies",
+    "met_exceptional": "SLA met with an exceptional performance ratio",
+    "met_excellent": "SLA met with an excellent performance ratio",
+    "met_good": "SLA met within the threshold",
+}
+
+
+@router.get("/reason-codes", response_model=List[SLAReasonCode])
+def list_sla_reason_codes(current_user=Depends(require_engineer)):
+    """List the canonical SLA reason codes produced by the calculator (Issue #881)."""
+    return [
+        SLAReasonCode(code=code, description=_REASON_CODE_DESCRIPTIONS[code])
+        for code in SLA_REASON_CODES
+    ]
 
 
 def _invalidate_analytics_cache() -> None:

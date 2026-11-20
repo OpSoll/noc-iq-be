@@ -16,6 +16,15 @@ _UPTIME_QUANTUM = Decimal("0.0001")
 
 _SEVERITIES = ("critical", "high", "medium", "low")
 
+# Issue #881: the authoritative reason codes emitted by this calculator.
+# Kept next to the branches that produce them so the list cannot drift.
+SLA_REASON_CODES: tuple[str, ...] = (
+    "mttr_exceeded",
+    "met_exceptional",
+    "met_excellent",
+    "met_good",
+)
+
 
 def validate_mttr(mttr_minutes: int) -> int:
     """Validate that an MTTR value falls within the supported range (#546).

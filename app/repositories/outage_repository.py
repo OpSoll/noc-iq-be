@@ -156,6 +156,18 @@ class OutageRepository:
 
         return query.count()
 
+    def list_site_ids(self, prefix: Optional[str] = None) -> List[str]:
+        """Return distinct, sorted site ids for active outages (Issue #885)."""
+        query = self.db.query(OutageORM.site_id).filter(
+            OutageORM.is_deleted.is_(False),
+            OutageORM.site_id.isnot(None),
+            OutageORM.site_id != "",
+        )
+        if prefix:
+            query = query.filter(OutageORM.site_id.ilike(f"{prefix}%"))
+        rows = query.distinct().order_by(OutageORM.site_id.asc()).all()
+        return [row[0] for row in rows]
+
     def list_all(self) -> List[Outage]:
         rows = self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False)).all()
         return [_orm_to_pydantic(r) for r in rows]
