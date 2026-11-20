@@ -145,6 +145,9 @@ def export_outages_endpoint(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    affected_service: str | None = Query(
+        default=None, description="Only outages affecting this service (#887)"
+    ),
     columns: str | None = Query(
         default=None,
         description=(
@@ -177,6 +180,7 @@ def export_outages_endpoint(
             search=search,
             start_date=start_date,
             end_date=end_date,
+            affected_service=affected_service,
         )
         return StreamingResponse(
             stream_outages_csv(batches, columns=selected),
@@ -190,6 +194,7 @@ def export_outages_endpoint(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        affected_service=affected_service,
     )
     try:
         exported = export_outages(data, format, columns=selected)
@@ -211,6 +216,9 @@ def list_outages(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    affected_service: str | None = Query(
+        default=None, description="Only outages affecting this service (#887)"
+    ),
     limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500)."),
     offset: int = offset_query(description="Number of records to skip for pagination."),
     include_deleted: bool = Query(False, description="Include soft-deleted outages"),
@@ -251,6 +259,7 @@ def list_outages(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        affected_service=affected_service,
         limit=limit,
         offset=offset,
         sort_by=sort_by,
@@ -260,6 +269,17 @@ def list_outages(
     # without issuing an extra request.
     response.headers["X-Total-Count"] = str(result["total"])
     return result
+
+
+# Issue #886: distinct assignee values, declared before /{outage_id} so the
+# literal path is not parsed as an outage id.
+@router.get("/assignees", response_model=List[str])
+def list_assignees(
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Return the distinct, alphabetically ordered outage assignees."""
+    return OutageRepository(db).list_assignees()
 
 
 @router.get("/deleted", response_model=PaginatedOutages)

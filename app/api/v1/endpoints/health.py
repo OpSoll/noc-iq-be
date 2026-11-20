@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
+# Issue #890: captured once at import so every request reports the same start
+# time and a monotonically growing uptime.
+_PROCESS_STARTED_AT = datetime.utcnow()
+
 
 def _check_database() -> bool:
     try:
@@ -96,9 +100,13 @@ def detailed_health() -> JSONResponse:
     all_healthy = db_ok and redis_ok and broker_ok and workers.get("status") != "down"
     status = "ok" if all_healthy else "degraded"
 
+    now = datetime.utcnow()
     payload = {
         "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": now.isoformat(),
+        # Issue #890: how long this process has been running.
+        "uptime_seconds": round((now - _PROCESS_STARTED_AT).total_seconds(), 3),
+        "started_at": _PROCESS_STARTED_AT.isoformat(),
         "dependencies": {
             "database": "ok" if db_ok else "down",
             "redis": "ok" if redis_ok else "down",
