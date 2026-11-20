@@ -4,8 +4,10 @@ from datetime import datetime
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.api.pagination import page_number, page_size as page_size_query
 from app.db.session import get_db
 from app.models.sla_dispute import DisputeAuditLog, SLADispute, DisputeStatus
 from app.models.orm.sla import SLAResultORM
@@ -24,20 +26,34 @@ from app.repositories.sla_repository import SLARepository
 router = APIRouter()
 
 
+class PaginatedDisputes(BaseModel):
+    """Bounded page of SLA disputes (Issue #889)."""
+
+    items: list[DisputeResponse] = Field(..., description="Disputes on this page")
+    total: int = Field(..., ge=0, description="Total disputes matching the filter")
+    page: int = Field(..., ge=1, description="Current page (1-indexed)")
+    page_size: int = Field(..., ge=1, description="Disputes per page")
+
+
 @router.get(
     "/disputes",
-    response_model=list[DisputeResponse],
+    response_model=PaginatedDisputes,
     summary="List SLA disputes",
 )
 def list_disputes(
     status_filter: DisputeStatus | None = Query(default=None, alias="status"),
+    page: int = page_number(),
+    page_size: int = page_size_query(default=20, maximum=100, description="Disputes per page (1-100)."),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):
     query = db.query(SLADispute).order_by(SLADispute.flagged_at.desc())
     if status_filter is not None:
         query = query.filter(SLADispute.status == status_filter)
-    return query.all()
+
+    total = query.count()
+    items = query.offset((page - 1) * page_size).limit(page_size).all()
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
 @router.post(

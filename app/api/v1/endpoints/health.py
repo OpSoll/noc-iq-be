@@ -7,6 +7,7 @@ configuration inspection (issue #994).
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict
 
@@ -202,6 +203,24 @@ def _build_settings_snapshot() -> Dict[str, Any]:
 
     # Sort each section for deterministic output.
     return {section: dict(sorted(items.items())) for section, items in grouped.items()}
+
+
+@router.get("/health/version")
+def get_build_version() -> Dict[str, str]:
+    """Return the configured version plus optional build metadata (Issue #891).
+
+    ``commit`` and ``build_time`` are read from the deployment environment and
+    omitted when unset. Only these public identifiers are returned; no secret
+    settings are exposed.
+    """
+    payload: Dict[str, str] = {"version": settings.VERSION}
+    commit = os.environ.get("GIT_COMMIT") or os.environ.get("BUILD_COMMIT")
+    build_time = os.environ.get("BUILD_TIME")
+    if commit:
+        payload["commit"] = commit
+    if build_time:
+        payload["build_time"] = build_time
+    return payload
 
 
 @router.get("/health/settings")

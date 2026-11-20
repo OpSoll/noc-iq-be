@@ -145,6 +145,9 @@ def export_outages_endpoint(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    assigned_to: str | None = Query(
+        default=None, description="Only outages assigned to this owner (#888)"
+    ),
     columns: str | None = Query(
         default=None,
         description=(
@@ -177,6 +180,7 @@ def export_outages_endpoint(
             search=search,
             start_date=start_date,
             end_date=end_date,
+            assigned_to=assigned_to,
         )
         return StreamingResponse(
             stream_outages_csv(batches, columns=selected),
@@ -190,6 +194,7 @@ def export_outages_endpoint(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        assigned_to=assigned_to,
     )
     try:
         exported = export_outages(data, format, columns=selected)
@@ -211,6 +216,9 @@ def list_outages(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    assigned_to: str | None = Query(
+        default=None, description="Only outages assigned to this owner (#888)"
+    ),
     limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500)."),
     offset: int = offset_query(description="Number of records to skip for pagination."),
     include_deleted: bool = Query(False, description="Include soft-deleted outages"),
@@ -251,6 +259,7 @@ def list_outages(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        assigned_to=assigned_to,
         limit=limit,
         offset=offset,
         sort_by=sort_by,

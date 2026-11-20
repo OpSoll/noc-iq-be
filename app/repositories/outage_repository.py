@@ -68,6 +68,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        assigned_to: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
         sort_by: OutageSortField = OutageSortField.detected_at,
@@ -87,6 +88,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if assigned_to:
+            query = query.filter(OutageORM.assigned_to == assigned_to)
 
         if search:
             search_filter = or_(
@@ -167,6 +170,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        assigned_to: Optional[str] = None,
     ) -> List[Outage]:
         query = self.db.query(OutageORM)
         query = query.filter(OutageORM.is_deleted.is_(False))
@@ -174,6 +178,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if assigned_to:
+            query = query.filter(OutageORM.assigned_to == assigned_to)
         if search:
             query = query.filter(
                 or_(
@@ -195,6 +201,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        assigned_to: Optional[str] = None,
         chunk_size: int = 500,
     ) -> Iterator[List[Outage]]:
         """Yield filtered outages in batches of ``chunk_size`` rows.
@@ -207,6 +214,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if assigned_to:
+            query = query.filter(OutageORM.assigned_to == assigned_to)
         if search:
             query = query.filter(
                 or_(
