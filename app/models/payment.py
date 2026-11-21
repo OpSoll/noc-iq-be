@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, FrozenSet, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # Maximum time a transaction can remain unsubmitted (seconds)
@@ -72,19 +72,24 @@ class PaymentTransitionError(ValueError):
         self.allowed = allowed
         super().__init__(
             f"Transition from '{current}' to '{next_status}' is not allowed. "
-            f"Allowed: {allowed or 'none'}"
+            f"Allowed: {sorted(allowed)}"
         )
 
 
 def validate_transition(current: str, next_status: str) -> None:
-    """Raise :class:`PaymentTransitionError` if the transition is not allowed.
+    """Validate that a status transition is allowed.
 
-    This is the single authoritative policy for payment status transitions.
-    All code paths – retry, reconcile, callback – MUST call this function
-    rather than implementing their own transition logic.
+    Raises PaymentTransitionError if the transition is not in VALID_TRANSITIONS.
     """
     try:
         current_enum = PaymentStatus(current)
+    except ValueError:
+        raise PaymentTransitionError(
+            current=current,
+            next_status=next_status,
+            allowed=set(),
+        )
+    try:
         next_enum = PaymentStatus(next_status)
     except ValueError:
         raise PaymentTransitionError(
@@ -103,9 +108,26 @@ class TimeBounds(BaseModel):
 
     min_time: Earliest valid submission time (0 = no lower bound).
     max_time: Latest valid submission time (transaction expires after this).
+
+    Invalid configurations (negative values, or max_time < min_time when set)
+    are rejected at construction time for security-relevant expiry rules.
     """
     min_time: int = 0
     max_time: int = 0
+
+    @field_validator("min_time", "max_time")
+    @classmethod
+    def non_negative_bounds(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError("time bound values must be non-negative")
+        return v
+
+    @model_validator(mode="after")
+    def max_ge_min_when_set(self) -> "TimeBounds":
+        # max_time == 0 means "no upper bound set" (unset); allow any min_time.
+        if self.max_time > 0 and self.max_time < self.min_time:
+            raise ValueError("max_time must be greater than or equal to min_time")
+        return self
 
     @classmethod
     def default_for_transaction(cls, now_utc: Optional[datetime] = None) -> "TimeBounds":
@@ -148,12 +170,8 @@ class PaymentTransaction(BaseModel):
                 "confirmed_at": "2026-01-01T01:00:00Z",
                 "retry_count": 0,
                 "last_retried_at": None,
-                "dead_letter_reason": None,
-                "dead_lettered_at": None,
-                "residual": 0.0,
                 "time_bounds_min": 0,
                 "time_bounds_max": 1735689600,
-                "fee_re_estimation_pending": False,
             }
         }
     )

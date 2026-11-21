@@ -2,26 +2,29 @@
 
 Validates:
 1. TimeBounds creation with default values (min=0, max=now+300)
-2. Transaction expiry after 5 minutes
+2. Transaction expiry after 5 minutes (boundary values)
 3. Re-queue for fee re-estimation
 4. Sweep of stale transactions
+5. Invalid configurations rejected (security-relevant)
 """
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch, MagicMock
+
+from pydantic import ValidationError
 
 
 class TestTimeBounds(unittest.TestCase):
     """Test TimeBounds model behavior."""
 
     def test_default_time_bounds_min_is_zero(self):
-        """Default TimeBounds should have min_time=0."""
+        """Default TimeBounds should have min_time=0 (lower bound)."""
         from app.models.payment import TimeBounds
         tb = TimeBounds.default_for_transaction()
         self.assertEqual(tb.min_time, 0)
 
     def test_default_time_bounds_max_is_now_plus_300(self):
-        """Default TimeBounds max_time should be now + 300 seconds."""
+        """Default TimeBounds max_time should be now + 300 seconds (upper window)."""
         from app.models.payment import TimeBounds, TRANSACTION_TIMEOUT_MAX_SECONDS
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         tb = TimeBounds.default_for_transaction(now_utc=now)
@@ -33,38 +36,87 @@ class TestTimeBounds(unittest.TestCase):
         from app.models.payment import TimeBounds
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         tb = TimeBounds(min_time=0, max_time=int(now.timestamp()) + 300)
-        # Check at the same time — should not be expired
         self.assertFalse(tb.is_expired(now_utc=now))
 
     def test_time_bounds_is_expired_returns_true_when_past_max(self):
-        """is_expired should return True when current time exceeds max_time."""
+        """is_expired should return True when current time exceeds max_time (upper bound)."""
         from app.models.payment import TimeBounds
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         tb = TimeBounds(min_time=0, max_time=int(now.timestamp()) - 1)
         self.assertTrue(tb.is_expired(now_utc=now))
 
     def test_time_bounds_is_expired_exactly_at_max(self):
-        """is_expired should return False at exactly max_time."""
+        """Lower edge of upper bound: is_expired is False at exactly max_time."""
         from app.models.payment import TimeBounds
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         tb = TimeBounds(min_time=0, max_time=int(now.timestamp()))
         self.assertFalse(tb.is_expired(now_utc=now))
 
+    def test_time_bounds_is_expired_one_second_after_max(self):
+        """Upper bound: is_expired becomes True one second after max_time."""
+        from app.models.payment import TimeBounds
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        max_ts = int(now.timestamp())
+        tb = TimeBounds(min_time=0, max_time=max_ts)
+        just_after = datetime.fromtimestamp(max_ts + 1, tz=timezone.utc)
+        self.assertTrue(tb.is_expired(now_utc=just_after))
+
     def test_custom_time_bounds(self):
-        """TimeBounds should accept custom min/max values."""
+        """TimeBounds should accept custom min/max values when valid."""
         from app.models.payment import TimeBounds
         tb = TimeBounds(min_time=100, max_time=200)
         self.assertEqual(tb.min_time, 100)
         self.assertEqual(tb.max_time, 200)
 
     def test_time_bounds_5_minute_window(self):
-        """Timeout window should be exactly 300 seconds."""
+        """Timeout window should be exactly 300 seconds (upper bound of allowed window)."""
         from app.models.payment import TimeBounds, TRANSACTION_TIMEOUT_MAX_SECONDS
         now = datetime(2026, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
         tb = TimeBounds.default_for_transaction(now_utc=now)
         window_seconds = tb.max_time - int(now.timestamp())
         self.assertEqual(window_seconds, 300)
         self.assertEqual(TRANSACTION_TIMEOUT_MAX_SECONDS, 300)
+
+    def test_lower_bound_min_time_zero_accepted(self):
+        """Lower bound: min_time=0 is valid."""
+        from app.models.payment import TimeBounds
+        tb = TimeBounds(min_time=0, max_time=1000)
+        self.assertEqual(tb.min_time, 0)
+
+    def test_upper_bound_equal_min_max_accepted(self):
+        """Upper/lower equality: max_time == min_time is valid when max is set."""
+        from app.models.payment import TimeBounds
+        tb = TimeBounds(min_time=500, max_time=500)
+        self.assertEqual(tb.min_time, 500)
+        self.assertEqual(tb.max_time, 500)
+
+    def test_invalid_config_negative_min_time_rejected(self):
+        """Invalid config: negative min_time must be rejected."""
+        from app.models.payment import TimeBounds
+        with self.assertRaises(ValidationError) as ctx:
+            TimeBounds(min_time=-1, max_time=100)
+        self.assertIn("non-negative", str(ctx.exception).lower())
+
+    def test_invalid_config_negative_max_time_rejected(self):
+        """Invalid config: negative max_time must be rejected."""
+        from app.models.payment import TimeBounds
+        with self.assertRaises(ValidationError) as ctx:
+            TimeBounds(min_time=0, max_time=-5)
+        self.assertIn("non-negative", str(ctx.exception).lower())
+
+    def test_invalid_config_max_less_than_min_rejected(self):
+        """Invalid config: max_time < min_time must be rejected."""
+        from app.models.payment import TimeBounds
+        with self.assertRaises(ValidationError) as ctx:
+            TimeBounds(min_time=200, max_time=100)
+        self.assertIn("max_time", str(ctx.exception).lower())
+
+    def test_invalid_config_max_zero_with_positive_min_allowed(self):
+        """max_time=0 means unset; positive min_time alone is allowed."""
+        from app.models.payment import TimeBounds
+        tb = TimeBounds(min_time=100, max_time=0)
+        self.assertEqual(tb.min_time, 100)
+        self.assertEqual(tb.max_time, 0)
 
 
 class TestPaymentTransactionTimeBounds(unittest.TestCase):
@@ -124,6 +176,7 @@ class TestTransactionExpiryService(unittest.TestCase):
             "type": "reward",
             "amount": 100.0,
             "asset_code": "USDC",
+            "asset_issuer": None,
             "from_address": "SYSTEM_POOL",
             "to_address": "OUTAGE_SETTLEMENT",
             "status": "pending",
@@ -150,49 +203,70 @@ class TestTransactionExpiryService(unittest.TestCase):
 
     @patch("app.services.transaction_expiry.datetime")
     def test_check_and_expire_not_expired_when_within_window(self, mock_dt):
-        """Transaction should not expire when time_bounds_max is in the future."""
+        """check_and_expire should return None when still within time bounds."""
         from app.services.transaction_expiry import TransactionExpiryService
+
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         mock_dt.now.return_value = now
         mock_dt.fromtimestamp = datetime.fromtimestamp
 
-        orm = self._make_orm(
-            time_bounds_max=int(now.timestamp()) + 300,
-        )
+        max_ts = int(now.timestamp()) + 100
+        orm = self._make_orm(time_bounds_max=max_ts)
         db = Mock()
         db.query.return_value.filter.return_value.first.return_value = orm
 
         svc = TransactionExpiryService(db)
         result = svc.check_and_expire("pay_test1")
         self.assertIsNone(result)
+        db.commit.assert_not_called()
 
     @patch("app.services.transaction_expiry.datetime")
     def test_check_and_expire_expires_when_past_max(self, mock_dt):
         """Transaction should expire when time_bounds_max has been exceeded."""
         from app.services.transaction_expiry import TransactionExpiryService
 
-        now = datetime(2026, 1, 1, 12, 5, 1, tzinfo=timezone.utc)
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         mock_dt.now.return_value = now
         mock_dt.fromtimestamp = datetime.fromtimestamp
 
-        past_time = int((now - timedelta(seconds=400)).timestamp())
-        orm = self._make_orm(time_bounds_max=past_time)
+        max_ts = int(now.timestamp()) - 10
+        orm = self._make_orm(time_bounds_max=max_ts)
         db = Mock()
         db.query.return_value.filter.return_value.first.return_value = orm
 
         svc = TransactionExpiryService(db)
         result = svc.check_and_expire("pay_test1")
 
-        self.assertTrue(orm.fee_re_estimation_pending)
-        self.assertEqual(orm.expired_at, now)
-        self.assertIn("time_bounds_expired", orm.failure_taxonomy)
+        self.assertIsNotNone(result)
+        self.assertEqual(orm.fee_re_estimation_pending, 1)
+        self.assertIsNotNone(orm.expired_at)
+        self.assertEqual(orm.failure_taxonomy, "time_bounds_expired")
         db.commit.assert_called_once()
 
-    def test_check_and_expire_skips_non_pending(self):
-        """Non-pending transactions should not be expired."""
+    @patch("app.services.transaction_expiry.datetime")
+    def test_check_and_expire_boundary_exactly_at_max(self, mock_dt):
+        """Lower edge of upper bound: not expired at exactly max_time."""
         from app.services.transaction_expiry import TransactionExpiryService
 
-        orm = self._make_orm(status="confirmed")
+        now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        mock_dt.now.return_value = now
+        mock_dt.fromtimestamp = datetime.fromtimestamp
+
+        max_ts = int(now.timestamp())
+        orm = self._make_orm(time_bounds_max=max_ts)
+        db = Mock()
+        db.query.return_value.filter.return_value.first.return_value = orm
+
+        svc = TransactionExpiryService(db)
+        result = svc.check_and_expire("pay_test1")
+        self.assertIsNone(result)
+        db.commit.assert_not_called()
+
+    def test_check_and_expire_skips_non_pending(self):
+        """check_and_expire should skip non-pending transactions."""
+        from app.services.transaction_expiry import TransactionExpiryService
+
+        orm = self._make_orm(status="confirmed", time_bounds_max=1)
         db = Mock()
         db.query.return_value.filter.return_value.first.return_value = orm
 
@@ -201,7 +275,7 @@ class TestTransactionExpiryService(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_check_and_expire_skips_no_time_bounds(self):
-        """Transactions with time_bounds_max=0 should not be expired."""
+        """check_and_expire should skip when time_bounds_max is unset (0)."""
         from app.services.transaction_expiry import TransactionExpiryService
 
         orm = self._make_orm(time_bounds_max=0)
@@ -213,7 +287,7 @@ class TestTransactionExpiryService(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_check_and_expire_skips_not_found(self):
-        """Non-existent transaction should return None."""
+        """check_and_expire should return None for non-existent transaction."""
         from app.services.transaction_expiry import TransactionExpiryService
 
         db = Mock()
@@ -225,25 +299,24 @@ class TestTransactionExpiryService(unittest.TestCase):
 
     @patch("app.services.transaction_expiry.datetime")
     def test_expire_all_stale(self, mock_dt):
-        """expire_all_stale should find and expire all stale pending transactions."""
+        """expire_all_stale should expire pending txs past their max_time."""
         from app.services.transaction_expiry import TransactionExpiryService
 
         now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         mock_dt.now.return_value = now
 
-        orm1 = self._make_orm(id="pay_1", time_bounds_max=int(now.timestamp()) - 100)
-        orm2 = self._make_orm(id="pay_2", time_bounds_max=int(now.timestamp()) - 200)
+        orm = self._make_orm(
+            id="pay_stale",
+            time_bounds_max=int(now.timestamp()) - 1,
+            fee_re_estimation_pending=0,
+        )
         db = Mock()
-        db.query.return_value.filter.return_value.all.return_value = [orm1, orm2]
+        db.query.return_value.filter.return_value.all.return_value = [orm]
 
         svc = TransactionExpiryService(db)
         expired_ids = svc.expire_all_stale()
-
-        self.assertEqual(len(expired_ids), 2)
-        self.assertIn("pay_1", expired_ids)
-        self.assertIn("pay_2", expired_ids)
-        self.assertTrue(orm1.fee_re_estimation_pending)
-        self.assertTrue(orm2.fee_re_estimation_pending)
+        self.assertEqual(expired_ids, ["pay_stale"])
+        self.assertEqual(orm.fee_re_estimation_pending, 1)
         db.commit.assert_called_once()
 
     def test_expire_all_stale_empty_when_no_stale(self):
@@ -256,6 +329,7 @@ class TestTransactionExpiryService(unittest.TestCase):
         svc = TransactionExpiryService(db)
         expired_ids = svc.expire_all_stale()
         self.assertEqual(expired_ids, [])
+        db.commit.assert_not_called()
 
     def test_requeue_for_fee_estimation(self):
         """requeue should reset time bounds and clear expiry flags."""

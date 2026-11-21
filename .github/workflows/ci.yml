@@ -209,7 +209,7 @@ jobs:
           pip install -r requirements.txt
           pip install pytest alembic celery
 
-      - name: Run Stellar Wave integration checks
+      - name: Run integration-oriented checks
         run: |
           mkdir -p test-results
           set -o pipefail
@@ -227,7 +227,7 @@ jobs:
 
   # =========================================================================
   # BENCHMARKS (Issue #376)
-  # Runs on push to main / release branches. Artifact retained 30 days.
+  # Runs independently on push to main / release/**
   # =========================================================================
   benchmarks:
     name: "Analytics Benchmark Suite"
