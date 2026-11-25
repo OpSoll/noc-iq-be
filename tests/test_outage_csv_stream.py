@@ -53,6 +53,44 @@ def test_csv_export_streams_with_attachment_header(client: TestClient, db: Sessi
     assert "site_name" in rows[0]
 
 
+def test_csv_export_escapes_formula_prefixes_and_preserves_other_values(
+    client: TestClient, db: Session
+):
+    prefixes = ("=", "+", "-", "@")
+    outage_ids = [f"out-csv-formula-{uuid.uuid4().hex}" for _ in prefixes]
+    for index, prefix in enumerate(prefixes):
+        db.add(
+            OutageORM(
+                id=outage_ids[index],
+                site_name=f"{prefix}1+1",
+                site_id="site_formula",
+                severity="high",
+                status="open",
+                detected_at=datetime.now(timezone.utc),
+                description="Ordinary outage text",
+                affected_services=["4G"],
+                affected_subscribers=42,
+            )
+        )
+    db.commit()
+
+    app.dependency_overrides[require_engineer] = lambda: {"user_id": "test", "role": "engineer"}
+    try:
+        response = client.get("/api/v1/outages/export?format=csv")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    rows_by_id = {row["id"]: row for row in rows}
+
+    for index, prefix in enumerate(prefixes):
+        row = rows_by_id[outage_ids[index]]
+        assert row["site_name"] == f"'{prefix}1+1"
+        assert row["description"] == "Ordinary outage text"
+        assert row["affected_subscribers"] == "42"
+
+
 def test_csv_export_filters_by_status(client: TestClient, db: Session):
     _make_outage(db, "out-csv-open")
     resolved = OutageORM(

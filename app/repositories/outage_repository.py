@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
-from sqlalchemy import and_, asc, desc, or_
+from sqlalchemy import String, and_, asc, cast, desc, or_
 from sqlalchemy.orm import Session
 
 from app.core.outage_state_machine import (
@@ -56,6 +56,17 @@ class OutageRepository:
     def __init__(self, db: Session):
         self.db = db
 
+    def _affected_service_clause(self, affected_service: str):
+        """Match outages whose ``affected_services`` contains a given entry.
+
+        The column is a native array on PostgreSQL and JSON elsewhere, so the
+        containment check has to branch on the dialect. Both branches compare a
+        whole entry, not a substring: ``web`` must not match ``webhook``.
+        """
+        if self.db.bind is not None and self.db.bind.dialect.name == "postgresql":
+            return OutageORM.affected_services.any(affected_service)
+        return cast(OutageORM.affected_services, String).like(f'%"{affected_service}"%')
+
     @staticmethod
     def validate_status_transition(current_status: str, new_status: str) -> None:
         """Delegate to the outage state machine (Issue #664)."""
@@ -68,6 +79,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        affected_service: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
         sort_by: OutageSortField = OutageSortField.detected_at,
@@ -87,6 +99,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if affected_service:
+            query = query.filter(self._affected_service_clause(affected_service))
 
         if search:
             search_filter = or_(
@@ -156,6 +170,21 @@ class OutageRepository:
 
         return query.count()
 
+    def list_assignees(self) -> List[str]:
+        """Return distinct, non-empty assignees for active outages (Issue #886)."""
+        rows = (
+            self.db.query(OutageORM.assigned_to)
+            .filter(
+                OutageORM.is_deleted.is_(False),
+                OutageORM.assigned_to.isnot(None),
+                OutageORM.assigned_to != "",
+            )
+            .distinct()
+            .order_by(OutageORM.assigned_to.asc())
+            .all()
+        )
+        return [row[0] for row in rows]
+
     def list_all(self) -> List[Outage]:
         rows = self.db.query(OutageORM).filter(OutageORM.is_deleted.is_(False)).all()
         return [_orm_to_pydantic(r) for r in rows]
@@ -167,6 +196,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        affected_service: Optional[str] = None,
     ) -> List[Outage]:
         query = self.db.query(OutageORM)
         query = query.filter(OutageORM.is_deleted.is_(False))
@@ -174,6 +204,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if affected_service:
+            query = query.filter(self._affected_service_clause(affected_service))
         if search:
             query = query.filter(
                 or_(
@@ -195,6 +227,7 @@ class OutageRepository:
         search: Optional[str] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
+        affected_service: Optional[str] = None,
         chunk_size: int = 500,
     ) -> Iterator[List[Outage]]:
         """Yield filtered outages in batches of ``chunk_size`` rows.
@@ -207,6 +240,8 @@ class OutageRepository:
             query = query.filter(OutageORM.severity == severity.value)
         if status:
             query = query.filter(OutageORM.status == status.value)
+        if affected_service:
+            query = query.filter(self._affected_service_clause(affected_service))
         if search:
             query = query.filter(
                 or_(
@@ -231,6 +266,18 @@ class OutageRepository:
 
     def get(self, outage_id: str) -> Optional[Outage]:
         row = self._query_active().filter(OutageORM.id == outage_id).first()
+        if not row:
+            return None
+        return _orm_to_pydantic(row)
+
+    def get_including_deleted(self, outage_id: str) -> Optional[Outage]:
+        """Return an outage regardless of its soft-delete state.
+
+        Used by the delete endpoint to distinguish between a record that never
+        existed (404) and one that has already been soft-deleted (409 Conflict)
+        — Issue #993.
+        """
+        row = self.db.query(OutageORM).filter(OutageORM.id == outage_id).first()
         if not row:
             return None
         return _orm_to_pydantic(row)
@@ -431,8 +478,8 @@ class OutageRepository:
                 continue
             try:
                 self.validate_status_transition(orm.status, OutageStatus.resolved.value)
-            except ValueError as exc:
-                failed.append({"id": outage_id, "reason": str(exc)})
+            except ValueError:
+                failed.append({"id": outage_id, "reason": "invalid_transition"})
                 continue
             orm.status = OutageStatus.resolved.value
             orm.resolved_at = datetime.now(timezone.utc)

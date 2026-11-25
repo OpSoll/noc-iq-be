@@ -173,5 +173,23 @@ class TestMainExitCode(unittest.TestCase):
         self.assertEqual(code, 1)
 
 
+class TestNormalizeGenerated(unittest.TestCase):
+    def test_timestamp_only_difference_is_ignored(self):
+        a = "Generated on 2026-01-01T00:00:00Z\n`GET /api/v1/outages`\n"
+        b = "Generated on 2026-02-02T10:11:12Z\n`GET /api/v1/outages`\n"
+        self.assertEqual(
+            drift_module.normalize_generated(a), drift_module.normalize_generated(b)
+        )
+        c = "generated_at: 2026-03-03T01:02:03+00:00\nKEY=1\n"
+        self.assertEqual(drift_module.normalize_generated(c).strip(), "KEY=1")
+
+    def test_real_change_still_differs(self):
+        a = "Generated on 2026-01-01T00:00:00Z\n`GET /api/v1/outages`\n"
+        b = "Generated on 2026-01-01T00:00:00Z\n`GET /api/v1/sla`\n"
+        self.assertNotEqual(
+            drift_module.normalize_generated(a), drift_module.normalize_generated(b)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

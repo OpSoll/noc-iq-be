@@ -66,20 +66,66 @@ class TestBulkResolve:
 
     def test_missing_ids_reported_as_failed(self, client: TestClient, db: Session):
         id1 = f"out-br-{uuid.uuid4().hex[:8]}-1"
+        missing_id = "out-does-not-exist-xyz"
         _seed_outage(db, id1)
 
         response = client.post(
             "/api/v1/outages/bulk-resolve",
-            json={"outage_ids": [id1, "out-does-not-exist-xyz"], "resolution_notes": ""},
+            json={"outage_ids": [id1, missing_id], "resolution_notes": ""},
             headers=AUTH,
         )
 
         assert response.status_code == 200
         body = response.json()
-        assert body["succeeded"] == [id1]
-        assert body["failure_count"] == 1
-        assert body["failed"][0]["id"] == "out-does-not-exist-xyz"
-        assert body["failed"][0]["reason"] == "not_found"
+        assert body["succeeded"] == []
+        assert body["success_count"] == 0
+        assert body["failure_count"] == 2
+        assert body["failed"] == [
+            {"id": missing_id, "reason": "not_found"},
+            {"id": id1, "reason": "batch_rolled_back"},
+        ]
+        assert "database" not in response.text.lower()
+
+        detail = client.get(f"/api/v1/outages/{id1}", headers=AUTH)
+        assert detail.status_code == 200
+        assert detail.json()["status"] == "open"
+
+    def test_invalid_row_rolls_back_valid_rows(self, client: TestClient, db: Session):
+        valid_id = f"out-br-{uuid.uuid4().hex[:8]}-valid"
+        invalid_id = f"out-br-{uuid.uuid4().hex[:8]}-invalid"
+        _seed_outage(db, valid_id)
+        _seed_outage(db, invalid_id)
+
+        from app.models.orm.outage import OutageORM
+
+        db.query(OutageORM).filter(OutageORM.id == invalid_id).update(
+            {OutageORM.status: "draft"}
+        )
+        db.commit()
+
+        response = client.post(
+            "/api/v1/outages/bulk-resolve",
+            json={
+                "outage_ids": [valid_id, invalid_id],
+                "resolution_notes": "batch fix",
+            },
+            headers=AUTH,
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["succeeded"] == []
+        assert body["failed"] == [
+            {"id": invalid_id, "reason": "invalid_transition"},
+            {"id": valid_id, "reason": "batch_rolled_back"},
+        ]
+        assert "draft" not in response.text.lower()
+        assert "database" not in response.text.lower()
+
+        for outage_id, expected_status in ((valid_id, "open"), (invalid_id, "draft")):
+            detail = client.get(f"/api/v1/outages/{outage_id}", headers=AUTH)
+            assert detail.status_code == 200
+            assert detail.json()["status"] == expected_status
 
     def test_invalid_transition_reported_as_failed(self, client: TestClient, db: Session):
         # resolved -> resolved is idempotent; create one resolved and one open.

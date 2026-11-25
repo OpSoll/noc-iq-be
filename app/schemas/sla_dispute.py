@@ -17,6 +17,21 @@ class DisputeResolveRequest(BaseModel):
     apply_proposed: bool = Field(default=False, description="Whether to apply the proposed SLA result as the new latest")
 
 
+def paginate_evidence(items, limit=20, offset=0, max_limit=100):
+    """Bounded page over evidence metadata, independent of dispute list paging."""
+    limit = max(1, min(limit, max_limit))
+    offset = max(0, offset)
+    page = list(items)[offset:offset + limit]
+    total = len(items)
+    return {
+        "items": page,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": offset + len(page) < total,
+    }
+
+
 class DisputeResponse(BaseModel):
     id: str
     sla_result_id: int
@@ -29,6 +44,7 @@ class DisputeResponse(BaseModel):
     resolved_by: Optional[str] = None
     resolution_notes: Optional[str] = None
     resolved_at: Optional[datetime] = None
+    evidence_page: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True

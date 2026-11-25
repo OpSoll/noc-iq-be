@@ -1056,3 +1056,55 @@ unreachable), never that balances are fine.
 | `WALLET_MIN_USDC_BALANCE` | `500` | Settlement asset alert threshold |
 | `WALLET_MONITOR_ADDRESS` | *(`PAYMENT_FROM_ADDRESS`)* | Wallet to watch |
 | `WALLET_ALERT_WEBHOOK_URL` | *(empty)* | Optional alert sink |
+
+## Provider callback retry contract
+
+Endpoint: `POST /api/v1/payments/provider-callback` (see
+`app/api/v1/endpoints/payments.py`).
+
+**Request**
+
+Body (`ProviderCallbackRequest`):
+
+```json
+{
+  "transaction_id": "<payment id>",
+  "status": "<new payment status>",
+  "provider_ref": "<optional provider reference>",
+  "nonce": "<optional unique value>"
+}
+```
+
+Headers: `X-Webhook-Signature` and, optionally, `X-Callback-Nonce`. If both a
+header nonce and a body `nonce` are sent, the header wins.
+
+**Signature**
+
+When `PAYMENT_WEBHOOK_SECRET` is configured, the signature is required: it is
+the hex HMAC-SHA256 of `<transaction_id>:<status>:<nonce>` (empty string when
+no nonce is sent), keyed with the secret. Missing or invalid signatures return
+`401`.
+
+**Nonce and idempotency**
+
+- A nonce, when supplied, must be unique within a 5-minute window
+  (`CALLBACK_NONCE_TTL_SECONDS`). Reusing it returns `409 Conflict`.
+- The seen-nonce cache is held in process memory, so it is per backend process
+  and is lost on restart.
+- Because the nonce is recorded before the payment is processed, a retry that
+  reuses the nonce after a timeout gets `409` even if the first attempt was
+  applied. Check the payment (`GET /api/v1/payments/{transaction_id}`) rather
+  than resending.
+- A callback that sets a payment to the status it already has returns `200`
+  with the unchanged record, so re-delivery with a fresh nonce is safe.
+
+**Response codes**
+
+| Code | Meaning | Retry? |
+|---|---|---|
+| `200` | Applied, or already in that status | No |
+| `401` | Missing or invalid signature | No; fix the signature |
+| `404` | Unknown `transaction_id` | No |
+| `409` | Duplicate nonce | No; do not resend with the same nonce |
+| `422` | Invalid status transition | No |
+| `5xx` / network error | Not handled by this endpoint's contract | Yes, with a fresh nonce and a new signature; confirm payment state first |

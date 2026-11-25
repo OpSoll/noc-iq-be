@@ -1,7 +1,32 @@
 import csv
 import io
+import logging
+from typing import Optional
+from urllib.parse import quote
+
+from app.core.config import settings
 from app.services.sla import calculate_sla
 from app.models.enums import OutageStatus
+
+logger = logging.getLogger(__name__)
+
+EXPLORER_TRANSACTION_URLS = {
+    "testnet": "https://explorer.stellar.org/#/transaction/",
+    "mainnet": "https://stellar.expert/explorer/public/tx/",
+}
+
+
+def build_transaction_explorer_url(
+    transaction_hash: str,
+    network: Optional[str] = None,
+) -> Optional[str]:
+    """Return a network-specific transaction link, or None for unknown networks."""
+    network_name = (network or settings.STELLAR_NETWORK).strip().lower()
+    base_url = EXPLORER_TRANSACTION_URLS.get(network_name)
+    if not base_url:
+        logger.warning("explorer.transaction_url.unsupported_network")
+        return None
+    return f"{base_url}{quote(str(transaction_hash).strip(), safe='')}"
 
 
 def export_outages(outages: list, format: str):

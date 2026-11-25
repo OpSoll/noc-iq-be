@@ -1,5 +1,5 @@
 import uuid
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import Optional
 
 # Context variable to store correlation ID across the request lifecycle
@@ -11,9 +11,14 @@ def get_correlation_id() -> Optional[str]:
     return correlation_id_var.get()
 
 
-def set_correlation_id(correlation_id: str) -> None:
+def set_correlation_id(correlation_id: str) -> Token[Optional[str]]:
     """Set the correlation ID in the current context."""
-    correlation_id_var.set(correlation_id)
+    return correlation_id_var.set(correlation_id)
+
+
+def reset_correlation_id(token: Token[Optional[str]]) -> None:
+    """Restore the correlation ID context to its previous value."""
+    correlation_id_var.reset(token)
 
 
 def generate_correlation_id() -> str:

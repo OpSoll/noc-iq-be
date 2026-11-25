@@ -37,6 +37,14 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 # Parsing helpers
 # ---------------------------------------------------------------------------
 
+_ISO_TS = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?")
+_GENERATED_LINE = re.compile(r"^.*\bgenerated[ _](?:on|at)\b.*$\n?", re.IGNORECASE | re.MULTILINE)
+
+
+def normalize_generated(text: str) -> str:
+    """Strip generated-timestamp noise so timestamp-only edits are not drift."""
+    return _ISO_TS.sub("", _GENERATED_LINE.sub("", text))
+
 def parse_documented_endpoints(api_md: Path) -> set[str]:
     """
     Extract HTTP method + path tokens from docs/API.md.
@@ -46,7 +54,7 @@ def parse_documented_endpoints(api_md: Path) -> set[str]:
         **POST** `/api/v1/auth/login`
         `GET /api/v1/sla/analytics/dashboard`
     """
-    text = api_md.read_text(encoding="utf-8", errors="replace")
+    text = normalize_generated(api_md.read_text(encoding="utf-8", errors="replace"))
     patterns = [
         r"`(?:GET|POST|PUT|PATCH|DELETE)\s+(/[^\s`]+)`",  # inline code
         r"(?:^|\s)(?:GET|POST|PUT|PATCH|DELETE)\s+(/api[^\s`\)]+)",  # plain text
@@ -102,7 +110,9 @@ def parse_env_example_keys(env_example: Path) -> set[str]:
     if not env_example.exists():
         return set()
     keys: set[str] = set()
-    for line in env_example.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in normalize_generated(
+        env_example.read_text(encoding="utf-8", errors="replace")
+    ).splitlines():
         line = line.strip().lstrip("#").strip()
         if "=" in line:
             key = line.split("=", 1)[0].strip()

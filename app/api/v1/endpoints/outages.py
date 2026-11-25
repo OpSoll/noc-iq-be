@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.api.pagination import limit as limit_query, offset as offset_query, page_number, page_size as page_size_query
 from app.models import BulkOutageCreate, Outage, OutageCreate, OutageUpdate
 from app.models.enums import OutageStatus, Severity
 from app.models.outage import (
@@ -144,6 +145,9 @@ def export_outages_endpoint(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
+    affected_service: str | None = Query(
+        default=None, description="Only outages affecting this service (#887)"
+    ),
     columns: str | None = Query(
         default=None,
         description=(
@@ -176,6 +180,7 @@ def export_outages_endpoint(
             search=search,
             start_date=start_date,
             end_date=end_date,
+            affected_service=affected_service,
         )
         return StreamingResponse(
             stream_outages_csv(batches, columns=selected),
@@ -189,6 +194,7 @@ def export_outages_endpoint(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        affected_service=affected_service,
     )
     try:
         exported = export_outages(data, format, columns=selected)
@@ -210,17 +216,11 @@ def list_outages(
     search: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=100,
-        description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500).",
+    affected_service: str | None = Query(
+        default=None, description="Only outages affecting this service (#887)"
     ),
-    offset: int = Query(
-        default=0,
-        ge=0,
-        description="Number of records to skip for pagination.",
-    ),
+    limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100). Guards against unbounded result sets (Issue #500)."),
+    offset: int = offset_query(description="Number of records to skip for pagination."),
     include_deleted: bool = Query(False, description="Include soft-deleted outages"),
     sort_by: OutageSortField = Query(
         default=OutageSortField.detected_at,
@@ -259,6 +259,7 @@ def list_outages(
         search=search,
         start_date=start_date,
         end_date=end_date,
+        affected_service=affected_service,
         limit=limit,
         offset=offset,
         sort_by=sort_by,
@@ -270,15 +271,21 @@ def list_outages(
     return result
 
 
+# Issue #886: distinct assignee values, declared before /{outage_id} so the
+# literal path is not parsed as an outage id.
+@router.get("/assignees", response_model=List[str])
+def list_assignees(
+    current_user=Depends(require_engineer),
+    db: Session = Depends(get_db),
+):
+    """Return the distinct, alphabetically ordered outage assignees."""
+    return OutageRepository(db).list_assignees()
+
+
 @router.get("/deleted", response_model=PaginatedOutages)
 def list_deleted_outages(
-    limit: int = Query(
-        default=50,
-        ge=1,
-        le=100,
-        description="Maximum number of records to return (1-100).",
-    ),
-    offset: int = Query(default=0, ge=0, description="Number of records to skip for pagination."),
+    limit: int = limit_query(default=50, maximum=100, description="Maximum number of records to return (1-100)."),
+    offset: int = offset_query(description="Number of records to skip for pagination."),
 ):
     items = outage_store.list_deleted()
     total = len(items)
@@ -366,10 +373,18 @@ def bulk_resolve_outages(
             payload.outage_ids,
             resolution_notes=payload.resolution_notes,
         )
-        db.commit()
+        if result["failed"]:
+            db.rollback()
+            result["failed"].extend(
+                {"id": outage_id, "reason": "batch_rolled_back"}
+                for outage_id in result["succeeded"]
+            )
+            result["succeeded"] = []
+        else:
+            db.commit()
     except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Bulk resolve failed: {exc}") from exc
+        raise HTTPException(status_code=500, detail="Bulk resolve failed") from exc
 
     for outage_id in result["succeeded"]:
         audit_log.log("outage_resolved", {"id": outage_id, "bulk": True, "resolution_notes": payload.resolution_notes})
@@ -615,6 +630,22 @@ def delete_outage(outage_id: str, current_user=Depends(require_admin), db: Sessi
     repo = OutageRepository(db)
     existing = repo.get(outage_id)
     if not existing:
+        # Issue #993: distinguish between "never existed" (404) and "already
+        # soft-deleted" (409 Conflict).  _query_active() filters out deleted
+        # records, so repo.get() returns None for both cases.  We resolve the
+        # ambiguity by doing a second, unfiltered lookup.
+        from sqlalchemy import text as _text
+        already_deleted = repo.get_including_deleted(outage_id)
+        if already_deleted is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ALREADY_DELETED",
+                    "message": "Outage has already been deleted.",
+                    "outage_id": outage_id,
+                    "deleted_at": already_deleted.deleted_at.isoformat() if already_deleted.deleted_at else None,
+                },
+            )
         raise HTTPException(status_code=404, detail="Outage not found")
 
     # Issue #521: soft-delete keeps historical SLA compliance data available
@@ -767,8 +798,8 @@ def get_outage_timeline(
     event_type: str | None = None,
     start_date: datetime | None = None,
     end_date: datetime | None = None,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page: int = page_number(),
+    page_size: int = page_size_query(),
     current_user=Depends(require_engineer),
     db: Session = Depends(get_db),
 ):

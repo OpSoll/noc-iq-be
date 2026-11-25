@@ -176,6 +176,21 @@ def _resolve_and_check_ip(hostname: str) -> Tuple[bool, str]:
     return False, ""
 
 
+def _validate_webhook_scheme(parsed) -> Optional[Tuple[bool, str]]:
+    """Enforce HTTPS in production and allow loopback HTTP only in dev mode."""
+    scheme = (parsed.scheme or "").lower()
+    hostname = (parsed.hostname or "").lower()
+    loopback_hosts = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+    if scheme == "https":
+        return None
+    if scheme == "http":
+        if settings.DEBUG and hostname in loopback_hosts:
+            return None
+        return False, "Webhook URLs must use HTTPS outside local development"
+    return False, "Webhook URLs must use http or https"
+
+
 def validate_webhook_url(url_str: str) -> Tuple[bool, str]:
     """Validate a webhook URL for SSRF safety.
 
@@ -193,6 +208,10 @@ def validate_webhook_url(url_str: str) -> Tuple[bool, str]:
         parsed = urlparse(url_str)
     except Exception:
         return False, "Malformed URL"
+
+    scheme_error = _validate_webhook_scheme(parsed)
+    if scheme_error:
+        return scheme_error
 
     hostname = parsed.hostname or ""
 
@@ -220,6 +239,10 @@ def validate_webhook_url_fast(url_str: str) -> Tuple[bool, str]:
         _init_ssrf_config()
 
     parsed = urlparse(url_str)
+    scheme_error = _validate_webhook_scheme(parsed)
+    if scheme_error:
+        return scheme_error
+
     hostname = parsed.hostname or ""
 
     # Check denylist hostnames (fast path, no DNS)

@@ -201,3 +201,26 @@ class TestRouteSummaryAndTags:
 
         assert not _lacks_docs(APIRoute("/a", lambda: {}, methods=["GET"], summary="Probe"))
         assert not _lacks_docs(APIRoute("/b", documented, methods=["GET"]))
+
+
+def _depends_on(dependant, target) -> bool:
+    return any(
+        sub.call is target or _depends_on(sub, target) for sub in dependant.dependencies
+    )
+
+
+class TestProtectedRouteAuthMetadata:
+    def test_protected_routes_expose_authorization_header(self):
+        from app.core.security import get_current_user
+
+        paths = app.openapi()["paths"]
+        missing = []
+        for route in _routes():
+            if not _depends_on(route.dependant, get_current_user):
+                continue
+            for method in route.methods:
+                op = paths[route.path][method.lower()]
+                names = {p["name"].lower() for p in op.get("parameters", []) if p["in"] == "header"}
+                if "authorization" not in names:
+                    missing.append(f"{method} {route.path}")
+        assert not missing, f"Protected routes lacking auth metadata in OpenAPI: {sorted(missing)}"

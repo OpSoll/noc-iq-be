@@ -85,6 +85,7 @@ class WalletBalanceHealth:
             "thresholds": {k: str(v) for k, v in self.thresholds.items()},
             "breaches": [b.as_dict() for b in self.breaches],
             "error": self.error,
+            "freshness": {"source": "live", "age_seconds": 0, "stale": False},
         }
 
 
@@ -185,7 +186,7 @@ class WalletBalanceMonitor:
                 status=STATUS_UNKNOWN,
                 checked_at=now,
                 thresholds=thresholds,
-                error=f"Balance fetch failed: {exc}",
+                error=f"Balance fetch failed: {type(exc).__name__}",
             )
 
         breaches = self.evaluate(balances)
@@ -262,7 +263,32 @@ class WalletBalanceMonitor:
         try:
             raw = self._get_redis().get(WALLET_BALANCE_REDIS_KEY)
             if raw:
-                return json.loads(raw)
+                snapshot = json.loads(raw)
+                checked_at = snapshot.get("checked_at")
+                age_seconds: Optional[int] = None
+                stale = True
+                if checked_at:
+                    try:
+                        parsed = datetime.fromisoformat(str(checked_at).replace("Z", "+00:00"))
+                        if parsed.tzinfo is None:
+                            parsed = parsed.replace(tzinfo=UTC)
+                        age_seconds = max(0, int((datetime.now(UTC) - parsed).total_seconds()))
+                        stale = age_seconds > WALLET_BALANCE_TTL_SECONDS
+                    except (TypeError, ValueError):
+                        age_seconds = None
+                        stale = True
+                snapshot["freshness"] = {
+                    "source": "cache",
+                    "age_seconds": age_seconds,
+                    "stale": stale,
+                }
+                if stale:
+                    snapshot["status"] = STATUS_UNKNOWN
+                    snapshot["healthy"] = None
+                    snapshot["balances"] = {}
+                    snapshot["breaches"] = []
+                    snapshot["error"] = "Cached wallet balance snapshot is stale."
+                return snapshot
         except Exception:
             logger.warning("Failed to read wallet balance health from Redis")
 
@@ -276,6 +302,7 @@ class WalletBalanceMonitor:
             "thresholds": {k: str(v) for k, v in thresholds.items()},
             "breaches": [],
             "error": "No wallet balance check has been recorded yet.",
+            "freshness": {"source": "unavailable", "age_seconds": None, "stale": True},
         }
 
     # ── Beat entry point ─────────────────────────────────────────────────

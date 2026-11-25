@@ -49,3 +49,19 @@ def test_dead_letter_handling(mock_celery_task, deterministic_data):
     dead_letter_queue.append(deterministic_data)
     assert len(dead_letter_queue) == 1
     assert dead_letter_queue[0] == deterministic_data
+
+
+def test_bulk_sla_lock_job_id_contract():
+    from app.tasks.sla_tasks import _bulk_sla_lock_job_id as key
+
+    base = {"device_ids": ["b", "a", "c"], "period": "2026-01"}
+    # Same set in a different order coalesces.
+    assert key(base) == key({"device_ids": ["c", "a", "b"], "period": "2026-01"})
+    # Different period or device set stays independent.
+    assert key(base) != key({**base, "period": "2026-02"})
+    assert key(base) != key({**base, "device_ids": ["a", "b"]})
+    # Empty / missing device lists are deterministic; duplicates are kept
+    # (not deduplicated) and therefore deterministic but distinct.
+    assert key({"device_ids": [], "period": "p"}) == key({"period": "p"})
+    assert key({"device_ids": ["a", "a"], "period": "p"}) == key({"device_ids": ["a", "a"], "period": "p"})
+    assert key({"device_ids": ["a", "a"], "period": "p"}) != key({"device_ids": ["a"], "period": "p"})

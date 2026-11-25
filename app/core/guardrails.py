@@ -16,6 +16,9 @@ from app.utils.correlation import get_or_generate_correlation_id
 #: Maximum accepted request body size (10 MB).
 MAX_CONTENT_LENGTH = 10 * 1024 * 1024
 
+#: Maximum number of parts accepted in a multipart request.
+MAX_MULTIPART_FIELDS = 100
+
 #: Responses larger than this are passed through unwrapped, so the envelope
 #: interceptor never buffers an unbounded body.
 MAX_ENVELOPE_BUFFER_BYTES = 8 * 1024 * 1024
@@ -46,6 +49,14 @@ async def check_payload_size(request: Request):
     declared = parse_content_length(request.headers.get("content-length"))
     if declared is not None and declared > MAX_CONTENT_LENGTH:
         raise HTTPException(status_code=413, detail="Payload too large")
+    content_type = request.headers.get("content-type", "")
+    if content_type.lower().startswith("multipart/form-data") and "boundary=" in content_type:
+        boundary = content_type.split("boundary=", 1)[1].split(";")[0].strip().strip('"')
+        body = await request.body()
+        # The closing delimiter also starts with the boundary, so subtract it.
+        parts = body.count(b"--" + boundary.encode("latin-1")) - 1
+        if parts > MAX_MULTIPART_FIELDS:
+            raise HTTPException(status_code=413, detail="Too many multipart fields")
 
 
 def _scope_header(scope: dict, name: bytes) -> Optional[str]:

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.api.pagination import page_number, page_size as page_size_query
 from app.db.session import get_db
 from app.models.payment import (
     CursorPage,
@@ -101,10 +102,10 @@ class ReconciliationHistoryResponse(BaseModel):
 
 @router.get("/", response_model=PaginatedPaymentResponse)
 def list_payments(
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page: int = page_number(),
+    page_size: int = page_size_query(),
     cursor: Optional[str] = Query(default=None),
-    limit: int = Query(default=20, ge=1, le=100),
+    limit: int = page_size_query(default=20, maximum=100),
     status: Optional[str] = None,
     type: Optional[str] = None,
     outage_id: Optional[str] = None,
@@ -186,6 +187,30 @@ def get_accounting_report(
         media_type=media_type,
         headers={"Content-Disposition": f"attachment; filename=accounting_report_{datetime.utcnow().strftime('%Y%m%d')}.{file_extension}"}
     )
+
+
+class SettlementAsset(BaseModel):
+    """An asset the payment pipeline can settle in (Issue #883)."""
+
+    code: str = Field(..., description="Asset code, e.g. XLM or USDC")
+    issuer: Optional[str] = Field(None, description="Issuer account for non-native assets")
+    native: bool = Field(..., description="True for the native XLM asset")
+
+
+@router.get("/assets", response_model=List[SettlementAsset])
+def list_settlement_assets(current_user=Depends(require_engineer)):
+    """List configured settlement assets and their issuers (Issue #883)."""
+    assets = [SettlementAsset(code="XLM", issuer=None, native=True)]
+    code = settings.PAYMENT_ASSET_CODE.strip()
+    if code and code != "XLM":
+        assets.append(
+            SettlementAsset(
+                code=code,
+                issuer=settings.PAYMENT_ASSET_ISSUER.strip() or None,
+                native=False,
+            )
+        )
+    return assets
 
 
 @router.get("/ping", response_model=EnvelopeResponse)
@@ -467,7 +492,15 @@ def provider_callback(
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     if effective_nonce:
-        if _is_replay(effective_nonce):
+        try:
+            replayed = _is_replay(effective_nonce)
+        except Exception:
+            audit_log.log(
+                "callback_rejected_nonce_store_unavailable",
+                {"transaction_id": payload.transaction_id, "provider_ref": payload.provider_ref},
+            )
+            raise HTTPException(status_code=503, detail="Replay protection storage unavailable")
+        if replayed:
             audit_log.log(
                 "callback_rejected_replay",
                 {

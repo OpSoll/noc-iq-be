@@ -4,6 +4,7 @@ import json
 from typing import Iterable, Iterator, List, Optional
 
 from app.models.outage import Outage
+from app.utils.csv_safety import sanitize_csv_row
 
 
 def _serialize_outage(outage: Outage) -> dict:
@@ -73,7 +74,7 @@ def _csv_row(outage: Outage) -> dict:
     out["affected_services"] = json.dumps(row.get("affected_services", []))
     out["location"] = json.dumps(row.get("location"))
     out["sla_status"] = json.dumps(row.get("sla_status"))
-    return out
+    return sanitize_csv_row(out)
 
 
 def export_outages(

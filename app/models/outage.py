@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, computed_field, field_validator
 
 
 
@@ -56,6 +56,23 @@ class Outage(BaseModel):
             v = v.astimezone(timezone.utc)
         return v
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def duration_minutes(self) -> Optional[int]:
+        """Derived outage duration in minutes.
+
+        Computed from ``resolved_at - detected_at`` for resolved outages.
+        Returns ``None`` while the outage is still open/unresolved so clients
+        do not need to recompute the interval themselves. The value is kept
+        consistent with the ``mttr_minutes`` used by SLA calculations (same
+        timestamp delta, floored to whole minutes, never negative).
+        """
+        if self.resolved_at is None:
+            return None
+        delta = self.resolved_at - self.detected_at
+        minutes = int(delta.total_seconds() // 60)
+        return max(0, minutes)
+
 
 class PaginatedOutages(BaseModel):
     model_config = ConfigDict(
@@ -72,11 +89,11 @@ class PaginatedOutages(BaseModel):
                         "resolved_at": "2023-10-01T12:45:00Z",
                         "description": "Fiber cut",
                         "affected_services": ["4G"],
-                        "mttr_minutes": 45,
+                        "duration_minutes": 45,
                         "assigned_to": None,
                         "created_by": "user1",
                         "location": {"latitude": 40.7128, "longitude": -74.0060},
-                        "sla_status": "met"
+                        "sla_status": {"status": "met", "mttr_minutes": 45, "threshold_minutes": 60, "time_remaining_minutes": 15}
                     }
                 ],
                 "total": 1,
@@ -119,4 +136,3 @@ class BulkResolveOutageResponse(BaseModel):
     success_count: int = Field(..., description="Number of outages successfully resolved")
     failure_count: int = Field(..., description="Number of outages that failed to resolve")
     resolution_notes: str = Field("", description="Resolution notes applied to the batch")
-

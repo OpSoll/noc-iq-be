@@ -2,16 +2,21 @@
 
 Exposes ``GET /api/v1/health/detailed`` with database, Redis,
 Celery worker heartbeat and Stellar operator wallet balance status.
+Also exposes ``GET /api/v1/health/settings`` for admin-only runtime
+configuration inspection (issue #994).
 """
 
 import logging
+import os
 from datetime import datetime
+from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from app.core.config import settings
+from app.core.security import require_admin
 from app.db.session import engine
 from app.services.stellar.balance_monitor import read_wallet_health
 from app.tasks.worker_health import check_worker_health, read_worker_health
@@ -19,6 +24,10 @@ from app.tasks.worker_health import check_worker_health, read_worker_health
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
+
+# Issue #890: captured once at import so every request reports the same start
+# time and a monotonically growing uptime.
+_PROCESS_STARTED_AT = datetime.utcnow()
 
 
 def _check_database() -> bool:
@@ -92,9 +101,13 @@ def detailed_health() -> JSONResponse:
     all_healthy = db_ok and redis_ok and broker_ok and workers.get("status") != "down"
     status = "ok" if all_healthy else "degraded"
 
+    now = datetime.utcnow()
     payload = {
         "status": status,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": now.isoformat(),
+        # Issue #890: how long this process has been running.
+        "uptime_seconds": round((now - _PROCESS_STARTED_AT).total_seconds(), 3),
+        "started_at": _PROCESS_STARTED_AT.isoformat(),
         "dependencies": {
             "database": "ok" if db_ok else "down",
             "redis": "ok" if redis_ok else "down",
@@ -108,3 +121,129 @@ def detailed_health() -> JSONResponse:
         "wallet": _wallet_health(),
     }
     return JSONResponse(status_code=200 if all_healthy else 503, content=payload)
+
+
+# ---------------------------------------------------------------------------
+# Issue #994: Settings snapshot endpoint for admins
+# ---------------------------------------------------------------------------
+
+# Secret setting names that must never be exposed in the snapshot.
+_SECRET_SETTING_NAMES: set[str] = {
+    "SECRET_KEY",
+    "JWT_SECRET_KEY",
+    "API_KEY",
+    "STELLAR_POOL_SECRET_KEY",
+    "STELLAR_OPERATOR_SECRET_ENCRYPTED",
+    "STELLAR_KEY_ENCRYPTION_KEY",
+    "PAYMENT_WEBHOOK_SECRET",
+    "CONTRACT_CANONICAL_SALT",
+    "WORKER_ALERT_WEBHOOK_URL",
+    "WALLET_ALERT_WEBHOOK_URL",
+}
+
+# Property names that are computed (not env-set) and safe to expose.
+_SAFE_PROPERTIES: set[str] = {"horizon_url", "friendbot_url", "supports_friendbot", "monitored_wallet_address"}
+
+
+def _build_settings_snapshot() -> Dict[str, Any]:
+    """Build a grouped, non-secret snapshot of runtime settings.
+
+    Issue #994: admins need to inspect non-secret runtime configuration.
+    Secret values are excluded entirely (never masked) so they cannot leak
+    through logs, API responses, or downstream consumers.
+    """
+    all_fields = settings.model_fields.keys()
+
+    # Collect all non-secret model field values.
+    safe_values: Dict[str, Any] = {}
+    for name in sorted(all_fields):
+        if name in _SECRET_SETTING_NAMES:
+            continue
+        try:
+            value = getattr(settings, name)
+        except Exception:
+            continue
+        # Skip callables and dunder attributes.
+        if callable(value):
+            continue
+        safe_values[name] = value
+
+    # Add safe computed properties.
+    for prop in sorted(_SAFE_PROPERTIES):
+        try:
+            safe_values[prop] = getattr(settings, prop)
+        except Exception:
+            pass
+
+    # Group settings by logical section so the response is easy to navigate.
+    _SECTION_PREFIXES: list[tuple[str, tuple[str, ...]]] = [
+        ("celery", ("CELERY_",)),
+        ("webhook", ("WEBHOOK_",)),
+        ("wallet", ("WALLET_",)),
+        ("payment", ("PAYMENT_",)),
+        ("stellar", ("STELLAR_",)),
+        ("bridge", ("BRIDGE_",)),
+        ("contract", ("CONTRACT_", "ALLOWED_CONTRACT_")),
+        ("job", ("JOB_",)),
+        ("db", ("DB_", "DATABASE_")),
+        ("auth", ("AUTH_",)),
+        ("metrics", ("METRICS_", "OTEL_")),
+        ("migration", ("MIGRATION_",)),
+        ("rate_limit", ("RATE_LIMIT_",)),
+        ("startup", ("STARTUP_",)),
+    ]
+
+    grouped: Dict[str, Any] = {}
+    ungrouped: Dict[str, Any] = {}
+
+    for key, value in sorted(safe_values.items()):
+        placed = False
+        for section, prefixes in _SECTION_PREFIXES:
+            if any(key.startswith(prefix) for prefix in prefixes):
+                grouped.setdefault(section, {})[key] = value
+                placed = True
+                break
+        if not placed:
+            ungrouped[key] = value
+
+    if ungrouped:
+        grouped["general"] = ungrouped
+
+    # Sort each section for deterministic output.
+    return {section: dict(sorted(items.items())) for section, items in grouped.items()}
+
+
+@router.get("/health/version")
+def get_build_version() -> Dict[str, str]:
+    """Return the configured version plus optional build metadata (Issue #891).
+
+    ``commit`` and ``build_time`` are read from the deployment environment and
+    omitted when unset. Only these public identifiers are returned; no secret
+    settings are exposed.
+    """
+    payload: Dict[str, str] = {"version": settings.VERSION}
+    commit = os.environ.get("GIT_COMMIT") or os.environ.get("BUILD_COMMIT")
+    build_time = os.environ.get("BUILD_TIME")
+    if commit:
+        payload["commit"] = commit
+    if build_time:
+        payload["build_time"] = build_time
+    return payload
+
+
+@router.get("/health/settings")
+def get_settings_snapshot(current_user=Depends(require_admin)) -> Dict[str, Any]:
+    """Return a non-secret, grouped snapshot of runtime settings.
+
+    Issue #994: admins cannot inspect non-secret runtime configuration.
+    This endpoint returns all non-secret settings grouped by logical
+    section (Celery, webhooks, payments, Stellar, etc.).
+
+    **Admin-only.** Secret settings (SECRET_KEY, JWT_SECRET_KEY,
+    API_KEY, encryption keys, signing secrets) are excluded entirely.
+
+    Returns:
+        A dictionary with section names as keys, each containing
+        a sorted dictionary of setting name → value pairs.
+    """
+    return _build_settings_snapshot()

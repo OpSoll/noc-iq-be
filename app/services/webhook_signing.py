@@ -36,7 +36,7 @@ Webhooks include an explicit timestamp in the payload (`timestamp` field) for:
 
 import hmac
 import hashlib
-from typing import Optional, Tuple
+from typing import Any, Mapping, Optional, Tuple
 
 
 # Current signature algorithm version
@@ -95,27 +95,6 @@ def build_signature_header(secret: str, payload: str, timestamp: int) -> str:
     return f"t={timestamp},v1={sig_hex}"
 
 
-def parse_signature_header(header_value: str) -> dict:
-    """Parse X-Webhook-Signature header in t=,v1= format.
-
-    Args:
-        header_value: The raw signature header string
-
-    Returns:
-        Dict with 'timestamp' (int) and 'signature' (str) keys.
-        Returns empty dict if parsing fails.
-    """
-    result = {}
-    if not header_value:
-        return result
-    parts = [p.strip() for p in header_value.split(",")]
-    for part in parts:
-        if "=" in part:
-            key, val = part.split("=", 1)
-            result[key.strip()] = val.strip()
-    return result
-
-
 def verify_signature_header(
     secret: str,
     payload: str,
@@ -140,7 +119,10 @@ def verify_signature_header(
     """
     import time as _time
 
-    parsed = parse_signature_header(header_value)
+    try:
+        parsed = parse_signature_header(header_value)
+    except AmbiguousSignatureHeaderError:
+        return False
     if "t" not in parsed or "v1" not in parsed:
         return False
 
@@ -246,25 +228,52 @@ def verify_with_grace_window(
         return True
     return False
 
+class AmbiguousSignatureHeaderError(ValueError):
+    """Raised when a signature header contains conflicting duplicate values."""
+
+
 def parse_signature_header(header_value: str) -> dict:
-    """Strictly parse and canonicalize webhook signature header (BE-W5-040).
-    
-    Expected format: `sha256=abcdef123` or multiple parts `t=123, v1=abc, sha256=def`.
-    Strips whitespaces and canonicalizes the signature header.
-    
-    Args:
-        header_value: The raw signature header string
-        
-    Returns:
-        A dictionary of parsed key-value pairs from the header.
+    """Strictly parse and canonicalize a webhook signature header.
+
+    Component names are lowercased so mixed-case headers verify identically.
+    Conflicting duplicate components are rejected instead of letting the last
+    value win.
     """
-    result = {}
+    result: dict[str, str] = {}
     if not header_value:
         return result
-        
-    parts = [p.strip() for p in header_value.split(",")]
-    for part in parts:
-        if "=" in part:
-            key, val = part.split("=", 1)
-            result[key.strip()] = val.strip()
+
+    for part in str(header_value).split(","):
+        if "=" not in part:
+            continue
+        key, val = part.split("=", 1)
+        canonical_key = key.strip().lower()
+        canonical_value = val.strip()
+        if not canonical_key:
+            continue
+        if canonical_key in result and result[canonical_key] != canonical_value:
+            raise AmbiguousSignatureHeaderError(
+                f"Conflicting duplicate signature component: {canonical_key}"
+            )
+        result[canonical_key] = canonical_value
     return result
+
+
+def resolve_signature_header(headers: Mapping[str, Any]) -> Optional[str]:
+    """Return the single webhook signature header value from an incoming header map.
+
+    Header names are compared case-insensitively. Conflicting duplicates are
+    rejected before a payload can be dispatched.
+    """
+    values: list[str] = []
+    for name, value in headers.items():
+        if str(name).strip().lower() != "x-webhook-signature":
+            continue
+        normalized = str(value).strip()
+        if normalized and normalized not in values:
+            values.append(normalized)
+    if not values:
+        return None
+    if len(values) > 1:
+        raise AmbiguousSignatureHeaderError("Conflicting duplicate webhook signature headers")
+    return values[0]

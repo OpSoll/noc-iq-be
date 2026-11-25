@@ -21,7 +21,9 @@ from app.models.sla import (
 )
 from app.repositories.sla_repository import VALID_BUCKETS, SLARepository
 from app.services.sla import SLACalculator
+from app.services.sla.sla_calculator import SLA_REASON_CODES
 from app.services.sla.config import get_all_config, get_config_for_severity, update_config_for_severity
+from app.services.sla.tiers import SLATier, SLATIER_CONFIG
 from app.services.sla_service import compute_device_sla, simulate_threshold_change
 from app.services.sla_metric_registry import list_metrics
 from app.services.audit_log import audit_log
@@ -62,6 +64,30 @@ class SLASummaryResponse(BaseModel):
     is_empty: bool = Field(..., description="True when no metric rows matched the window")
 
 
+class SLAReasonCode(BaseModel):
+    """A reason code the SLA calculator can emit (Issue #881)."""
+
+    code: str = Field(..., description="Reason code value")
+    description: str = Field(..., description="When the calculator emits this code")
+
+
+_REASON_CODE_DESCRIPTIONS = {
+    "mttr_exceeded": "MTTR exceeded the severity threshold; a penalty applies",
+    "met_exceptional": "SLA met with an exceptional performance ratio",
+    "met_excellent": "SLA met with an excellent performance ratio",
+    "met_good": "SLA met within the threshold",
+}
+
+
+@router.get("/reason-codes", response_model=List[SLAReasonCode])
+def list_sla_reason_codes(current_user=Depends(require_engineer)):
+    """List the canonical SLA reason codes produced by the calculator (Issue #881)."""
+    return [
+        SLAReasonCode(code=code, description=_REASON_CODE_DESCRIPTIONS[code])
+        for code in SLA_REASON_CODES
+    ]
+
+
 def _invalidate_analytics_cache() -> None:
     """Invalidate all analytics cache keys after a mutating write (#157)."""
     _dashboard_cache.invalidate_prefix("dashboard_kpis_")
@@ -100,6 +126,36 @@ def get_sla_status(
     if apply_etag(response, request, payload.model_dump(mode="json")) is None:
         return Response(status_code=304)
     return payload
+
+
+class SLARatingTier(BaseModel):
+    """A discoverable SLA availability tier (Issue #882)."""
+
+    tier: str = Field(..., description="Machine-readable tier name")
+    availability_threshold: float = Field(..., description="Guaranteed monthly availability (%)")
+    penalty_rate: float = Field(..., description="Penalty credits per percentage point shortfall")
+    description: str = Field(..., description="Human-readable meaning of the tier")
+
+
+_RATING_DESCRIPTIONS = {
+    SLATier.TIER_1: "Mission critical: 99.99% monthly availability target",
+    SLATier.TIER_2: "Business critical: 99.9% monthly availability target",
+    SLATier.TIER_3: "Standard: 99.0% monthly availability target",
+}
+
+
+@router.get("/ratings", response_model=List[SLARatingTier])
+def list_sla_ratings(current_user=Depends(require_engineer)):
+    """List the ordered SLA rating tiers and what each one means (Issue #882)."""
+    return [
+        SLARatingTier(
+            tier=config.tier.value,
+            availability_threshold=config.availability_threshold,
+            penalty_rate=config.penalty_rate,
+            description=_RATING_DESCRIPTIONS[config.tier],
+        )
+        for config in (SLATIER_CONFIG[tier] for tier in SLATier)
+    ]
 
 
 class SimulateThresholdRequest(BaseModel):
@@ -593,3 +649,86 @@ async def get_sla_summary(
                 "retryable": True
             }
         )
+
+
+class SLAPerformanceResponse(BaseModel):
+    total_incidents: int = Field(..., description="Total number of resolved incidents")
+    average_mttr_minutes: float = Field(..., description="Average Mean Time To Resolution in minutes")
+    p50_mttr_minutes: Optional[float] = Field(None, description="50th percentile (median) MTTR in minutes")
+    p95_mttr_minutes: Optional[float] = Field(None, description="95th percentile MTTR in minutes")
+
+def compute_percentile(sorted_values: List[float], percentile: float) -> Optional[float]:
+    """Computes the given percentile from a sorted list of floats using linear interpolation."""
+    if not sorted_values:
+        return None
+    
+    k = (len(sorted_values) - 1) * percentile
+    f = math.floor(k)
+    c = math.ceil(k)
+    
+    if f == c:
+        return sorted_values[int(k)]
+    
+    d0 = sorted_values[int(f)] * (c - k)
+    d1 = sorted_values[int(c)] * (k - f)
+    return d0 + d1
+
+def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerformanceResponse:
+    """
+    Computes SLA performance metrics including total incidents, average MTTR,
+    and p50/p95 percentiles with null safety on empty datasets. (#922)
+    """
+    if not resolution_times_minutes:
+        return SLAPerformanceResponse(
+            total_incidents=0,
+            average_mttr_minutes=0.0,
+            p50_mttr_minutes=None,
+            p95_mttr_minutes=None
+        )
+
+    sorted_times = sorted(resolution_times_minutes)
+    total = len(sorted_times)
+    avg_mttr = sum(sorted_times) / total
+
+    p50 = compute_percentile(sorted_times, 0.50)
+    p95 = compute_percentile(sorted_times, 0.95)
+
+    return SLAPerformanceResponse(
+        total_incidents=total,
+        average_mttr_minutes=round(avg_mttr, 2),
+        p50_mttr_minutes=round(p50, 2) if p50 is not None else None,
+        p95_mttr_minutes=round(p95, 2) if p95 is not None else None
+    )
+
+
+class SLAPerformanceResponseV2(BaseModel):
+    total_incidents: int = Field(0, description="Total number of resolved incidents", example=0)
+    average_mttr_minutes: float = Field(0.0, description="Average Mean Time To Resolution in minutes", example=0.0)
+    p50_mttr_minutes: Optional[float] = Field(None, description="50th percentile (median) MTTR in minutes", example=None)
+    p95_mttr_minutes: Optional[float] = Field(None, description="95th percentile MTTR in minutes", example=None)
+    is_empty: bool = Field(True, description="Indicates whether the response window contains no recorded data (distinct from errors)", example=True)
+
+def calculate_sla_performance(resolution_times_minutes: List[float]) -> SLAPerformanceResponse:
+    """
+    Computes SLA performance metrics with explicit empty-state semantics (#925).
+    Returns a stable payload with `is_empty = True` for empty data windows.
+    """
+    if not resolution_times_minutes:
+        return SLAPerformanceResponse(
+            total_incidents=0,
+            average_mttr_minutes=0.0,
+            p50_mttr_minutes=None,
+            p95_mttr_minutes=None,
+            is_empty=True
+        )
+
+    total = len(resolution_times_minutes)
+    avg_mttr = sum(resolution_times_minutes) / total
+
+    return SLAPerformanceResponse(
+        total_incidents=total,
+        average_mttr_minutes=round(avg_mttr, 2),
+        p50_mttr_minutes=round(sorted(resolution_times_minutes)[int((total - 1) * 0.5)], 2),
+        p95_mttr_minutes=round(sorted(resolution_times_minutes)[int((total - 1) * 0.95)], 2),
+        is_empty=False
+    )

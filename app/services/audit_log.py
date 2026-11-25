@@ -255,7 +255,7 @@ class AuditLogService:
         audit_entry = AuditLogORM(
             event_type=event_type,
             email=email,
-            actor_id=actor_id,
+            actor_id=actor_id or "system",  # missing actor => system activity
             correlation_id=correlation_id,
             details=cls._sanitize(details),
             created_at=datetime.now(timezone.utc),

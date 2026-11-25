@@ -205,3 +205,11 @@ def test_verify_sla_result_id_does_not_raise():
     assert verify_sla_result_id({"memo_type": "id", "memo": "4271"}, 4271) is True
     assert verify_sla_result_id({"memo_type": "id", "memo": "4272"}, 4271) is False
     assert verify_sla_result_id({}, 4271) is False
+
+
+def test_xdr_validator_rejects_oversized_memo_and_accepts_valid():
+    from src.tx.xdr_validator import validate_xdr
+
+    with pytest.raises(MemoValidationError):
+        validate_xdr("x" * (MEMO_TEXT_MAX_BYTES + 1))
+    assert validate_xdr("x" * MEMO_TEXT_MAX_BYTES) is True

@@ -590,6 +590,29 @@ AGGREGATION_LATENCY_THRESHOLD_MS=500 EXPORT_LATENCY_THRESHOLD_MS=1000 \
 
 Benchmark results are written to `tests/benchmark-results.json` and uploaded as a named artifact per commit SHA, enabling trend comparison across releases.
 
+### Pre-commit hooks
+
+Install the pre-commit hooks so formatting and lint checks run on staged files before every commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+The configuration is `./.pre-commit-config.yaml` and includes:
+
+- **black** for formatting
+- **isort** for import ordering
+- **flake8** for linting
+- **mypy** for type checking
+- **check-yaml**, **end-of-file-fixer**, **trailing-whitespace** for repository hygiene
+
+Run the hooks manually on all files with:
+
+```bash
+pre-commit run --all-files
+```
+
 ### Release Drift Check
 
 `scripts/check_release_drift.py` cross-checks three sources for synchronisation:
@@ -635,6 +658,42 @@ The script executes `pg_dump`, restores the dump into a temporary database,
 and compares row counts for the core tables (`outages`, `sla_results`,
 `payment_transactions`) between the source and the restored database. It logs
 each step and exits non-zero if any row count mismatches.
+
+### Test fixtures and secrets
+
+- Use only fake values in tests. The Stellar mock client
+  (`tests/mocks/stellar.py`, `MockStellarClient`) uses placeholder public
+  addresses such as `GABC1234567890ABCDEF`; reuse those or similar obviously
+  fake `G...` values.
+- `.env.example` contains placeholders only (for example
+  `PAYMENT_WEBHOOK_SECRET=[GENERATE_SECURE_RANDOM_STRING_FOR_WEBHOOK_SIG]`).
+  For local runs, generate your own throwaway secret; do not copy values from
+  a deployed environment.
+- Prohibited: Stellar secret keys (`S...`) of any real account, including
+  testnet accounts you also use elsewhere; real or shared dev/staging/prod
+  webhook secrets, `SECRET_KEY` or `JWT_SECRET_KEY` values; and encrypted
+  operator key values (`STELLAR_OPERATOR_SECRET_ENCRYPTED`) from real
+  environments.
+- Keep local values in an untracked `.env`; never commit it or paste it into
+  PRs or issues. This keeps the documented local setup compatible with CI,
+  which should only need the placeholders from `.env.example`.
+
+### Dependency exceptions (security scan)
+
+The `Security Safety Scan` workflow (`.github/workflows/safety.yml`) runs
+`safety check -r requirements.txt`. Any suppression of a finding must be
+temporary and owned:
+
+- **Add:** in the PR that adds it, record the advisory ID, the package, a
+  written justification (why it is not exploitable or no fix exists), a named
+  owner, and an expiry date.
+- **Review:** the owner re-checks the exception on or before its expiry and
+  either removes it (preferred, by upgrading the dependency) or renews it with
+  an updated justification and new expiry in a new PR.
+- **Remove:** delete the exception once a fixed version is in
+  `requirements.txt`, or when it expires.
+- Exceptions without an owner or past their expiry should not be merged or
+  kept.
 
 ---
 
